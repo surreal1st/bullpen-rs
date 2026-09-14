@@ -9,6 +9,7 @@ pub mod permissions;
 pub mod prompt;
 mod rooms;
 mod routes;
+pub mod rules;
 pub mod runs;
 pub mod spend;
 mod tools;

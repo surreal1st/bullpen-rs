@@ -26,6 +26,7 @@ use uuid::Uuid;
 use crate::approvals;
 use crate::changes::{ChangeBus, ChangeKind};
 use crate::permissions::{self, Decision};
+use crate::rules;
 use crate::tools::{self, RoomHook, ToolBox};
 
 /// How many tool steps a single run may take before it is stopped rather
@@ -775,10 +776,79 @@ were doing unless he changed it."
                 // every run that ever made a room, over a tool nobody has
                 // ever asked Josh to gate; this documented narrowing runs it
                 // free instead, same as before S2-03 existed.
-                let decision = match perms.get(call.name.as_str()).copied() {
+                let mut decision = match perms.get(call.name.as_str()).copied() {
                     Some(base) => permissions::decide_call(base, &call.name, &call.arguments),
                     None => Decision::Allow,
                 };
+
+                // S2-07: a call the grid says "ask" to is checked against
+                // the bot's own auto-review rules before it parks - a rule
+                // can turn this into an allow, a deny, or leave it asking.
+                // An "allow"/"deny" from the grid above is never
+                // second-guessed here, same as `rules.ts`'s own doc.
+                //
+                // 🔴 Does NOT go through `rules::apply_rules` whole: this
+                // loop iteration's future is inside `run_turn`, which
+                // `start`/`resume` hand to `tokio::spawn` and so must stay
+                // `Send`. Holding a `&Db` across `classify`'s network await
+                // would break that (rusqlite's `Connection`, so `Db`, is
+                // `!Sync`, and a `&T` is `Send` only when `T: Sync`) -
+                // exactly the reason `drive`'s own routing call above locks
+                // the db only for the synchronous parts either side of its
+                // await. `rules::apply_rules` stays as the whole-cloth
+                // version for a caller that isn't spawned, e.g. a test.
+                if decision == Decision::Ask {
+                    let bot_rules = {
+                        let db = self.db();
+                        rules::list_rules_for(&db, bot_id).unwrap_or_else(|err| {
+                            tracing::error!(
+                                "run {run_id}: failed to load auto-review rules for {bot_id}: {err}"
+                            );
+                            Vec::new()
+                        })
+                    };
+                    if !bot_rules.is_empty() {
+                        let matched_ids = rules::classify(
+                            self.port.as_ref(),
+                            &bot_rules,
+                            &call.name,
+                            &call.arguments,
+                        )
+                        .await;
+                        let resolved =
+                            rules::resolve_decision(&bot_rules, &matched_ids, &call.name, trigger);
+
+                        if let Some(id) = &resolved.rule_id {
+                            {
+                                let db = self.db();
+                                if let Err(err) = rules::record_hit(&db, id) {
+                                    tracing::error!(
+                                        "run {run_id}: failed to record a hit for rule {id}: {err}"
+                                    );
+                                }
+                            }
+                            // U7: "the approval card (or the trace) says
+                            // which rule decided." This run's own trace,
+                            // via the existing `notice` event - no new wire
+                            // shape.
+                            self.emit(
+                                run_id,
+                                RunEvent::Notice {
+                                    message: format!(
+                                        "Rule \"{}\" -> {}",
+                                        resolved.rule_text.as_deref().unwrap_or(""),
+                                        match resolved.decision {
+                                            Decision::Deny => "never",
+                                            Decision::Allow => "allow",
+                                            Decision::Ask => "ask",
+                                        }
+                                    ),
+                                },
+                            );
+                        }
+                        decision = resolved.decision;
+                    }
+                }
 
                 match decision {
                     Decision::Ask => {
