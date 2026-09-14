@@ -503,6 +503,13 @@ impl RunManager {
         room: bool,
         model: &str,
     ) -> ToolBox {
+        // A-F6: the same `permissions_for_run` resolution `run_turn` does
+        // for its own decision loop, so the spec list offered and the
+        // decisions made against it agree on what this run is allowed.
+        let perms = {
+            let db = self.db();
+            permissions::permissions_for_run(&db, bot_id, trigger).unwrap_or_default()
+        };
         tools::build(tools::BuildParams {
             db: Arc::clone(&self.db),
             port: Arc::clone(&self.port),
@@ -512,6 +519,7 @@ impl RunManager {
             room,
             initial_model: model.to_string(),
             changes: self.changes.clone(),
+            perms,
         })
     }
 
@@ -806,20 +814,34 @@ were doing unless he changed it."
             // queued behind it are handed to `Outcome::Paused` rather than
             // run without a decision of its own.
             for (idx, call) in calls.iter().enumerate() {
-                // F4: a tool name absent from the permission map parks the
-                // run, same as `permissions::decide` does for a single
-                // lookup (`permissions.rs`'s own `unwrap_or(Decision::Ask)`)
-                // and the module doc's "these rules are the only authority".
-                // `create_room`/`add_to_room` now carry explicit `Allow` rows
-                // in `default_decisions()`, so this arm is no longer their
-                // path - it exists for whatever S3+ tool gets added to
-                // `tools/mod.rs`'s `build` without a matching permission row,
-                // and it has to fail closed: an unrecognised tool running
-                // free, unattended, with no log line and no test that would
-                // go red, is the failure this closes.
+                // F4/A-F6: a tool name absent from the permission map is,
+                // now that `tools::build` filters its own spec list by
+                // permission, also always absent from `toolbox.specs` -
+                // the only way to reach this arm is a name the model was
+                // never offered, whether that is a genuine hallucination
+                // or a tool `default_decisions()` has no row for at all.
+                // TS denies that outright rather than parking the run
+                // (`runs.ts:1047`: "the run loop denies any call whose
+                // name is not in toolbox.specs"), with the same "Not
+                // allowed" wording the grid's own deny uses - a call
+                // nothing ever offered gets no approval prompt either.
+                // Kept as a two-way check rather than always denying: a
+                // name IN `toolbox.specs` but somehow missing its own
+                // `perms` row (a future S3+ tool added to `build` without
+                // a matching `default_decisions()` entry) still parks for
+                // Josh, same as `permissions::decide`'s own
+                // `unwrap_or(Decision::Ask)` and the module doc's "these
+                // rules are the only authority" - it must not run
+                // unapproved just because it slipped past the filter.
                 let mut decision = match perms.get(call.name.as_str()).copied() {
                     Some(base) => permissions::decide_call(base, &call.name, &call.arguments),
-                    None => Decision::Ask,
+                    None => {
+                        if toolbox.specs.iter().any(|spec| spec.name == call.name) {
+                            Decision::Ask
+                        } else {
+                            Decision::Deny
+                        }
+                    }
                 };
 
                 // S2-07: a call the grid says "ask" to is checked against

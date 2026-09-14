@@ -412,18 +412,19 @@ async fn working_says_waiting_for_you_to_approve_shell_while_parked() {
     assert_eq!(arthur.activity, "Waiting for you to approve shell");
 }
 
-// 6. F4: a tool name absent from the permission map entirely parks the run
-//    instead of running free. Run-level rather than a unit test on
-//    `permissions::decide_call` because the defect is in `runs.rs`'s OWN
-//    `match perms.get(...)` arm (the `None` branch), not in that helper -
-//    a name the toolbox itself does not recognise still has to be decided
-//    before it ever reaches the toolbox, so this scripts a call to a name
-//    that is neither in `default_decisions()` nor in `tools/mod.rs`'s
-//    match. Bite: with the `None` arm reverted to `Decision::Allow`, the
-//    toolbox runs it and answers "Unknown tool: ..." instead of parking -
-//    the `ApprovalNeeded` match below never sees that event and panics.
+// 6. S2-F-06/A-F6: a tool name absent from the permission map entirely is
+//    now always absent from `toolbox.specs` too (the spec list is filtered
+//    by permission), so it is denied outright rather than parked - TS's
+//    `runs.ts:1047` denies any call whose name is not in `toolbox.specs`,
+//    with the same "Not allowed" wording the grid's own deny uses, not an
+//    approval prompt for a tool nothing ever offered. Run-level rather
+//    than a unit test on `permissions::decide_call` because the defect
+//    this guards is in `runs.rs`'s OWN `match perms.get(...)` arm (the
+//    `None` branch), not in that helper. Bite: drop the `toolbox.specs`
+//    check back to unconditional `Decision::Ask` and this goes red (the
+//    last event becomes `ApprovalNeeded`, not the deny `ToolResult`).
 #[tokio::test]
-async fn a_tool_call_with_no_permission_row_parks_the_run_instead_of_running_free() {
+async fn a_tool_call_with_no_permission_row_is_denied_and_the_run_finishes() {
     let db = open_db();
     seed_bot(&db, "arthur", "Arthur");
     let conversation_id = own_conversation(&db, "arthur");
@@ -440,7 +441,7 @@ async fn a_tool_call_with_no_permission_row_parks_the_run_instead_of_running_fre
         }],
         vec![
             ModelEvent::Delta {
-                text: "Never got here.".to_string(),
+                text: "Carried on without it.".to_string(),
             },
             ModelEvent::Done {
                 model: "test/model".to_string(),
@@ -462,18 +463,20 @@ async fn a_tool_call_with_no_permission_row_parks_the_run_instead_of_running_fre
 
     let events = drain_until_paused_or_done(manager.subscribe(&run_id)).await;
     assert!(
-        matches!(
-            events.last(),
-            Some(RunEvent::ApprovalNeeded { name, .. }) if name == "totally_unmapped_tool"
-        ),
-        "expected an unmapped tool name to park the run rather than run free, got {events:?}"
+        events.iter().any(|e| matches!(
+            e,
+            RunEvent::ToolResult { name, result }
+                if name == "totally_unmapped_tool"
+                    && result == "Not allowed: totally_unmapped_tool is switched off for you. Carry on without it."
+        )),
+        "expected the grid's own deny wording for a name never offered, got {events:?}"
     );
 
-    assert_eq!(wait_for_status(&db, &run_id, "waiting").await, "waiting");
-    let (_, tool_name, _, status) = pending_approval(&db, &run_id)
-        .expect("expected a pending approval row for the unmapped tool");
-    assert_eq!(tool_name, "totally_unmapped_tool");
-    assert_eq!(status, "pending");
+    assert_eq!(wait_for_status(&db, &run_id, "done").await, "done");
+    assert!(
+        pending_approval(&db, &run_id).is_none(),
+        "a name absent from toolbox.specs must never park the run for approval"
+    );
 }
 
 // ---- 7. F8: a pending approval 25h old is expired by the sweep, and the

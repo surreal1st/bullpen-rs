@@ -365,3 +365,149 @@ fn ask_josh_bad_json_returns_allow() {
     );
     assert_eq!(decision, server::permissions::Decision::Allow);
 }
+
+// ---- F10: a lenient PUT ----
+
+// A client (a stale tab, or an old iOS build) that sends one legacy value
+// ("always", never a real `Decision`) next to a valid one must not lose
+// the valid change too - TS's own `setPermissions` (`permissions.ts:512-
+// 521`) keeps the entries it can parse and drops the rest, where the
+// pre-fix typed `HashMap<String, Decision>` body made serde reject the
+// WHOLE PUT the moment any one value failed to parse.
+#[tokio::test]
+async fn put_with_one_bad_value_keeps_the_good_ones() {
+    let db = {
+        let db = open_db();
+        store::set_password(&db, "test-password").expect("set password");
+        seed_bot(&db, "test-bot", "Test Bot");
+        db
+    };
+
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let overrides = json!({
+        "click": "deny",
+        "shell": "always",
+    });
+
+    let (status, _body) = put_permissions_route(&app, "test-bot", &session, overrides).await;
+    assert_eq!(status, 200, "one bad value must not 400 the whole PUT");
+
+    let (_status, body) = get_permissions_route(&app, "test-bot", &session).await;
+    let perms = body.get("permissions").unwrap().as_object().unwrap();
+    assert_eq!(
+        perms.get("click").and_then(|v| v.as_str()),
+        Some("deny"),
+        "the valid entry alongside the bad one must still be saved"
+    );
+    assert_eq!(
+        perms.get("shell").and_then(|v| v.as_str()),
+        Some("ask"),
+        "the unparseable value must be dropped, leaving shell at its default"
+    );
+}
+
+// ---- B-F9: the route stores only overrides, never the whole merged map ----
+
+// B-F9: the client PUTs back the whole map it got from GET (defaults
+// merged with overrides), and `set_permissions` used to store whatever it
+// was handed wholesale - so the first touch on any one toggle froze every
+// CURRENT default into the bot's row, and a later tightening of
+// `default_decisions()` would never reach it. Storing only the divergence
+// means a map IDENTICAL to `default_decisions()` leaves nothing stored.
+// Bite: revert `set_permissions` to store `permissions` wholesale and the
+// assertion below goes red - the raw column holds all N default entries
+// instead of `{}`.
+#[test]
+fn storing_the_full_default_map_leaves_no_explicit_overrides() {
+    let db = open_db();
+    seed_bot(&db, "test-bot", "Test Bot");
+
+    let defaults = server::permissions::default_decisions();
+    server::permissions::set_permissions(&db, "test-bot", &defaults).expect("set perms");
+
+    let raw: String = db
+        .conn()
+        .query_row(
+            "SELECT permissions FROM bots WHERE id = ?1",
+            ["test-bot"],
+            |row| row.get(0),
+        )
+        .expect("read raw permissions column");
+    let parsed: Value = serde_json::from_str(&raw).expect("parse stored permissions json");
+    assert_eq!(
+        parsed.as_object().map(|o| o.len()),
+        Some(0),
+        "expected no explicit overrides stored, got {raw}"
+    );
+
+    // The merged read-back is still every default, unaffected by nothing
+    // being stored.
+    let merged = server::permissions::get_permissions(&db, "test-bot").expect("get perms");
+    assert_eq!(
+        merged.get("click").copied(),
+        Some(server::permissions::Decision::Allow)
+    );
+}
+
+// ---- T6: the shell session aliases ----
+
+// S10/T6: `shell_open`/`shell_write`/`shell_read` carry no permission row
+// of their own - they take whatever `shell` resolves to unless stored
+// explicitly. Bite: delete the `SHELL_SESSION_TOOLS` loop in
+// `permissions.rs`'s `get_permissions` and this goes red - the three
+// aliases fall back to their own (absent) `default_decisions()` entry
+// instead of following `shell`.
+#[test]
+fn shell_aliases_follow_shells_own_decision_when_not_stored_explicitly() {
+    let db = open_db();
+    seed_bot(&db, "test-bot", "Test Bot");
+
+    let perms = server::permissions::Permissions::from_iter(vec![(
+        "shell".to_string(),
+        server::permissions::Decision::Allow,
+    )]);
+    server::permissions::set_permissions(&db, "test-bot", &perms).expect("set perms");
+
+    let merged = server::permissions::get_permissions(&db, "test-bot").expect("get perms");
+    for alias in ["shell_open", "shell_write", "shell_read"] {
+        assert_eq!(
+            merged.get(alias).copied(),
+            Some(server::permissions::Decision::Allow),
+            "{alias} should follow shell's allow"
+        );
+    }
+}
+
+// T6: an alias stored EXPLICITLY survives, even while `shell` itself is
+// something else.
+#[test]
+fn an_explicit_shell_alias_override_survives_shells_own_decision() {
+    let db = open_db();
+    seed_bot(&db, "test-bot", "Test Bot");
+
+    let perms = server::permissions::Permissions::from_iter(vec![
+        ("shell".to_string(), server::permissions::Decision::Allow),
+        (
+            "shell_read".to_string(),
+            server::permissions::Decision::Deny,
+        ),
+    ]);
+    server::permissions::set_permissions(&db, "test-bot", &perms).expect("set perms");
+
+    let merged = server::permissions::get_permissions(&db, "test-bot").expect("get perms");
+    assert_eq!(
+        merged.get("shell_open").copied(),
+        Some(server::permissions::Decision::Allow)
+    );
+    assert_eq!(
+        merged.get("shell_write").copied(),
+        Some(server::permissions::Decision::Allow)
+    );
+    assert_eq!(
+        merged.get("shell_read").copied(),
+        Some(server::permissions::Decision::Deny),
+        "an explicit alias override must survive shell's own decision"
+    );
+}

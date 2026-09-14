@@ -24,6 +24,8 @@ use model::ladder::Trigger;
 use model::{ModelPort, ModelUsage, ToolSpec};
 use store::Db;
 
+use crate::permissions::{Decision, Permissions};
+
 /// B2: the one guard every tool uses to lock the db. A poisoned `Mutex`
 /// (left behind by a panic under the lock elsewhere) used to mean every
 /// later `.expect("db mutex poisoned")` panicked too, turning one bad
@@ -88,6 +90,13 @@ pub struct BuildParams {
     pub room: bool,
     pub initial_model: String,
     pub changes: crate::changes::ChangeBus,
+    /// A-F6: this run's effective permission map (`permissions_for_run`'s
+    /// result, resolved once for this turn), used to keep a `deny`d tool
+    /// out of `specs` entirely. TS filters the same way at `app.ts:5776`
+    /// ("a model should not be shown a button that will only ever answer
+    /// 'switched off for you'") - offering it anyway means a call that was
+    /// always going to be refused still burns a paid step.
+    pub perms: Permissions,
 }
 
 /// Builds the S1 toolbox for one bot's run. F2: `trigger`/`room` are the
@@ -106,7 +115,14 @@ pub fn build(params: BuildParams) -> ToolBox {
     let room = params.room;
     let initial_model = params.initial_model;
     let changes = params.changes;
-    let specs = vec![
+    let perms = params.perms;
+    // A-F6: a `deny`d tool is dropped from the offered list rather than
+    // offered and refused after the fact - a name absent from `perms`
+    // entirely (no row at all) is kept here, same as TS's `!== "deny"`
+    // filter; `runs.rs`'s tool loop is what fails a truly unrecognised
+    // name closed, by checking THIS list rather than the permission map
+    // alone.
+    let specs: Vec<ToolSpec> = vec![
         say::spec(),
         ask_josh::spec(),
         remember::spec(),
@@ -115,7 +131,10 @@ pub fn build(params: BuildParams) -> ToolBox {
         add_to_room::spec(),
         shell::spec(),
         escalate::spec(),
-    ];
+    ]
+    .into_iter()
+    .filter(|spec| perms.get(spec.name.as_str()).copied() != Some(Decision::Deny))
+    .collect();
 
     let current_model = Arc::new(Mutex::new(initial_model.to_string()));
     let escalated: Arc<Mutex<Option<escalate::Climb>>> = Arc::new(Mutex::new(None));

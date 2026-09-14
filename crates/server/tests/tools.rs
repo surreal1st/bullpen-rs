@@ -14,7 +14,7 @@ mod common;
 
 use std::sync::{Arc, Mutex};
 
-use common::{ScriptedPort, as_port, text_script};
+use common::{ScriptedPort, as_port, run_row, text_script};
 use model::ladder::Trigger;
 use model::{ModelEvent, ModelMessage, ModelUsage, ToolCall};
 use serde_json::json;
@@ -458,5 +458,101 @@ async fn say_tool_recovers_from_poisoned_mutex() {
         tool_result(&events, "say"),
         Some("Said. Josh can see that now. Carry on - this did not end your turn."),
         "got {events:?}"
+    );
+}
+
+// S2-F-06/A-F6: a bot whose grid says `shell: deny` is never OFFERED the
+// shell spec in the first place - `tools::build` filters it out of
+// `toolbox.specs` rather than offering it and denying the call after the
+// fact, so a call never burns a paid step to be told "switched off". Bite:
+// drop the `!= Some(Decision::Deny)` filter in `tools/mod.rs`'s `build`
+// back to an unconditional `vec![...]` and the assertion below goes red -
+// `shell` reappears on the first request's tool list.
+#[tokio::test]
+async fn denied_tool_is_never_offered_in_the_toolbox_spec_list() {
+    let db = open_db();
+    seed_bot(&db, "arthur", "Arthur");
+    let conversation_id = own_conversation(&db, "arthur");
+    seed_user_message(&db, &conversation_id, "run a command");
+
+    {
+        let guard = db.lock().expect("db mutex poisoned");
+        let mut perms = server::permissions::get_permissions(&guard, "arthur").expect("get perms");
+        perms.insert("shell".to_string(), server::permissions::Decision::Deny);
+        server::permissions::set_permissions(&guard, "arthur", &perms).expect("set perms");
+    }
+
+    let port = Arc::new(ScriptedPort::new(vec![text_script("nothing to run")]));
+    let manager = Arc::new(RunManager::new(
+        Arc::clone(&db),
+        Arc::clone(&port) as Arc<dyn model::ModelPort>,
+    ));
+    let run_id = manager.start(StartOptions {
+        bot_id: "arthur".to_string(),
+        conversation_id: conversation_id.clone(),
+        model: "test/model".to_string(),
+        messages: vec![ModelMessage::user("run a command")],
+        trigger: Trigger::Chat,
+        room: false,
+    });
+    drain(manager.subscribe(&run_id)).await;
+
+    let requests = port.requests();
+    let first = requests
+        .first()
+        .expect("expected at least one model request");
+    let names: Vec<&str> = first
+        .tools
+        .as_ref()
+        .expect("expected a tool list on the first request")
+        .iter()
+        .map(|t| t.name.as_str())
+        .collect();
+    assert!(
+        !names.contains(&"shell"),
+        "shell must not be offered once denied, got {names:?}"
+    );
+}
+
+// S2-F-06/A-F6: a scripted call to a tool name absent from `toolbox.specs`
+// (never offered - neither a real tool nor a hallucinated one the grid
+// ever granted) is denied outright, with the grid's own "Not allowed"
+// wording, and the run finishes rather than parking for a decision on a
+// tool nothing ever offered. Bite: the `runs.rs`/`tools/mod.rs` bite for
+// this shape is proved in `tests/approvals.rs`'s
+// `a_tool_call_with_no_permission_row_is_denied_and_the_run_finishes`;
+// this covers the same shape from `tests/tools.rs`'s own toolbox-focused
+// angle.
+#[tokio::test]
+async fn call_to_a_tool_not_in_the_spec_list_is_denied_and_the_run_finishes() {
+    let db = open_db();
+    seed_bot(&db, "arthur", "Arthur");
+    let conversation_id = own_conversation(&db, "arthur");
+    seed_user_message(&db, &conversation_id, "do something odd");
+
+    let port = ScriptedPort::new(vec![
+        tool_call("c1", "delete_everything", "{}".to_string()),
+        text_script("noted"),
+    ]);
+    let manager = Arc::new(RunManager::new(Arc::clone(&db), as_port(port)));
+    let run_id = manager.start(StartOptions {
+        bot_id: "arthur".to_string(),
+        conversation_id: conversation_id.clone(),
+        model: "test/model".to_string(),
+        messages: vec![ModelMessage::user("do something odd")],
+        trigger: Trigger::Chat,
+        room: false,
+    });
+
+    let events = drain(manager.subscribe(&run_id)).await;
+    assert_eq!(
+        tool_result(&events, "delete_everything"),
+        Some("Not allowed: delete_everything is switched off for you. Carry on without it."),
+        "got {events:?}"
+    );
+    let (status, _error) = run_row(&db, &run_id);
+    assert_eq!(
+        status, "done",
+        "an unoffered tool call must not park the run for approval"
     );
 }

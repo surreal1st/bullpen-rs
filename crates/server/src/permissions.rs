@@ -529,16 +529,28 @@ pub fn get_permissions(db: &store::Db, bot_id: &str) -> Result<Permissions, rusq
     Ok(merged)
 }
 
-/// Set the permissions for a bot, storing only valid decisions. Returns the
-/// merged result (defaults + overrides).
+/// Set the permissions for a bot, storing only the entries that differ from
+/// `default_decisions()`. Returns the merged result (defaults + overrides).
+///
+/// B-F9: the client PUTs back the WHOLE merged map it got from `GET`
+/// (defaults merged with any prior overrides), and this used to store
+/// whatever it was handed wholesale - so the first time Josh touched any
+/// one toggle on a bot, every CURRENT default froze into that bot's row as
+/// an explicit override, and a later tightening of `default_decisions()`
+/// would silently never reach a bot he had ever configured. Storing only
+/// the divergence keeps a later default change reaching every bot that
+/// never explicitly overrode it.
 pub fn set_permissions(
     db: &store::Db,
     bot_id: &str,
     permissions: &Permissions,
 ) -> Result<Permissions, rusqlite::Error> {
+    let defaults = default_decisions();
     let mut clean = HashMap::new();
     for (k, v) in permissions {
-        clean.insert(k.clone(), v);
+        if defaults.get(k).copied() != Some(*v) {
+            clean.insert(k.clone(), v);
+        }
     }
 
     let json_str = serde_json::to_string(&clean).unwrap_or_else(|_| "{}".to_string());
