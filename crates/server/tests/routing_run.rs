@@ -13,7 +13,7 @@ mod common;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use common::{ScriptedPort, as_port};
+use common::{ScriptedPort, as_port, drain, own_conversation, seed_bot, seed_user_message};
 use model::ladder::Trigger;
 use model::{
     EventStream, MessageContent, ModelEvent, ModelMessage, ModelPort, ModelRequest, ModelUsage,
@@ -24,33 +24,6 @@ use store::Db;
 
 fn open_db() -> Arc<Mutex<Db>> {
     Arc::new(Mutex::new(Db::open(":memory:").expect("open :memory: db")))
-}
-
-fn seed_bot(db: &Arc<Mutex<Db>>, id: &str, name: &str) {
-    let db = db.lock().expect("db mutex poisoned");
-    db.conn()
-        .execute(
-            "INSERT INTO bots (id, name, purpose, instructions, model, created_at) VALUES (?1, ?2, '', ?3, NULL, '2026-01-01T00:00:00Z')",
-            rusqlite::params![id, name, format!("You are {name}.")],
-        )
-        .expect("seed bot");
-}
-
-fn own_conversation(db: &Arc<Mutex<Db>>, bot_id: &str) -> String {
-    let db = db.lock().expect("db mutex poisoned");
-    store::get_or_create_conversation(&db, bot_id).expect("get_or_create_conversation")
-}
-
-fn seed_user_message(db: &Arc<Mutex<Db>>, conversation_id: &str, text: &str) {
-    let db = db.lock().expect("db mutex poisoned");
-    store::append_message(
-        &db,
-        conversation_id,
-        "user",
-        text,
-        store::NewMessage::default(),
-    )
-    .expect("append user message");
 }
 
 /// Disables the routing classifier on `db` - every test but the routing one
@@ -71,19 +44,6 @@ fn run_row(db: &Arc<Mutex<Db>>, run_id: &str) -> (String, String, f64) {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .expect("read run row")
-}
-
-/// Drains a run's events until `Done`/`Error`, returning everything seen.
-async fn drain(mut rx: tokio::sync::mpsc::UnboundedReceiver<RunEvent>) -> Vec<RunEvent> {
-    let mut seen = Vec::new();
-    while let Some(event) = rx.recv().await {
-        let done = matches!(event, RunEvent::Done { .. } | RunEvent::Error { .. });
-        seen.push(event);
-        if done {
-            break;
-        }
-    }
-    seen
 }
 
 fn tool_result<'a>(events: &'a [RunEvent], tool: &str) -> Option<&'a str> {
@@ -186,6 +146,67 @@ async fn routed_chat_turn_carries_the_notice_and_the_classifiers_cost() {
         classifier_usage.cost_usd,
         reply_usage.cost_usd
     );
+}
+
+// F3: a routed chat turn leaves a `routing_log` row behind it, not just the
+//    notice and the run row's model - the settings card's "Last 20 routings"
+//    list reads this table directly and was permanently empty before this
+//    fix even though the routing feature itself worked (drive's hand-rolled
+//    routing block called `classify_turn` directly and never wrote the log).
+#[tokio::test]
+async fn a_routed_chat_turn_leaves_a_routing_log_row() {
+    let db = open_db(); // routing left at its default: enabled (S2-01).
+    seed_bot(&db, "arthur", "Arthur");
+    let conversation_id = own_conversation(&db, "arthur");
+    seed_user_message(&db, &conversation_id, "write me a migration plan");
+
+    let reason_model = model::ladder::DEFAULT_TIER1.reason;
+    let port = ScriptedPort::new(vec![
+        text_script_with_usage(
+            "work",
+            model::CHEAP_DEFAULT_MODEL,
+            ModelUsage {
+                cost_usd: 0.0007,
+                input_tokens: 120,
+                output_tokens: 1,
+                cached_tokens: 0,
+            },
+        ),
+        text_script_with_usage(
+            "Here is the plan.",
+            reason_model,
+            ModelUsage {
+                cost_usd: 0.0421,
+                input_tokens: 900,
+                output_tokens: 220,
+                cached_tokens: 0,
+            },
+        ),
+    ]);
+
+    let manager = Arc::new(RunManager::new(Arc::clone(&db), as_port(port)));
+    let run_id = manager.start(StartOptions {
+        bot_id: "arthur".to_string(),
+        conversation_id: conversation_id.clone(),
+        model: "cheap/unconfigured-model".to_string(),
+        messages: vec![ModelMessage::user("write me a migration plan")],
+        trigger: Trigger::Chat,
+        room: false,
+    });
+
+    drain(manager.subscribe(&run_id)).await;
+
+    let log = {
+        let db = db.lock().expect("db mutex poisoned");
+        model::routing::list_routing_log(&db, 20).expect("read routing log")
+    };
+    assert_eq!(
+        log.len(),
+        1,
+        "expected the routed turn to leave exactly one routing_log row, got {log:?}"
+    );
+    assert_eq!(log[0].verdict, "work");
+    assert_eq!(log[0].model, reason_model);
 }
 
 // 2. `escalate({kind:"code"})` from an unconfigured (tier-0) model climbs to

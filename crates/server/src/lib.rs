@@ -80,6 +80,15 @@ impl AppState {
         port: Arc<dyn model::ModelPort>,
         catalog: Arc<dyn Catalog>,
     ) -> Self {
+        // F1: `routing_log` is self-creating (same convention as
+        // `rules::ensure_table`), but nothing in production ever called it -
+        // `GET`/`PUT /api/routing` 500'd on a real db with "no such table".
+        // Every `AppState` constructor funnels through here, so this is the
+        // one place a fresh server is guaranteed to pass through before its
+        // first request.
+        if let Err(err) = model::routing::ensure_routing_tables(&db) {
+            tracing::error!("failed to ensure routing_log table exists: {err}");
+        }
         let db = Arc::new(Mutex::new(db));
         let runs = Arc::new(runs::RunManager::new(Arc::clone(&db), port));
         let room_engine = rooms::RoomEngine::install(Arc::clone(&db), Arc::clone(&runs));

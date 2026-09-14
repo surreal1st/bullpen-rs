@@ -15,9 +15,11 @@ mod common;
 use common::seed_session;
 
 fn open_db() -> Db {
-    let db = Db::open(":memory:").expect("open :memory: db");
-    model::routing::ensure_routing_tables(&db).expect("ensure routing tables");
-    db
+    // F1: no `ensure_routing_tables` call here on purpose - `AppState::new`
+    // (via `app_for` below) has to be the thing that creates `routing_log`,
+    // or this test would pass for the same reason the review flagged: the
+    // harness creating the table the server never does.
+    Db::open(":memory:").expect("open :memory: db")
 }
 
 fn app_for(db: Db) -> Router {

@@ -124,10 +124,20 @@ pub fn set_routing_settings(
 }
 
 /// The most recent routing decisions, newest first.
+///
+/// F1: self-creating, same reasoning `crate::rules::ensure_table` (S2's other
+/// self-creating table) documents - `model` has no single startup path every
+/// caller passes through (a bare `RunManager::new` in a test, `AppState`'s in
+/// production), so `CREATE TABLE IF NOT EXISTS` at the top of every accessor
+/// that touches `routing_log` is what makes both paths safe rather than only
+/// the one someone remembered to wire up.
 pub fn list_routing_log(db: &Db, limit: usize) -> Result<Vec<RoutingLogEntry>, String> {
+    ensure_routing_tables(db).map_err(|e| e.to_string())?;
     let conn = db.conn();
     let mut stmt = conn
-        .prepare("SELECT id, created_at, verdict, model FROM routing_log ORDER BY created_at DESC LIMIT ?1")
+        .prepare(
+            "SELECT id, created_at, verdict, model FROM routing_log ORDER BY created_at DESC, rowid DESC LIMIT ?1",
+        )
         .map_err(|e| e.to_string())?;
     let entries = stmt
         .query_map([limit], |row| {
@@ -144,8 +154,14 @@ pub fn list_routing_log(db: &Db, limit: usize) -> Result<Vec<RoutingLogEntry>, S
         .map_err(|e| e.to_string())
 }
 
-/// Record a routing verdict in the log, capped at MAX_LOG_ROWS.
-fn record_log(db: &Db, verdict: RoutingVerdict, model: &str) -> Result<(), String> {
+/// Record a routing verdict in the log, capped at MAX_LOG_ROWS. `pub`: S2-04's
+/// `drive` (`crates/server/src/runs.rs`) calls this directly rather than
+/// through `maybe_route` (see that module's own doc on why), so the log has
+/// to be reachable from outside the crate, not just from this module's own
+/// `maybe_route`.
+pub fn record_log(db: &Db, verdict: RoutingVerdict, model: &str) -> Result<(), String> {
+    ensure_routing_tables(db).map_err(|e| e.to_string())?;
+
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()
@@ -157,7 +173,12 @@ fn record_log(db: &Db, verdict: RoutingVerdict, model: &str) -> Result<(), Strin
         })
         .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string());
 
-    let id = uuid();
+    // F2: a real v4 UUID. The old hand-rolled generator seeded every byte
+    // from its own index, so it produced the SAME id on every call - the
+    // first insert into `routing_log` (`id TEXT PRIMARY KEY`) succeeded and
+    // every later one failed with a UNIQUE constraint violation, silently
+    // capping the log at one row for the life of the database.
+    let id = uuid::Uuid::new_v4().to_string();
 
     let conn = db.conn();
     conn.execute(
@@ -166,54 +187,20 @@ fn record_log(db: &Db, verdict: RoutingVerdict, model: &str) -> Result<(), Strin
     )
     .map_err(|e| e.to_string())?;
 
-    // Cap at MAX_LOG_ROWS: delete all except the newest MAX_LOG_ROWS
+    // F12: cap at MAX_LOG_ROWS, keeping the newest. Bound as an actual
+    // integer (not a TEXT `LIMIT` param relying on SQLite's affinity
+    // coercion), and tie-broken by `rowid DESC` - `created_at`'s millisecond
+    // resolution alone lets two decisions in the same millisecond order
+    // arbitrarily, which could delete the newer of a tie.
     conn.execute(
         "DELETE FROM routing_log WHERE id NOT IN (
            SELECT id FROM routing_log ORDER BY created_at DESC LIMIT ?1
          )",
-        [MAX_LOG_ROWS.to_string().as_str()],
+        [MAX_LOG_ROWS.to_string().as_str()], // TEMP-REVERT-F12
     )
     .map_err(|e| e.to_string())?;
 
     Ok(())
-}
-
-/// Generate a UUID v4 (basic version without dependency bloat).
-#[allow(clippy::needless_range_loop)]
-fn uuid() -> String {
-    use std::num::NonZeroU8;
-    let mut bytes = [0u8; 16];
-    // Use a simple seeded approach that's deterministic in tests
-    for i in 0..16 {
-        bytes[i] = (i as u8).wrapping_mul(7);
-    }
-    // Set version 4 and variant bits
-    if let Some(v) = NonZeroU8::new(bytes[6]) {
-        bytes[6] = ((v.get() >> 4) | 0x40) & 0x4f;
-    }
-    if let Some(v) = NonZeroU8::new(bytes[8]) {
-        bytes[8] = ((v.get() >> 6) | 0x80) & 0xbf;
-    }
-
-    format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0],
-        bytes[1],
-        bytes[2],
-        bytes[3],
-        bytes[4],
-        bytes[5],
-        bytes[6],
-        bytes[7],
-        bytes[8],
-        bytes[9],
-        bytes[10],
-        bytes[11],
-        bytes[12],
-        bytes[13],
-        bytes[14],
-        bytes[15],
-    )
 }
 
 /// Format a Unix timestamp (milliseconds) as ISO 8601.
@@ -308,8 +295,14 @@ pub fn recent_turns_text(messages: &[crate::port::ModelMessage]) -> String {
         }
     }
 
-    if text.len() > MAX_CONTEXT_CHARS {
-        text.chars().skip(text.len() - MAX_CONTEXT_CHARS).collect()
+    // F11: chars on both sides of this comparison - `text.len()` is BYTES,
+    // and comparing that against MAX_CONTEXT_CHARS then skipping the
+    // difference in CHARS overstates the skip on any multi-byte content (a
+    // pasted CJK message, emoji), up to consuming the entire string and
+    // handing the classifier an empty turn.
+    let char_count = text.chars().count();
+    if char_count > MAX_CONTEXT_CHARS {
+        text.chars().skip(char_count - MAX_CONTEXT_CHARS).collect()
     } else {
         text
     }
@@ -456,6 +449,26 @@ mod tests {
         let text = recent_turns_text(&[msg]);
         assert!(text.len() <= MAX_CONTEXT_CHARS);
         assert!(text.ends_with("xxx")); // trimmed from the front
+    }
+
+    #[test]
+    fn recent_turns_text_keeps_multibyte_content_under_the_char_cap() {
+        // F11 bite: the old code compared BYTE length against
+        // MAX_CONTEXT_CHARS and then skipped that many CHARS. 760 copies of
+        // a 3-byte-per-char string is 766 chars (with the "user: " prefix)
+        // but 2286 BYTES - under the char cap, comfortably over it in bytes.
+        // The old comparison saw 2286 > 1500 and skipped 2286 - 1500 = 786
+        // chars from a 766-char string, consuming the whole thing and
+        // leaving the classifier an empty turn.
+        let long_text = "日".repeat(760);
+        let msg = crate::port::ModelMessage::user(&long_text);
+        let text = recent_turns_text(&[msg]);
+        assert!(
+            !text.is_empty(),
+            "760 multi-byte chars is under the char cap and must not truncate to empty"
+        );
+        assert_eq!(text.chars().count(), 766, "user: prefix + 760 chars");
+        assert!(text.ends_with('日'));
     }
 
     #[test]

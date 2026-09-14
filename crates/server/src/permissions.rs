@@ -65,6 +65,15 @@ pub fn default_decisions() -> Permissions {
     // ceiling already governs, and the depth limit stops it running away.
     m.insert("message_bot".to_string(), Decision::Allow);
 
+    // F4: room tools. Both reach only rooms this bot itself creates or is
+    // added to - the same blast radius `add_task` gets for its own rows -
+    // so they get explicit rows here rather than falling through
+    // `runs.rs`'s permission-map lookup into its `None` arm, which used to
+    // silently allow them (and would now silently ASK them, since that arm
+    // was tightened to fail closed for any tool without a row of its own).
+    m.insert("create_room".to_string(), Decision::Allow);
+    m.insert("add_to_room".to_string(), Decision::Allow);
+
     // A nameless helper for a side errand: the cheap model always, a tool list
     // narrowed to its one job, and the CALLER's own permissions rather than
     // anything wider. The cost folds into the run that spawned it, the same as

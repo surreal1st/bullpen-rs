@@ -18,7 +18,7 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use common::{ScriptedPort, as_port, seed_session};
+use common::{ScriptedPort, as_port, own_conversation, seed_bot, seed_session, seed_user_message};
 use model::ladder::Trigger;
 use model::{MessageContent, ModelEvent, ModelMessage, ToolCall};
 use serde_json::{Value, json};
@@ -35,33 +35,6 @@ fn open_db() -> Arc<Mutex<Db>> {
     model::routing::set_routing_settings(&db, Some(false), None)
         .expect("disable routing classifier for scripted-model tests");
     Arc::new(Mutex::new(db))
-}
-
-fn seed_bot(db: &Arc<Mutex<Db>>, id: &str, name: &str) {
-    let db = db.lock().expect("db mutex poisoned");
-    db.conn()
-        .execute(
-            "INSERT INTO bots (id, name, purpose, instructions, model, created_at) VALUES (?1, ?2, '', ?3, NULL, '2026-01-01T00:00:00Z')",
-            rusqlite::params![id, name, format!("You are {name}.")],
-        )
-        .expect("seed bot");
-}
-
-fn own_conversation(db: &Arc<Mutex<Db>>, bot_id: &str) -> String {
-    let db = db.lock().expect("db mutex poisoned");
-    store::get_or_create_conversation(&db, bot_id).expect("get_or_create_conversation")
-}
-
-fn seed_user_message(db: &Arc<Mutex<Db>>, conversation_id: &str, text: &str) {
-    let db = db.lock().expect("db mutex poisoned");
-    store::append_message(
-        &db,
-        conversation_id,
-        "user",
-        text,
-        store::NewMessage::default(),
-    )
-    .expect("append user message");
 }
 
 fn run_status(db: &Arc<Mutex<Db>>, run_id: &str) -> String {
@@ -385,6 +358,70 @@ async fn working_says_waiting_for_you_to_approve_shell_while_parked() {
         .expect("arthur is working");
     assert!(arthur.waiting);
     assert_eq!(arthur.activity, "Waiting for you to approve shell");
+}
+
+// 6. F4: a tool name absent from the permission map entirely parks the run
+//    instead of running free. Run-level rather than a unit test on
+//    `permissions::decide_call` because the defect is in `runs.rs`'s OWN
+//    `match perms.get(...)` arm (the `None` branch), not in that helper -
+//    a name the toolbox itself does not recognise still has to be decided
+//    before it ever reaches the toolbox, so this scripts a call to a name
+//    that is neither in `default_decisions()` nor in `tools/mod.rs`'s
+//    match. Bite: with the `None` arm reverted to `Decision::Allow`, the
+//    toolbox runs it and answers "Unknown tool: ..." instead of parking -
+//    the `ApprovalNeeded` match below never sees that event and panics.
+#[tokio::test]
+async fn a_tool_call_with_no_permission_row_parks_the_run_instead_of_running_free() {
+    let db = open_db();
+    seed_bot(&db, "arthur", "Arthur");
+    let conversation_id = own_conversation(&db, "arthur");
+    seed_user_message(&db, &conversation_id, "do the thing");
+
+    let port = ScriptedPort::new(vec![
+        vec![ModelEvent::ToolCalls {
+            calls: vec![ToolCall {
+                id: "call-1".to_string(),
+                name: "totally_unmapped_tool".to_string(),
+                arguments: "{}".to_string(),
+            }],
+            usage: None,
+        }],
+        vec![
+            ModelEvent::Delta {
+                text: "Never got here.".to_string(),
+            },
+            ModelEvent::Done {
+                model: "test/model".to_string(),
+                usage: None,
+                finish_reason: None,
+            },
+        ],
+    ]);
+
+    let manager = Arc::new(RunManager::new(Arc::clone(&db), as_port(port)));
+    let run_id = manager.start(StartOptions {
+        bot_id: "arthur".to_string(),
+        conversation_id: conversation_id.clone(),
+        model: "test/model".to_string(),
+        messages: vec![ModelMessage::user("do the thing")],
+        trigger: Trigger::Chat,
+        room: false,
+    });
+
+    let events = drain_until_paused_or_done(manager.subscribe(&run_id)).await;
+    assert!(
+        matches!(
+            events.last(),
+            Some(RunEvent::ApprovalNeeded { name, .. }) if name == "totally_unmapped_tool"
+        ),
+        "expected an unmapped tool name to park the run rather than run free, got {events:?}"
+    );
+
+    assert_eq!(wait_for_status(&db, &run_id, "waiting").await, "waiting");
+    let (_, tool_name, _, status) = pending_approval(&db, &run_id)
+        .expect("expected a pending approval row for the unmapped tool");
+    assert_eq!(tool_name, "totally_unmapped_tool");
+    assert_eq!(status, "pending");
 }
 
 // ---- HTTP: GET /api/approvals, POST /api/approvals/:id ----

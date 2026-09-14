@@ -198,6 +198,80 @@ async fn routing_disabled_never_classifies() {
     assert_eq!(port.requests().len(), 0);
 }
 
+#[test]
+fn two_verdicts_produce_two_distinct_log_rows() {
+    // F2 bite: the old `uuid()` seeded every byte from its own index, so it
+    // returned the SAME string on every call. `routing_log.id` is `TEXT
+    // PRIMARY KEY`, so the first insert succeeded and the second failed with
+    // a UNIQUE constraint violation - `record_log` returned `Err`, which
+    // `.expect` below turns into a panic. A real `uuid::Uuid::new_v4` never
+    // collides in a two-call test.
+    let db = open_db();
+    ensure_routing_tables(&db).ok();
+
+    record_log(&db, RoutingVerdict::Lookup, "model-a").expect("first insert");
+    record_log(&db, RoutingVerdict::Action, "model-b").expect("second insert");
+
+    let log = list_routing_log(&db, 20).expect("read log");
+    assert_eq!(
+        log.len(),
+        2,
+        "two distinct verdicts must produce two distinct rows, not a PRIMARY KEY collision"
+    );
+}
+
+#[test]
+fn cap_keeps_the_newest_200_rows_even_on_a_created_at_tie() {
+    // F12 bite: `format_iso8601` has millisecond resolution, so real inserts
+    // in a tight loop can share a `created_at` by chance - not a reliable
+    // way to PROVE the tiebreak, so this seeds a deterministic tie directly:
+    // 200 rows sharing one fabricated `created_at`, inserted in a known
+    // rowid order, then one real `record_log` call whose real-clock
+    // timestamp is unambiguously newer than the fabricated one. That leaves
+    // exactly 201 rows and a cap of 200 - one of the 200 tied rows must be
+    // dropped, and only `rowid DESC` as the tiebreak decides which. The old
+    // cap ordered by `created_at` alone, so on this tie SQLite's plan
+    // dropped the highest-rowid (most recently inserted) tied row instead of
+    // the lowest - the newest of the tied batch, gone.
+    let db = open_db();
+    ensure_routing_tables(&db).ok();
+
+    {
+        let conn = db.conn();
+        for i in 0..200 {
+            conn.execute(
+                "INSERT INTO routing_log (id, created_at, verdict, model) VALUES (?1, ?2, 'lookup', ?3)",
+                [
+                    format!("seed-{i:03}"),
+                    "2020-01-01T00:00:00.000Z".to_string(),
+                    format!("seed-model-{i:03}"),
+                ],
+            )
+            .expect("seed insert");
+        }
+    }
+
+    // A real `record_log` call: its real-clock `created_at` is unambiguously
+    // later than every fabricated seed row, so it is never itself part of
+    // the tie - it is what pushes the table to 201 rows and triggers the cap.
+    record_log(&db, RoutingVerdict::Work, "the-newest").expect("record_log");
+
+    let log = list_routing_log(&db, 300).expect("read log");
+    assert_eq!(log.len(), 200, "expected the cap to hold at 200 rows");
+    assert!(
+        log.iter().any(|e| e.model == "the-newest"),
+        "expected the genuinely newest row to survive the cap"
+    );
+    assert!(
+        log.iter().any(|e| e.model == "seed-model-199"),
+        "expected the LAST-inserted tied row (highest rowid) to survive the cap"
+    );
+    assert!(
+        !log.iter().any(|e| e.model == "seed-model-000"),
+        "expected the FIRST-inserted tied row (lowest rowid) to be the one pruned"
+    );
+}
+
 #[tokio::test]
 async fn log_records_verdict_and_model() {
     let db = open_db();
