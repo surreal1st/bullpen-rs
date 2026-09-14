@@ -27,7 +27,13 @@ use store::Db;
 use tower::ServiceExt;
 
 fn open_db() -> Db {
-    Db::open(":memory:").expect("open :memory: db")
+    // S2-04: routing defaults to enabled (S2-01); disable it so a
+    // scripted test's first reply isn't consumed by the classifier call
+    // instead of the turn it scripted it for.
+    let db = Db::open(":memory:").expect("open :memory: db");
+    model::routing::set_routing_settings(&db, Some(false), None)
+        .expect("disable routing classifier for scripted-model tests");
+    db
 }
 
 fn seed_bot(db: &Db, id: &str, name: &str) {

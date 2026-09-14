@@ -10,6 +10,7 @@
 mod add_to_room;
 mod ask_josh;
 mod create_room;
+pub(crate) mod escalate;
 mod message_bot;
 mod remember;
 mod say;
@@ -41,6 +42,12 @@ type ToolFuture = Pin<Box<dyn Future<Output = (String, Option<ModelUsage>)> + Se
 pub struct ToolBox {
     pub specs: Vec<ToolSpec>,
     handler: Arc<dyn Fn(String, String) -> ToolFuture + Send + Sync>,
+    /// S2-04: set by the `escalate` tool when it climbs a rung; taken
+    /// (cleared) by `runs.rs`'s tool loop right after the call that set it,
+    /// which applies `model` to the run's next request and folds `note`
+    /// into a notice. See `escalate`'s own doc for why this run keeps going
+    /// on the climbed model instead of TS's cross-run hand-off.
+    escalated: Arc<Mutex<Option<escalate::Climb>>>,
 }
 
 impl ToolBox {
@@ -50,11 +57,24 @@ impl ToolBox {
     pub async fn run(&self, name: &str, args: &str) -> (String, Option<ModelUsage>) {
         (self.handler)(name.to_string(), args.to_string()).await
     }
+
+    /// S2-04: takes (clears) whatever `escalate` decided during the last
+    /// `run` call, if it climbed a rung.
+    pub(crate) fn take_escalated(&self) -> Option<escalate::Climb> {
+        self.escalated
+            .lock()
+            .expect("escalated mutex poisoned")
+            .take()
+    }
 }
 
 /// Builds the S1 toolbox for one bot's run. F2: `trigger`/`room` are the
 /// CALLER's, forwarded only to `message_bot`'s bot branch so a nested
 /// delegated call is floored the same way the caller's own model choice is.
+/// S2-04: `initial_model` seeds a shared cell only the `escalate` arm below
+/// reads or writes - "what model is THIS run on right now", so an escalate
+/// tier is computed from wherever a previous climb (this same turn) left
+/// it, not from the run's starting model every time.
 pub fn build(
     db: Arc<Mutex<Db>>,
     port: Arc<dyn ModelPort>,
@@ -62,6 +82,7 @@ pub fn build(
     room_hook: RoomHook,
     trigger: Trigger,
     room: bool,
+    initial_model: &str,
 ) -> ToolBox {
     let specs = vec![
         say::spec(),
@@ -71,14 +92,22 @@ pub fn build(
         create_room::spec(),
         add_to_room::spec(),
         shell::spec(),
+        escalate::spec(),
     ];
 
-    let handler: Arc<dyn Fn(String, String) -> ToolFuture + Send + Sync> =
+    let current_model = Arc::new(Mutex::new(initial_model.to_string()));
+    let escalated: Arc<Mutex<Option<escalate::Climb>>> = Arc::new(Mutex::new(None));
+
+    let handler: Arc<dyn Fn(String, String) -> ToolFuture + Send + Sync> = {
+        let current_model = Arc::clone(&current_model);
+        let escalated = Arc::clone(&escalated);
         Arc::new(move |name, args| {
             let db = Arc::clone(&db);
             let port = Arc::clone(&port);
             let bot_id = bot_id.clone();
             let room_hook = Arc::clone(&room_hook);
+            let current_model = Arc::clone(&current_model);
+            let escalated = Arc::clone(&escalated);
             Box::pin(async move {
                 match name.as_str() {
                     "say" => (say::run(&db, &bot_id, &args), None),
@@ -87,6 +116,22 @@ pub fn build(
                     "create_room" => (create_room::run(&db, &bot_id, &args), None),
                     "add_to_room" => (add_to_room::run(&db, &args), None),
                     "shell" => (shell::run(&args), None),
+                    "escalate" => {
+                        let model_now = current_model
+                            .lock()
+                            .expect("current model mutex poisoned")
+                            .clone();
+                        let (text, climb) = {
+                            let db = db.lock().expect("db mutex poisoned");
+                            escalate::run(&db, trigger, &model_now, &args)
+                        };
+                        if let Some(step) = &climb {
+                            *current_model.lock().expect("current model mutex poisoned") =
+                                step.model.clone();
+                        }
+                        *escalated.lock().expect("escalated mutex poisoned") = climb;
+                        (text, None)
+                    }
                     "message_bot" => {
                         message_bot::run(&db, &port, &bot_id, &room_hook, trigger, room, &args)
                             .await
@@ -94,7 +139,12 @@ pub fn build(
                     other => (format!("Unknown tool: {other}"), None),
                 }
             })
-        });
+        })
+    };
 
-    ToolBox { specs, handler }
+    ToolBox {
+        specs,
+        handler,
+        escalated,
+    }
 }

@@ -29,8 +29,11 @@ use crate::permissions::{self, Decision};
 use crate::tools::{self, RoomHook, ToolBox};
 
 /// How many tool steps a single run may take before it is stopped rather
-/// than left to loop. TS's `MAX_STEPS` is 24; the ticket sets S1's at 12.
-const MAX_STEPS: i64 = 12;
+/// than left to loop. Matches TS's `MAX_STEPS` (`run.ts:78`) now that S2-04
+/// gives a stuck run two ways out well before the ceiling - routing to a
+/// stronger model up front, and `escalate` mid-turn - the same reasoning
+/// that raised TS's own cap from 6 to 24. S1 held this at 12 pending both.
+const MAX_STEPS: i64 = 24;
 
 /// How long a settled run's event backlog survives for a late subscriber
 /// before `finish`'s delayed cleanup drops it, together with any `bus`
@@ -65,6 +68,14 @@ pub enum RunEvent {
         approval_id: String,
         name: String,
         args: String,
+    },
+    /// S2-04: a side note about this run that is not itself an answer -
+    /// today, "routed to a stronger model" (`runs.ts:673`, "Routed to X:
+    /// real work") and "escalated a rung" (`tools/escalate.rs`). Port of
+    /// the TS `notice` event, narrowed to these two sources; S1's snapshot
+    /// notice does not exist here yet.
+    Notice {
+        message: String,
     },
 }
 
@@ -151,6 +162,11 @@ pub struct RunManager {
     activity: Mutex<HashMap<String, ActivityState>>,
     /// Runs Josh (or a caller) has asked to stop. Checked between steps.
     stopping: Mutex<HashSet<String>>,
+    /// S2-04: text queued for a still-`running` run, drained into a user
+    /// turn between model calls - port of the TS `interjections` map
+    /// (`runs.ts:331`). Never touched for a `waiting`/`done`/`failed` run;
+    /// see `interject`'s own doc.
+    interjections: Mutex<HashMap<String, Vec<String>>>,
     /// Fired once a run settles, answered or failed alike. `None` until a
     /// caller wires one in - S1-06 sets this to chain a room round.
     on_run_done: Mutex<Option<OnRunDone>>,
@@ -185,6 +201,7 @@ impl RunManager {
             backlog: Mutex::new(HashMap::new()),
             activity: Mutex::new(HashMap::new()),
             stopping: Mutex::new(HashSet::new()),
+            interjections: Mutex::new(HashMap::new()),
             on_run_done: Mutex::new(None),
             start_room_turn: Arc::new(Mutex::new(None)),
             backlog_ttl,
@@ -297,6 +314,52 @@ impl RunManager {
             .lock()
             .expect("stopping mutex poisoned")
             .insert(run_id.to_string());
+    }
+
+    /// S2-04: queues `text` for a still-`running` run instead of racing it
+    /// with a second run - port of the TS `interject` (`runs.ts:808-815`).
+    /// Only a `running` row qualifies: `waiting` is parked on an approval
+    /// and must not be touched here - the approval stays exactly where it
+    /// was, and the caller (`routes/messages.rs`) falls through to starting
+    /// an ordinary new run instead. `done`/`failed` have nothing left to
+    /// deliver to. Returns `false` in both of those cases, same as TS -
+    /// including the race where the run settles between a caller's own
+    /// query and this call, so a delivered-too-late message still becomes
+    /// an ordinary new run rather than vanishing.
+    pub fn interject(&self, run_id: &str, text: &str) -> bool {
+        let status: Option<String> = {
+            let db = self.db();
+            db.conn()
+                .query_row(
+                    "SELECT status FROM runs WHERE id = ?1",
+                    rusqlite::params![run_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .unwrap_or_default()
+        };
+        if status.as_deref() != Some("running") {
+            return false;
+        }
+        self.interjections
+            .lock()
+            .expect("interjections mutex poisoned")
+            .entry(run_id.to_string())
+            .or_default()
+            .push(text.to_string());
+        true
+    }
+
+    /// Takes (and clears) whatever is queued for `run_id` - `run_turn` calls
+    /// this once per step, right before building that step's request, so
+    /// each interjection is delivered exactly once and never to a call
+    /// already in flight.
+    fn take_interjections(&self, run_id: &str) -> Vec<String> {
+        self.interjections
+            .lock()
+            .expect("interjections mutex poisoned")
+            .remove(run_id)
+            .unwrap_or_default()
     }
 
     /// Replays this run's backlog, then streams whatever comes next.
@@ -415,8 +478,16 @@ impl RunManager {
     /// F2: `trigger`/`room` are the CALLER's - forwarded into the toolbox so
     /// a nested `message_bot` delegated call is floored the same way this
     /// run's own model choice was, rather than trusting the callee's raw
-    /// pin.
-    fn toolbox_for(self: &Arc<Self>, bot_id: &str, trigger: Trigger, room: bool) -> ToolBox {
+    /// pin. S2-04: `model` seeds the toolbox's own idea of "what model is
+    /// this run on right now", which only the `escalate` tool ever reads or
+    /// writes - see `tools::build`'s doc.
+    fn toolbox_for(
+        self: &Arc<Self>,
+        bot_id: &str,
+        trigger: Trigger,
+        room: bool,
+        model: &str,
+    ) -> ToolBox {
         tools::build(
             Arc::clone(&self.db),
             Arc::clone(&self.port),
@@ -424,6 +495,7 @@ impl RunManager {
             Arc::clone(&self.start_room_turn),
             trigger,
             room,
+            model,
         )
     }
 
@@ -440,7 +512,73 @@ impl RunManager {
         floor: (Trigger, bool),
     ) {
         let (trigger, room) = floor;
-        let toolbox = self.toolbox_for(&bot_id, trigger, room);
+
+        // S2-04: routes a CHAT turn to the ladder's reason rung before the
+        // bot's own model sees it - port of the TS `routeThenDrive`
+        // (`runs.ts:625-684`), restructured around a Rust-specific
+        // constraint TS never had: `Db` wraps a non-`Sync` rusqlite
+        // connection (see `AppState::db`'s doc), so a lock on it cannot be
+        // held across the classifier's own network await inside a
+        // `tokio::spawn`'d task the way TS's single-threaded `await` chain
+        // can - the borrowed `&Db` `model::routing::maybe_route` wants
+        // spans its own internal await, which would make this task's
+        // future non-`Send`. The db is locked only for the synchronous
+        // settings/tier reads and the model write below; `classify_turn`
+        // itself (the only network call) runs with no lock held at all.
+        // 🔴 One thing this narrowing drops versus calling `maybe_route`
+        // whole: the `routing_log` row `record_log` writes is private to
+        // the model crate and reachable only through `maybe_route` -
+        // S2-01's own tests already prove that logging directly against a
+        // synchronous call, so it is not re-proven here. Never the reason a
+        // run fails to start: a disabled setting, a non-candidate turn, or
+        // a classifier error all leave `model` exactly as `start` wrote it.
+        let mut model = model;
+        let mut routing_usage: Option<ModelUsage> = None;
+        let is_routing_candidate = trigger == Trigger::Chat
+            && !room
+            && messages.last().map(|m| m.role == "user").unwrap_or(false);
+        if is_routing_candidate {
+            let candidate = {
+                let db = self.db();
+                model::routing::get_routing_settings(&db)
+                    .ok()
+                    .filter(|settings| settings.enabled)
+                    .map(|settings| {
+                        let reason_model =
+                            model::ladder::tier1_model(&db, model::ladder::EscalationKind::Reason);
+                        let current_tier = model::ladder::tier_of(&db, &model);
+                        let reason_tier = model::ladder::tier_of(&db, &reason_model);
+                        (settings.text, reason_model, current_tier, reason_tier)
+                    })
+            };
+            if let Some((rule_text, reason_model, current_tier, reason_tier)) = candidate
+                && current_tier < reason_tier
+            {
+                let result =
+                    model::routing::classify_turn(self.port.as_ref(), &rule_text, &messages).await;
+                routing_usage = result.usage;
+                if result.verdict == model::routing::RoutingVerdict::Work && reason_model != model {
+                    model = reason_model;
+                    {
+                        let db = self.db();
+                        if let Err(err) = db.conn().execute(
+                            "UPDATE runs SET model = ?1 WHERE id = ?2",
+                            rusqlite::params![model, run_id],
+                        ) {
+                            tracing::error!("run {run_id}: failed to record routed model: {err}");
+                        }
+                    }
+                    self.emit(
+                        &run_id,
+                        RunEvent::Notice {
+                            message: format!("Routed to {model}: real work"),
+                        },
+                    );
+                }
+            }
+        }
+
+        let toolbox = self.toolbox_for(&bot_id, trigger, room, &model);
         let outcome = self
             .run_turn(
                 &run_id,
@@ -451,7 +589,7 @@ impl RunManager {
                 &toolbox,
                 0,
                 String::new(),
-                None,
+                routing_usage,
             )
             .await;
         self.settle(&run_id, &bot_id, &conversation_id, outcome);
@@ -472,7 +610,7 @@ impl RunManager {
         run_id: &str,
         bot_id: &str,
         trigger: Trigger,
-        model: String,
+        mut model: String,
         mut messages: Vec<ModelMessage>,
         toolbox: &ToolBox,
         starting_steps: i64,
@@ -509,6 +647,24 @@ impl RunManager {
                     status: None,
                 };
             }
+
+            // S2-04: drains whatever Josh sent while this turn was
+            // mid-flight - between calls only, right before this step's
+            // (or, on a resumed turn, the very first) model call. Port of
+            // the TS `interjections()` drain (`run.ts:242-249`).
+            for interjection in self.take_interjections(run_id) {
+                messages.push(ModelMessage {
+                    role: "user".to_string(),
+                    content: MessageContent::Text(format!(
+                        "Josh, while you were working: {interjection}\n\nAnswer him now in a \
+sentence or two (with the say tool if you still have work to do), then carry on with what you \
+were doing unless he changed it."
+                    )),
+                    tool_calls: None,
+                    tool_call_id: None,
+                });
+            }
+
             steps += 1;
 
             let request = ModelRequest {
@@ -689,6 +845,28 @@ impl RunManager {
                             tool_calls: None,
                             tool_call_id: Some(call.id.clone()),
                         });
+
+                        // S2-04: `escalate` climbed a rung - port of
+                        // `climb` (`escalation.ts:280-333`) applied to THIS
+                        // run rather than TS's cross-run hand-off (see
+                        // `tools/escalate.rs`'s doc). Every later step in
+                        // this turn - including the rest of THIS batch, if
+                        // the model asked for more than one tool - now
+                        // calls on the climbed model.
+                        if call.name == "escalate"
+                            && let Some(step) = toolbox.take_escalated()
+                        {
+                            model = step.model.clone();
+                            self.emit(
+                                run_id,
+                                RunEvent::Notice {
+                                    message: format!(
+                                        "Escalating: {}. Continuing on {}.",
+                                        step.note, step.model
+                                    ),
+                                },
+                            );
+                        }
                     }
                 }
             }
@@ -1140,7 +1318,7 @@ is looking at."
         // resume is out of scope, and every case this ticket's tests
         // exercise is an ordinary chat turn, which `room: false` floors
         // exactly the same as `start` would have.
-        let toolbox = self.toolbox_for(&pending.bot_id, trigger, false);
+        let toolbox = self.toolbox_for(&pending.bot_id, trigger, false, &model);
 
         let resolved_usage = if approved {
             self.note(&pending.run_id, Some(call.name.clone()), false);
@@ -1221,7 +1399,7 @@ is looking at."
         let run_id = pending.run_id.clone();
         let bot_id = pending.bot_id.clone();
         tokio::spawn(async move {
-            let toolbox = manager.toolbox_for(&bot_id, trigger, false);
+            let toolbox = manager.toolbox_for(&bot_id, trigger, false, &model);
             let outcome = manager
                 .run_turn(
                     &run_id,
@@ -1259,6 +1437,15 @@ is looking at."
             .expect("stopping mutex poisoned")
             .remove(run_id);
         self.bus.lock().expect("bus mutex poisoned").remove(run_id);
+        // S2-04: the turn drained anything queued as it went; whatever is
+        // left was queued too late to be delivered, and this run has
+        // nothing left to deliver it to - port of TS's own
+        // `this.interjections.delete(runId)` at the same point
+        // (`runs.ts:1182`).
+        self.interjections
+            .lock()
+            .expect("interjections mutex poisoned")
+            .remove(run_id);
 
         let manager = Arc::clone(self);
         let run_id = run_id.to_string();

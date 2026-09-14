@@ -2,9 +2,11 @@
 //! turn to a room's round), and stream the run back. Port of
 //! `src/server/app.ts:1463-1656`.
 //!
-//! 🔴 Scope, named here rather than silently: no interject-into-a-still-running-turn
-//! branch (`RunManager` has no `interject` - S2+), no attachments (per the
-//! ticket). Both exist in the TS source inside this same line range.
+//! 🔴 Scope, named here rather than silently: no attachments (per the
+//! ticket) - that still exists in the TS source inside this same line
+//! range. S2-04 adds the interject branch: an already-`running` run in
+//! this thread gets a new message handed to it directly instead of racing
+//! it with a second run.
 
 use std::convert::Infallible;
 
@@ -16,6 +18,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use futures::Stream;
 use model::ladder::{Trigger, default_model};
+use rusqlite::OptionalExtension;
 use serde::Deserialize;
 use serde_json::json;
 use store::Db;
@@ -143,7 +146,7 @@ async fn post_message(
     let mentions = shared::mentions::find_mentions(&text);
     let everyone = mentions.names.iter().any(|name| name == "everyone");
 
-    let (conversation_id, speaker, round, model, messages) = {
+    let (conversation_id, speaker, round, model, messages, active_run) = {
         let db = state.db();
 
         let conversation_id = match parsed.thread_id.filter(|t| !t.is_empty()) {
@@ -196,6 +199,27 @@ async fn post_message(
             store::NewMessage::default(),
         )?;
 
+        // S2-04: an already-`running` run in this thread gets this message
+        // handed to it directly, instead of racing it with a second run -
+        // port of the TS `activeRun`/`interject` check (`app.ts:1535-1551`).
+        // Only a `running` row qualifies: `waiting` is parked on an
+        // approval and must not be touched here, so it falls through to
+        // starting an ordinary new run below and the approval stays
+        // exactly where it was. No attachments here (see this file's
+        // doc), so there is no TS suffix to add to the text. Read out of
+        // this block (rather than acted on here) so `state.runs.interject`
+        // - which takes its own lock on this same `Db` - never runs while
+        // this `db` guard is still held.
+        let active_run: Option<String> = db
+            .conn()
+            .query_row(
+                "SELECT id FROM runs WHERE conversation_id = ?1 AND status = 'running' \
+                 ORDER BY created_at DESC LIMIT 1",
+                rusqlite::params![conversation_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+
         // H12: a room's round. A `room` thread with no resolvable
         // `@mention` hands the turn to every member in order; `@everyone`
         // overrides the narrowing the same way no mention at all does.
@@ -225,8 +249,31 @@ async fn post_message(
             )
         };
 
-        (conversation_id, speaker, round, pinned, messages)
+        (
+            conversation_id,
+            speaker,
+            round,
+            pinned,
+            messages,
+            active_run,
+        )
     };
+
+    // S2-04: hand off to the run already in flight, if any, rather than
+    // starting a second one - see the doc above. `interject` re-checks the
+    // run is still `running` itself (the race the TS doc names: a run that
+    // finished between the query above and this call), so a `false` here
+    // falls straight through to starting an ordinary new run instead of
+    // vanishing.
+    if let Some(run_id) = active_run
+        && state.runs.interject(&run_id, &text)
+    {
+        return Ok((
+            StatusCode::OK,
+            Json(json!({"interjected": true, "runId": run_id})),
+        )
+            .into_response());
+    }
 
     // B9: registered (keyed by `conversation_id` - see `RoomEngine::register`'s
     // doc) BEFORE `runs.start`, so a run that settles before `start` even
@@ -289,6 +336,7 @@ fn run_event_json(event: &RunEvent) -> serde_json::Value {
         } => {
             json!({"type": "approval_needed", "approvalId": approval_id, "name": name, "args": args})
         }
+        RunEvent::Notice { message } => json!({"type": "notice", "message": message}),
     }
 }
 
