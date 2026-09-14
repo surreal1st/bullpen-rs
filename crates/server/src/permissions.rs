@@ -299,7 +299,24 @@ pub fn default_decisions() -> Permissions {
     // fetch_url reaches the open internet, so a bot that can read his disk
     // without being asked is the whole lethal trifecta in one bot. The desktop
     // app refuses credential-shaped paths underneath this regardless.
+    //
+    // 🔴 Not built yet - `WHERE_YOU_ARE` (`prompt.rs`) already tells every
+    // bot this tool "works through the Bullpen desktop app... and asks him
+    // to approve each read", and `decide_approval`'s doc (`runs.rs`) names
+    // it the one client-fulfilled tool this codebase has no `fulfilment`
+    // plumbing for yet - so this row is reserved for that future ticket.
+    // S6L-02's own, unrelated "read a file from the bot's OWN /work
+    // sandbox" tool is `sandbox_read` below, on purpose, so it does not
+    // collide with what the prompt already promises this name means.
     m.insert("read_file".to_string(), Decision::Ask);
+
+    // S6L-02: reading a file from the bot's own `/work` sandbox volume -
+    // the same container `shell` runs in. Read-only and confined to
+    // `/work` before anything shells out (`sandbox::validate_read_path`),
+    // with no network to exfiltrate over even if it could reach further -
+    // the same reasoning `repo_read`/`repo_grep` get below, so it gets
+    // their trust rather than `shell`'s: allow, and out of `tighten_set`.
+    m.insert("sandbox_read".to_string(), Decision::Allow);
 
     // The widest thing a bot can do. It runs on meridian itself, outside the
     // sandbox, as a user that owns the projects - so it asks by default and a
@@ -377,6 +394,10 @@ pub fn tighten_set() -> Vec<&'static str> {
         "shell",
         "ssh",
         "read_file",
+        // S6L-02: `sandbox_read` is deliberately NOT here - it stays
+        // inside the bot's own sandbox `/work`, the same reasoning that
+        // keeps `repo_read`/`repo_grep` out of this set below. See
+        // `default_decisions`'s comment on this tool.
         // 🔴 The desk's terminal and its two acting tools, for exactly the reason the
         // set exists. A 06:00 routine driving a browser Josh is signed into, on a
         // machine that keeps its files, with nobody awake to answer for it, is the

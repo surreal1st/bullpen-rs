@@ -415,6 +415,27 @@ impl Sandbox for UnavailableSandbox {
     }
 }
 
+/// The sandbox for executing bot commands, chosen by `BULLPEN_SANDBOX` at
+/// call time. S6L-01 put this logic in `lib.rs` as a private fn used only
+/// by `AppState::build`; S6L-02 moved it here, public, so `RunManager`'s
+/// no-sandbox-arg constructors (`new`, `with_backlog_ttl`) can resolve the
+/// same default a real server would - every test in this crate that builds
+/// a `RunManager` directly (most of the suite predates this ticket) keeps
+/// compiling and keeps seeing the S2 Unavailable text unchanged, since
+/// `BULLPEN_SANDBOX` is never `on` in a test process.
+pub fn default_sandbox() -> std::sync::Arc<dyn Sandbox> {
+    let sandbox_mode = std::env::var("BULLPEN_SANDBOX").unwrap_or_default();
+    if sandbox_mode == "on" {
+        let config = SandboxConfig::default();
+        let runner = std::sync::Arc::new(TokioRunner::new(config.docker_host.clone()));
+        std::sync::Arc::new(DockerSandbox::new(config, runner))
+    } else {
+        std::sync::Arc::new(UnavailableSandbox::new(
+            "Sandboxing is off here. Set BULLPEN_SANDBOX=on where it is wanted.",
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

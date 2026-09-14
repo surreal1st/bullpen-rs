@@ -1,16 +1,22 @@
 //! `shell`: one command in your own sandbox, one result out. Spec ported
 //! verbatim from `app.ts:5085-5095`.
 //!
-//! S2 ships no sandbox daemon - `BULLPEN_SANDBOX` never comes up here - so
-//! this always answers with the TS `createUnavailableSandbox` text
-//! (`index.ts:58`, `sandbox.ts:459-469`) instead of running anything. It
-//! refuses rather than pretending: a bot that silently ran nothing would
-//! look exactly like a bot whose command produced no output. `shell`
-//! defaults to `ask` (S2-02's `default_decisions`), which is what S2-03's
-//! approval plumbing needs a real gated tool to exercise - a sandbox that
-//! actually executes is a later ticket.
+//! S6L-02: the run itself now drives a real `Sandbox` (S6L-01's
+//! `DockerSandbox`/`UnavailableSandbox`, injected through `BuildParams`)
+//! instead of S2's hardcoded stub. The approval flow this tool exercises
+//! is unchanged - `shell` still defaults to `ask` (S2-02's
+//! `default_decisions`), and `runs.rs`'s tool loop still parks the run
+//! until Josh decides; only what happens on approval changed, from
+//! "nothing, always the same sentence" to "the command actually runs".
+//! With `BULLPEN_SANDBOX` off (an `UnavailableSandbox`), the answer is
+//! still exactly S2's stub text - see `is_unavailable`'s doc.
 use model::ToolSpec;
+use serde::Deserialize;
 use serde_json::json;
+
+use crate::sandbox::{ExecResult, Sandbox};
+
+use super::fence_tool_output;
 
 pub fn spec() -> ToolSpec {
     ToolSpec {
@@ -28,8 +34,67 @@ directory that keeps its contents between runs. There is no network in here."
     }
 }
 
-pub fn run(_args: &str) -> String {
-    "No sandbox is available, so nothing was run. Sandboxing is off here. Set \
-BULLPEN_SANDBOX=on where it is wanted."
-        .to_string()
+#[derive(Deserialize, Default)]
+struct Args {
+    #[serde(default)]
+    command: String,
+}
+
+/// Runs `command` in `sandbox` and formats the result the TS way
+/// (`app.ts:6257-6268`'s `shell` handler): stdout, then `stderr:\n...`,
+/// then a timeout/truncation note, then `exit code N`, each on its own
+/// line. The real output is fenced (`fence_tool_output`) as untrusted data
+/// before it goes back to the model - a command this run's own approval
+/// let through can still print text engineered to look like an
+/// instruction to whatever reads the transcript next.
+pub async fn run(sandbox: &dyn Sandbox, bot_id: &str, args: &str) -> String {
+    let parsed: Args = serde_json::from_str(args).unwrap_or_default();
+    let command = parsed.command.trim();
+    if command.is_empty() {
+        return "No command was given.".to_string();
+    }
+
+    let result = sandbox.exec(bot_id, command).await;
+    format_result(&result)
+}
+
+fn format_result(result: &ExecResult) -> String {
+    if is_unavailable(result) {
+        // Verbatim S2 text, unfenced - this is not data the sandbox
+        // produced, it is this tool refusing to have run at all.
+        return result.stderr.clone();
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+    if !result.stdout.is_empty() {
+        parts.push(result.stdout.clone());
+    }
+    if !result.stderr.is_empty() {
+        parts.push(format!("stderr:\n{}", result.stderr));
+    }
+    if result.timed_out {
+        parts.push("The command was stopped for taking too long.".to_string());
+    }
+    if result.truncated {
+        parts.push("Output was truncated.".to_string());
+    }
+    parts.push(format!("exit code {}", result.exit_code));
+
+    fence_tool_output(&parts.join("\n"))
+}
+
+/// `UnavailableSandbox::exec`'s sentinel (`sandbox.rs`): no stdout, exit
+/// code 127, and the fixed "No sandbox is available, so nothing was run."
+/// prefix `default_sandbox` builds. Detected by shape rather than a
+/// dedicated `ExecResult` variant, since a real `docker run` can also
+/// exit 127 (a missing binary) - this only matches the ONE sentinel
+/// `UnavailableSandbox` ever produces, never a real command's own 127.
+fn is_unavailable(result: &ExecResult) -> bool {
+    result.exit_code == 127
+        && !result.timed_out
+        && !result.truncated
+        && result.stdout.is_empty()
+        && result
+            .stderr
+            .starts_with("No sandbox is available, so nothing was run.")
 }

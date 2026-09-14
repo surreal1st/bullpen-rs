@@ -174,7 +174,15 @@ impl AppState {
             tracing::error!("failed to ensure routing_log table exists: {err}");
         }
         let db = Arc::new(Mutex::new(db));
-        let runs = Arc::new(runs::RunManager::new(Arc::clone(&db), port));
+        // S6L-02: threaded through so a `with_sandbox` test double (or a
+        // real `on` server) actually reaches `shell`/`sandbox_read` - without
+        // this, `AppState.sandbox` was stored but never read, and
+        // `RunManager` resolved its OWN default underneath it.
+        let runs = Arc::new(runs::RunManager::with_sandbox(
+            Arc::clone(&db),
+            port,
+            Arc::clone(&sandbox),
+        ));
         let room_engine = rooms::RoomEngine::install(Arc::clone(&db), Arc::clone(&runs));
         AppState {
             db,
@@ -234,18 +242,11 @@ fn default_credits() -> Arc<dyn spend::CreditsPort> {
 /// S6L-01: the sandbox for executing bot commands. Reads `BULLPEN_SANDBOX`
 /// to decide whether to create a real `DockerSandbox` or an `UnavailableSandbox`.
 /// A startup probe (`docker version`) failing under `on` logs once and falls
-/// back to Unavailable.
+/// back to Unavailable. S6L-02 moved the body to `sandbox::default_sandbox`
+/// so `RunManager` can resolve the same default; this stays as the name
+/// every constructor above already calls.
 fn default_sandbox() -> Arc<dyn sandbox::Sandbox> {
-    let sandbox_mode = std::env::var("BULLPEN_SANDBOX").unwrap_or_default();
-    if sandbox_mode == "on" {
-        let config = sandbox::SandboxConfig::default();
-        let runner = std::sync::Arc::new(sandbox::TokioRunner::new(config.docker_host.clone()));
-        Arc::new(sandbox::DockerSandbox::new(config, runner))
-    } else {
-        Arc::new(sandbox::UnavailableSandbox::new(
-            "Sandboxing is off here. Set BULLPEN_SANDBOX=on where it is wanted.",
-        ))
-    }
+    sandbox::default_sandbox()
 }
 
 /// Fallback for anything the API router didn't match: `/api/*` gets a plain

@@ -27,6 +27,7 @@ use crate::approvals;
 use crate::changes::{ChangeBus, ChangeKind};
 use crate::permissions::{self, Decision};
 use crate::rules;
+use crate::sandbox;
 use crate::tools::{self, RoomHook, ToolBox};
 
 /// How many tool steps a single run may take before it is stopped rather
@@ -163,6 +164,11 @@ type OnRunDone = Box<dyn Fn(&str, &str, &str) + Send + Sync>;
 pub struct RunManager {
     db: Arc<Mutex<Db>>,
     port: Arc<dyn ModelPort>,
+    /// S6L-02: what `toolbox_for` hands `shell`/`sandbox_read` to actually run
+    /// against. Resolved from `BULLPEN_SANDBOX` by the no-arg constructors
+    /// (`new`, `with_backlog_ttl`); injected by `with_sandbox` for
+    /// `AppState::build` and sandbox-aware tests.
+    sandbox: Arc<dyn sandbox::Sandbox>,
     /// The kind-based change bus (roster/approvals/questions/working) this
     /// manager touches. Public so a caller (a test, or S1-06's routes) can
     /// subscribe to it the same way the TS routes subscribe to `changes.ts`.
@@ -208,9 +214,35 @@ impl RunManager {
         port: Arc<dyn ModelPort>,
         backlog_ttl: Duration,
     ) -> Self {
+        Self::build(db, port, sandbox::default_sandbox(), backlog_ttl)
+    }
+
+    /// S6L-02: lets a caller (`AppState::build`, or a sandbox-aware test)
+    /// inject the `Sandbox` `shell`/`sandbox_read` actually run against,
+    /// instead of resolving one from `BULLPEN_SANDBOX` - the same seam
+    /// `AppState::with_port` gives the model. Every OTHER constructor here
+    /// still resolves its own default via `sandbox::default_sandbox`, so
+    /// the many call sites across this crate's test suite that predate
+    /// this ticket keep compiling and keep seeing the S2 Unavailable text
+    /// unchanged.
+    pub fn with_sandbox(
+        db: Arc<Mutex<Db>>,
+        port: Arc<dyn ModelPort>,
+        sandbox: Arc<dyn sandbox::Sandbox>,
+    ) -> Self {
+        Self::build(db, port, sandbox, BACKLOG_TTL)
+    }
+
+    fn build(
+        db: Arc<Mutex<Db>>,
+        port: Arc<dyn ModelPort>,
+        sandbox: Arc<dyn sandbox::Sandbox>,
+        backlog_ttl: Duration,
+    ) -> Self {
         Self {
             db,
             port,
+            sandbox,
             changes: ChangeBus::new(),
             bus: Mutex::new(HashMap::new()),
             backlog: Mutex::new(HashMap::new()),
@@ -553,6 +585,7 @@ impl RunManager {
             initial_model: model.to_string(),
             changes: self.changes.clone(),
             perms,
+            sandbox: Arc::clone(&self.sandbox),
         })
     }
 
