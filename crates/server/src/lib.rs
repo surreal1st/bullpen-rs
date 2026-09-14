@@ -4,10 +4,12 @@
 mod auth;
 pub mod changes;
 mod error;
+pub mod permissions;
 pub mod prompt;
 mod rooms;
 mod routes;
 pub mod runs;
+pub mod spend;
 mod tools;
 
 pub use error::{ApiResult, AppError};

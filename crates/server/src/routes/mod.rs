@@ -10,8 +10,10 @@ mod auth;
 mod conversations;
 mod events;
 mod messages;
+mod permissions;
 mod rooms;
 mod runs;
+mod spend;
 
 use crate::auth::presented_token;
 use crate::{ApiResult, AppError, AppState};
@@ -35,6 +37,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/bots/{id}/unseen", post(mark_bot_unseen))
         .merge(auth::router())
         .merge(conversations::router())
+        .merge(permissions::router())
         .merge(rooms::router())
         .merge(messages::router())
         .merge(events::router())
