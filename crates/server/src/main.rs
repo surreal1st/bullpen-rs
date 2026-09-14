@@ -9,7 +9,7 @@ async fn main() {
     let port: u16 = std::env::var("BULLPEN_PORT")
         .ok()
         .and_then(|p| p.parse().ok())
-        .unwrap_or(4370);
+        .unwrap_or(4380);
 
     std::fs::create_dir_all(&data_dir).expect("create data dir");
     let db_path = PathBuf::from(&data_dir).join("bullpen.db");

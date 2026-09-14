@@ -29,7 +29,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { clearTimeout, setTimeout } from "node:timers";
 
-const URL_ARG = process.argv[2] ?? "http://100.119.100.103:4360/";
+const URL_ARG = process.argv[2] ?? "http://127.0.0.1:4380/";
 const OUT = process.argv[3] ?? join(process.cwd(), "shot.png");
 const WAIT_MS = Number(process.env["BULLPEN_SHOT_WAIT_MS"] ?? 6000);
 const EVAL = process.env["BULLPEN_SHOT_EVAL"];
