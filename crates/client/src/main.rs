@@ -5,6 +5,7 @@ fn main() {
     dioxus::launch(App);
 }
 
+#[allow(non_snake_case)]
 fn App() -> Element {
     rsx! {
         div { "Bullpen" }
