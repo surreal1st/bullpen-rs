@@ -1,13 +1,11 @@
 //! Dioxus client. Web by default; desktop and mobile behind features.
-use dioxus::prelude::*;
+mod app;
+mod avatar;
+mod rail;
+mod types;
+
+use app::App;
 
 fn main() {
     dioxus::launch(App);
-}
-
-#[allow(non_snake_case)]
-fn App() -> Element {
-    rsx! {
-        div { "Bullpen" }
-    }
 }

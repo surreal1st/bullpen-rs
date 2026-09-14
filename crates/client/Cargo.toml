@@ -8,6 +8,10 @@ shared = { workspace = true }
 dioxus = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# The ONE fetch dependency S0-05 adds: `/api/roster` from wasm. Purpose-built
+# for browser fetch (unlike reqwest, nothing here risks pulling a native TLS
+# stack into a wasm32 build), and is the pattern Dioxus's own docs use.
+gloo-net = { version = "0.6", default-features = false, features = ["http", "json"] }
 
 [features]
 default = ["web"]

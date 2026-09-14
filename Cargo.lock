@@ -528,6 +528,7 @@ name = "client"
 version = "0.1.0"
 dependencies = [
  "dioxus",
+ "gloo-net",
  "serde",
  "serde_json",
  "shared",

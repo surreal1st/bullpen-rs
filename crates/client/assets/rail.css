@@ -1,0 +1,243 @@
+/* Ported from projects/bullpen-night/src/client/shell.css for S0-05.
+   ONLY the selectors the ticket names: .rail, .roster, .bot, .bot-*, .av,
+   .av-*, @keyframes av-*. Rule bodies are byte-close to the source.
+
+   The custom properties below are NOT ported: the ticket pointed at shell.css
+   :1-60 for the :root block, but that range holds `.left`/`.app`/`.pane`
+   rules, not a :root block - this file defines no :root anywhere (grepped,
+   zero matches for `^:root`). These are a reasonable dark-theme
+   approximation so the ported rules resolve to something, not a port of a
+   real source. See S0-05's "## Result" for the note. */
+:root {
+  --line: rgba(255, 255, 255, 0.08);
+  --line-strong: rgba(255, 255, 255, 0.16);
+  --ink: #eef1f4;
+  --ink-dim: #b7c0c9;
+  --muted: #8a97a3;
+  --faint: #5c6773;
+  --sel: rgba(255, 255, 255, 0.07);
+  --seam: #5ec8c0;
+  --accent: #5ec8c0;
+  --danger: #ff5c5c;
+  --radius-sm: 8px;
+  --fast: 140ms;
+  --slow: 260ms;
+  --spring: cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.roster {
+  background: #0a0e13;
+  border-right: 1px solid var(--line);
+  display: grid;
+  grid-template-rows: auto 1fr;
+  min-height: 0;
+}
+
+.rail {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  min-height: 0;
+  background: rgb(20 22 27 / 72%);
+  backdrop-filter: saturate(180%) blur(22px);
+  border-right: 1px solid var(--line);
+}
+
+.bot {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  border-radius: var(--radius-sm);
+  padding: 0.5rem 0.7rem;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--fast) ease;
+}
+
+.bot:hover {
+  background: var(--sel);
+}
+
+.bot.is-on {
+  background: var(--sel);
+}
+
+.av {
+  border-radius: 999px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  font-weight: 700;
+  color: #14100e;
+  letter-spacing: -0.02em;
+  line-height: 1;
+  position: relative;
+}
+
+/* ---------- the face ---------- */
+.av-face {
+  background: none;
+  display: block;
+  overflow: visible;
+}
+
+.av-face svg {
+  display: block;
+}
+
+.av-emoji {
+  border-radius: 999px;
+}
+
+/* The idle blink. */
+.av-eye {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: av-blink 7s infinite;
+}
+
+@keyframes av-blink {
+  0%,
+  92%,
+  100% {
+    transform: scaleY(1);
+  }
+
+  95% {
+    transform: scaleY(0.12);
+  }
+}
+
+/* Working: eyes narrowed and scanning, side to side. */
+.is-busy .av-eyes {
+  animation: av-scan 1.4s ease-in-out infinite;
+}
+
+.is-busy .av-eye {
+  animation: none;
+  transform: scaleY(0.62);
+}
+
+@keyframes av-scan {
+  0%,
+  100% {
+    transform: translateX(-1.2px);
+  }
+
+  50% {
+    transform: translateX(1.2px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .av-eye {
+    animation: none;
+  }
+
+  .is-busy .av-eyes {
+    animation: none;
+  }
+}
+
+.bot-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.bot-line {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+}
+
+.bot-name {
+  font-size: 0.855rem;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* An unread bot is the one thing in the rail that should catch the eye. */
+.bot.is-unread .bot-name {
+  color: #fff;
+}
+
+.bot.is-unread .bot-preview {
+  color: var(--ink-dim);
+}
+
+.bot-role {
+  color: var(--faint);
+  font-weight: 400;
+}
+
+.bot-flag {
+  font-size: 0.56rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--seam);
+  border: 1px solid color-mix(in srgb, var(--seam) 38%, transparent);
+  border-radius: 4px;
+  padding: 0 0.24rem;
+  flex: none;
+}
+
+.bot-when {
+  margin-left: auto;
+  font-size: 0.68rem;
+  color: var(--faint);
+  white-space: nowrap;
+  flex: none;
+  display: flex;
+  align-items: center;
+}
+
+.bot-when .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--accent);
+  display: block;
+}
+
+.bot-preview {
+  display: block;
+  font-size: 0.755rem;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 0.02rem;
+}
+
+.bot-pin {
+  width: 10px;
+  height: 10px;
+  flex: none;
+  color: var(--seam);
+  margin-right: 0.05rem;
+}
+
+/* "Rename Bot" swaps the row's name for this, in place. Not wired in S0-05
+   (no rename UI yet) but ported since it is a `.bot-*` selector. */
+.bot-rename {
+  width: 100%;
+  background: #0f151d;
+  border: 1px solid var(--seam);
+  color: var(--ink);
+  border-radius: var(--radius-sm);
+  padding: 0.15rem 0.4rem;
+  font: inherit;
+  font-size: 0.855rem;
+  font-weight: 600;
+}
+
+.bot.is-renaming {
+  cursor: default;
+}
