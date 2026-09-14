@@ -11,7 +11,29 @@ serde_json = { workspace = true }
 # The ONE fetch dependency S0-05 adds: `/api/roster` from wasm. Purpose-built
 # for browser fetch (unlike reqwest, nothing here risks pulling a native TLS
 # stack into a wasm32 build), and is the pattern Dioxus's own docs use.
-gloo-net = { version = "0.6", default-features = false, features = ["http", "json"] }
+# S1-07a adds the "eventsource" feature (events.rs's port of events.ts) -
+# still the one crate, one more of its own feature flags.
+gloo-net = { version = "0.6", default-features = false, features = ["http", "json", "eventsource"] }
+# S1-07a: `/api/events`'s heartbeat/reconnect timers (events.rs) - the gloo
+# family's own timer crate, so this is not a second choice of HTTP client,
+# just the matching small crate for "wait N ms" in a wasm binary.
+gloo-timers = { version = "0.3", features = ["futures"] }
+# S1-07a: `StreamExt` for the eventsource stream in events.rs. Already a
+# workspace dependency (server-side); reused here rather than adding a
+# second futures-utility crate.
+futures = { workspace = true }
+# S1-07a: markdown -> `rsx!` for a bot's reply (markdown.rs), never
+# `dangerous_inner_html` - see that module's doc comment for why. The one
+# new dependency this ticket adds.
+pulldown-cmark = "0.13"
+# S1-07a: the SSE run stream reads its response body as a raw
+# `web_sys::ReadableStream` (api.rs) - `gloo-net`'s `Response::body()`
+# already returns one, but consuming it needs the reader type explicitly,
+# which is not part of `gloo-net`'s own feature set.
+web-sys = { version = "0.3", features = ["ReadableStreamDefaultReader"] }
+js-sys = "0.3"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
 
 [features]
 default = ["web"]

@@ -10,7 +10,12 @@ use crate::types::{Bot, Section};
 use dioxus::prelude::*;
 
 #[component]
-pub fn Rail(sections: Vec<Section>, bots: Vec<Bot>) -> Element {
+pub fn Rail(
+    sections: Vec<Section>,
+    bots: Vec<Bot>,
+    #[props(default)] selected: Option<String>,
+    on_select: EventHandler<String>,
+) -> Element {
     let section_ids: Vec<String> = sections.iter().map(|s| s.id.clone()).collect();
 
     // Group visible bots by section, in section order; anything that does
@@ -43,18 +48,43 @@ pub fn Rail(sections: Vec<Section>, bots: Vec<Bot>) -> Element {
         ));
     }
 
+    // Whether each row is the selected bot, computed here rather than
+    // inside the `rsx!` loop below (which bot the row belongs to and
+    // whether it matches `selected` is a plain fact about a pair of
+    // values, same reason `thread.rs` precomputes its timemark divider).
+    type MarkedGroups = Vec<(Option<String>, Vec<(Bot, bool)>)>;
+    let groups: MarkedGroups = groups
+        .into_iter()
+        .map(|(label, bots)| {
+            let marked = bots
+                .into_iter()
+                .map(|b| {
+                    let is_selected = selected.as_deref() == Some(b.id.as_str());
+                    (b, is_selected)
+                })
+                .collect();
+            (label, marked)
+        })
+        .collect();
+
     rsx! {
         div { class: "rail",
             div { class: "roster",
-                for (label, group_bots) in groups {
+                for (label , group_bots) in groups {
                     if let Some(name) = label {
                         div {
                             style: "text-transform: uppercase; font-size: 0.68rem; font-weight: 700; letter-spacing: 0.11em; padding: 0.7rem 0.35rem 0.3rem; color: var(--faint);",
                             "{name}"
                         }
                     }
-                    for bot in group_bots {
-                        BotRow { key: "{bot.id}", bot, section_ids: section_ids.clone() }
+                    for (bot , is_selected) in group_bots {
+                        BotRow {
+                            key: "{bot.id}",
+                            bot,
+                            section_ids: section_ids.clone(),
+                            selected: is_selected,
+                            on_select,
+                        }
                     }
                 }
             }
@@ -63,19 +93,30 @@ pub fn Rail(sections: Vec<Section>, bots: Vec<Bot>) -> Element {
 }
 
 #[component]
-pub fn BotRow(bot: Bot, section_ids: Vec<String>) -> Element {
-    let class = if bot.unread > 0 {
-        "bot is-unread"
+pub fn BotRow(
+    bot: Bot,
+    section_ids: Vec<String>,
+    #[props(default = false)] selected: bool,
+    on_select: EventHandler<String>,
+) -> Element {
+    let mut class = if bot.unread > 0 {
+        "bot is-unread".to_string()
     } else {
-        "bot"
+        "bot".to_string()
     };
+    if selected {
+        class.push_str(" is-on");
+    }
     let preview = bot
         .preview
         .clone()
         .unwrap_or_else(|| "No messages yet".to_string());
+    let select_id = bot.id.clone();
 
     rsx! {
-        button { class: "{class}",
+        button {
+            class: "{class}",
+            onclick: move |_| on_select.call(select_id.clone()),
             Avatar {
                 id: bot.id.clone(),
                 name: bot.name.clone(),
