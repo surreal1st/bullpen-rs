@@ -55,7 +55,8 @@ fn row_to_bot(row: BotRow) -> Bot {
 }
 
 /// Strip markdown and truncate to 140 chars. Matches TS `firstLine` function.
-fn first_line(content: &str) -> String {
+/// `pub(crate)`: `rooms.rs` reuses it for a room's own preview line.
+pub(crate) fn first_line(content: &str) -> String {
     let lines: Vec<&str> = content
         .split('\n')
         .map(|l| l.trim())

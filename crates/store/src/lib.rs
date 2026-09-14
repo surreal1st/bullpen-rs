@@ -3,11 +3,20 @@
 
 pub mod auth;
 pub mod bots;
+pub mod conversations;
+pub mod messages;
 mod migrations;
+pub mod rooms;
 pub mod roster;
 
 pub use auth::{is_configured, session_valid};
 pub use bots::{get_bot, list_bots, list_sections};
+pub use conversations::{
+    create_thread, get_conversation, get_or_create_conversation, list_threads,
+    title_from_first_message, touch_thread, validate_members,
+};
+pub use messages::{NewMessage, Usage, append_message, delete_message, list_messages};
+pub use rooms::{create_room, get_room, list_rooms, update_room};
 pub use roster::list_roster;
 
 use rusqlite::{Connection, OptionalExtension, params};
@@ -28,7 +37,61 @@ impl Db {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.busy_timeout(Duration::from_millis(5000))?;
         migrate(&conn)?;
-        Ok(Db(conn))
+        let db = Db(conn);
+
+        // S1-01: self-creating columns, same pattern (and same reason) as the
+        // TS `ensure*Column` functions called from `openDb` - two sessions
+        // appending to MIGRATIONS at once silently skips whichever lands
+        // second, so schema landing outside a slice window creates itself
+        // instead, which is order-independent and idempotent. Mirrors
+        // `ensureConversationRoomColumns` (threads.ts:26-35),
+        // `ensureMessageAuthorColumn` (routine-health.ts) and
+        // `ensureMessageReactionColumn` (store.ts).
+        db.ensure_column(
+            "conversations",
+            "kind",
+            "ALTER TABLE conversations ADD COLUMN kind TEXT NOT NULL DEFAULT 'chat'",
+        )?;
+        db.ensure_column(
+            "conversations",
+            "members",
+            "ALTER TABLE conversations ADD COLUMN members TEXT",
+        )?;
+        db.ensure_column(
+            "conversations",
+            "seen_at",
+            "ALTER TABLE conversations ADD COLUMN seen_at TEXT",
+        )?;
+        db.ensure_column(
+            "messages",
+            "bot_id",
+            "ALTER TABLE messages ADD COLUMN bot_id TEXT",
+        )?;
+        db.ensure_column(
+            "messages",
+            "reactions",
+            "ALTER TABLE messages ADD COLUMN reactions TEXT",
+        )?;
+
+        Ok(db)
+    }
+
+    /// Adds `column` to `table` via `ddl` only when it is not already there -
+    /// `ALTER TABLE ADD COLUMN` throws on a column that already exists, which
+    /// a fixture opened a second time (or the TS-made `ts-made.db`) always
+    /// has. Checked with `PRAGMA table_info` first, same as every TS
+    /// `ensure*Column`.
+    fn ensure_column(&self, table: &str, column: &str, ddl: &str) -> rusqlite::Result<()> {
+        let exists = {
+            let mut stmt = self.0.prepare(&format!("PRAGMA table_info({table})"))?;
+            stmt.query_map([], |row| row.get::<_, String>(1))?
+                .filter_map(Result::ok)
+                .any(|name| name == column)
+        };
+        if !exists {
+            self.ensure(ddl)?;
+        }
+        Ok(())
     }
 
     /// `SELECT value FROM settings WHERE key = ?`.
