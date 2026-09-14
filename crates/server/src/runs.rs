@@ -25,6 +25,7 @@ use uuid::Uuid;
 
 use crate::approvals;
 use crate::changes::{ChangeBus, ChangeKind};
+use crate::judge;
 use crate::permissions::{self, Decision};
 use crate::rules;
 use crate::sandbox;
@@ -153,6 +154,13 @@ enum Outcome {
         state: RunState,
         pending: ToolCall,
         deferred: Vec<ToolCall>,
+        /// S4-04: the auto-review judge's verdict/reason for `pending`, when
+        /// this Ask came from a `risky`/`dangerous` judgement rather than
+        /// the grid itself. `None` for a plain grid Ask - the judge never
+        /// ran, so there is nothing of its to show. `park` writes these
+        /// onto the approval row.
+        judge_verdict: Option<String>,
+        judge_reason: Option<String>,
     },
 }
 
@@ -910,6 +918,122 @@ were doing unless he changed it."
                     }
                 };
 
+                // S4-04: a grid Allow for a RISKY tool is checked by the
+                // cheap auto-review judge before it runs unsupervised - the
+                // gap S4's Design section closes (a grid "allow" is
+                // otherwise never second-guessed). Grid Deny is final and a
+                // grid Ask already goes to the rules path below unjudged -
+                // this only ever narrows an Allow, never widens an Ask/Deny.
+                let mut judge_verdict: Option<String> = None;
+                let mut judge_reason: Option<String> = None;
+                // A `dangerous` verdict's Ask/Deny is NOT liftable by a bot
+                // rule - Ask-first wins - so it skips the S2-07 rules-ask
+                // block below even on the steps where `decision` reads Ask.
+                let mut judge_skips_rules = false;
+                // Set only when a judge `dangerous` verdict resolved to Deny
+                // (an unattended trigger, nobody there to approve) - the
+                // Deny arm below swaps in the auto-review wording.
+                let mut judge_deny_reason: Option<String> = None;
+
+                if decision == Decision::Allow && judge::is_risky(&call.name) {
+                    let enabled = {
+                        let db = self.db();
+                        judge::judge_enabled(&db)
+                    };
+                    if enabled {
+                        match judge::judge_call(self.port.as_ref(), &call.name, &call.arguments)
+                            .await
+                        {
+                            Ok(judgement) => {
+                                let new_decision =
+                                    judge::decision_for(judgement.verdict, Some(&trigger));
+                                if judgement.verdict != judge::Verdict::Safe {
+                                    self.emit(
+                                        run_id,
+                                        RunEvent::Notice {
+                                            message: format!(
+                                                "Auto review: {} - {}",
+                                                judgement.verdict.as_str(),
+                                                judgement.reason
+                                            ),
+                                        },
+                                    );
+                                }
+                                {
+                                    let db = self.db();
+                                    if let Err(err) = judge::log_judgement(
+                                        &db,
+                                        store::auto_review::LogEntry {
+                                            id: Uuid::new_v4().to_string(),
+                                            bot_id: bot_id.to_string(),
+                                            run_id: run_id.to_string(),
+                                            tool_name: call.name.clone(),
+                                            description: rules::describe_call(
+                                                &call.name,
+                                                &call.arguments,
+                                            ),
+                                            verdict: judgement.verdict.as_str().to_string(),
+                                            reason: judgement.reason.clone(),
+                                            decision: new_decision.as_str().to_string(),
+                                            created_at: now_iso(),
+                                        },
+                                    ) {
+                                        tracing::error!(
+                                            "run {run_id}: failed to log auto-review judgement: {err}"
+                                        );
+                                    }
+                                }
+                                if judgement.verdict == judge::Verdict::Dangerous {
+                                    judge_skips_rules = true;
+                                    if new_decision == Decision::Deny {
+                                        judge_deny_reason = Some(judgement.reason.clone());
+                                    }
+                                }
+                                judge_verdict = Some(judgement.verdict.as_str().to_string());
+                                judge_reason = Some(judgement.reason);
+                                decision = new_decision;
+                            }
+                            Err(reason) => {
+                                let notice = format!(
+                                    "Auto review unavailable: {reason}; ran on the grid's allow."
+                                );
+                                self.emit(
+                                    run_id,
+                                    RunEvent::Notice {
+                                        message: notice.clone(),
+                                    },
+                                );
+                                let db = self.db();
+                                if let Err(err) = judge::log_judgement(
+                                    &db,
+                                    store::auto_review::LogEntry {
+                                        id: Uuid::new_v4().to_string(),
+                                        bot_id: bot_id.to_string(),
+                                        run_id: run_id.to_string(),
+                                        tool_name: call.name.clone(),
+                                        description: rules::describe_call(
+                                            &call.name,
+                                            &call.arguments,
+                                        ),
+                                        verdict: judge::Verdict::Safe.as_str().to_string(),
+                                        reason: notice,
+                                        decision: Decision::Allow.as_str().to_string(),
+                                        created_at: now_iso(),
+                                    },
+                                ) {
+                                    tracing::error!(
+                                        "run {run_id}: failed to log fail-open auto-review judgement: {err}"
+                                    );
+                                }
+                                // Fails OPEN: the grid was already Allow, so
+                                // `decision` stays untouched - an outage
+                                // never widens what the grid allowed, it
+                                // only loses the extra check.
+                            }
+                        }
+                    }
+                }
+
                 // S2-07: a call the grid says "ask" to is checked against
                 // the bot's own auto-review rules before it parks - a rule
                 // can turn this into an allow, a deny, or leave it asking.
@@ -926,7 +1050,7 @@ were doing unless he changed it."
                 // the db only for the synchronous parts either side of its
                 // await. `rules::apply_rules` stays as the whole-cloth
                 // version for a caller that isn't spawned, e.g. a test.
-                if decision == Decision::Ask {
+                if decision == Decision::Ask && !judge_skips_rules {
                     let bot_rules = {
                         let db = self.db();
                         rules::list_rules_for(&db, bot_id).unwrap_or_else(|err| {
@@ -991,13 +1115,21 @@ were doing unless he changed it."
                             },
                             pending: call.clone(),
                             deferred: calls[idx + 1..].to_vec(),
+                            judge_verdict,
+                            judge_reason,
                         };
                     }
                     Decision::Deny => {
-                        let result = format!(
-                            "Not allowed: {} is switched off for you. Carry on without it.",
-                            call.name
-                        );
+                        let result = match &judge_deny_reason {
+                            Some(reason) => format!(
+                                "Not allowed: auto review judged {} dangerous ({reason}). Carry on without it.",
+                                call.name
+                            ),
+                            None => format!(
+                                "Not allowed: {} is switched off for you. Carry on without it.",
+                                call.name
+                            ),
+                        };
                         self.emit(
                             run_id,
                             RunEvent::ToolResult {
@@ -1107,8 +1239,18 @@ were doing unless he changed it."
                 state,
                 pending,
                 deferred,
+                judge_verdict,
+                judge_reason,
             } => {
-                self.park(run_id, bot_id, state, pending, deferred);
+                self.park(
+                    run_id,
+                    bot_id,
+                    state,
+                    pending,
+                    deferred,
+                    judge_verdict,
+                    judge_reason,
+                );
                 return;
             }
         };
@@ -1275,6 +1417,7 @@ were doing unless he changed it."
     /// watching it - `decide_approval` picks the SAME run id back up), and
     /// `on_run_done` never fires (a room round chains on an answer or a
     /// failure, never on a run that is still, in effect, in progress).
+    #[allow(clippy::too_many_arguments)]
     fn park(
         self: &Arc<Self>,
         run_id: &str,
@@ -1282,6 +1425,8 @@ were doing unless he changed it."
         state: RunState,
         pending: ToolCall,
         deferred: Vec<ToolCall>,
+        judge_verdict: Option<String>,
+        judge_reason: Option<String>,
     ) {
         // 🔴 Anything the model asked for AFTER the gated call is dropped
         // rather than silently run later without a decision of its own. A
@@ -1360,8 +1505,8 @@ is looking at."
                 &pending.name,
                 &pending.arguments,
                 &pending.id,
-                None,
-                None,
+                judge_verdict.as_deref(),
+                judge_reason.as_deref(),
             ) {
                 Ok(id) => id,
                 Err(err) => {
