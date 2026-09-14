@@ -21,7 +21,9 @@ BULLPEN_RS_HOME="$BULLPEN_HOME/bullpen-rs"
 # Staged in the ssh user's own home: /home/bullpen is 750 bullpen:bullpen, so the
 # transfer user cannot create anything under it. install.sh (root) reads from
 # wherever it sits, then installs into $BULLPEN_RS_HOME.
-INCOMING="/home/rainmade/bullpen-rs-incoming"
+# A fresh directory per ship: `scp -r` into an existing dir nests a second
+# `client/` inside it and stale files would poison the tree hash.
+INCOMING="/home/rainmade/bullpen-rs-incoming/$(date +%Y%m%d-%H%M%S)"
 
 echo "Checking zig availability..."
 zig version
@@ -61,19 +63,20 @@ echo "Calculating checksums..."
 BINARY_SHA=$(sha256sum "$BINARY" | awk '{print $1}')
 echo "Binary SHA256: $BINARY_SHA"
 
-# Verify client files as a tree (F14)
-CLIENT_SHA=$(find "$CLIENT_DIR" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')
+# Verify client files as a tree (F14). Hash from INSIDE the directory so the
+# paths beside each digest are relative: sha256sum prints the path it was given,
+# so hashing from two different roots can never agree. The first real ship
+# (2026-09-14) failed on exactly that with every byte intact.
+# Windows sha256sum marks binary mode as `<hash> *./path`; Linux prints
+# `<hash>  ./path`. Normalise the marker or the listings never hash the same.
+CLIENT_SHA=$(cd "$CLIENT_DIR" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sed -E 's|^([0-9a-f]+) \*?\./|\1  ./|' | sha256sum | awk '{print $1}')
 echo "Client tree SHA256: $CLIENT_SHA"
 
-# Create a checksums file that install.sh will verify (F15)
+# Create a checksums file that install.sh verifies with `sha256sum -c` from
+# INCOMING (F15): the binary, then every client file as `client/<relative>`.
 CHECKSUMS_FILE="$(mktemp)"
-cat > "$CHECKSUMS_FILE" << 'EOF'
-EOF
-echo "$BINARY_SHA  bullpen" >> "$CHECKSUMS_FILE"
-echo "$CLIENT_SHA  client" >> "$CHECKSUMS_FILE"
-
-# Also create per-file checksums for client
-find "$CLIENT_DIR" -type f -print0 | sort -z | xargs -0 sha256sum | sed "s|$CLIENT_DIR/||" >> "$CHECKSUMS_FILE"
+echo "$BINARY_SHA  bullpen" > "$CHECKSUMS_FILE"
+(cd "$CLIENT_DIR" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sed -E 's|^([0-9a-f]+) \*?\./|\1  client/|') >> "$CHECKSUMS_FILE"
 
 # Create incoming directory on meridian and transfer (F8)
 echo ""
@@ -110,7 +113,7 @@ fi
 
 # Verify client tree checksum on meridian (F14)
 echo "Verifying client tree checksum..."
-REMOTE_CLIENT_SHA=$(ssh "$MERIDIAN_HOST" "find $INCOMING/client -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum" | awk '{print $1}')
+REMOTE_CLIENT_SHA=$(ssh "$MERIDIAN_HOST" "cd $INCOMING/client && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum" | awk '{print $1}')
 if [[ "$CLIENT_SHA" == "$REMOTE_CLIENT_SHA" ]]; then
   echo "✓ Client checksum verified: $CLIENT_SHA"
 else
