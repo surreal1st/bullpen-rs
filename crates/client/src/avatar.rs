@@ -42,6 +42,28 @@ pub fn hue_for(section_id: Option<&str>, section_ids: &[String], name: &str) -> 
     (((base + (spin(name) % 24) - 12) % 360) + 360) % 360
 }
 
+/// Build the SVG face string for a given bot id and hue. The id MUST be
+/// sanitised to prevent breaking out of the id="" attribute with markup injection.
+#[cfg_attr(not(test), allow(dead_code))]
+fn build_face_svg(id: &str, hue: i32, hue2: i32, path: &str, size: f64, ex1: f64, ex2: f64, ey: f64) -> String {
+    let fill_id = format!("face-{}", sanitise_id(id));
+    format!(
+        r##"<svg viewBox="0 0 32 32" width="{size}" height="{size}">
+  <defs>
+    <linearGradient id="{fill_id}" x1="0" y1="0" x2="0.6" y2="1">
+      <stop offset="0" stop-color="hsl({hue} 60% 64%)" />
+      <stop offset="1" stop-color="hsl({hue2} 56% 45%)" />
+    </linearGradient>
+  </defs>
+  <path d="{path}" fill="url(#{fill_id})" />
+  <g class="av-eyes" fill="#141018">
+    <rect class="av-eye" x="{ex1}" y="{ey}" width="3" height="4.4" rx="1.5" />
+    <rect class="av-eye" x="{ex2}" y="{ey}" width="3" height="4.4" rx="1.5" />
+  </g>
+</svg>"##
+    )
+}
+
 #[component]
 pub fn Avatar(
     id: String,
@@ -88,28 +110,12 @@ pub fn Avatar(
 
     let eye_y = 32.0 * shape_info.eye_y;
     let gap = shape_info.eye_gap;
-    let fill_id = format!("face-{}", sanitise_id(&id));
     let hue2 = (hue + 22) % 360;
     let ex1 = 16.0 - gap - 1.5;
     let ex2 = 16.0 + gap - 1.5;
     let ey = eye_y - 2.2;
 
-    let svg = format!(
-        r##"<svg viewBox="0 0 32 32" width="{size}" height="{size}">
-  <defs>
-    <linearGradient id="{fill_id}" x1="0" y1="0" x2="0.6" y2="1">
-      <stop offset="0" stop-color="hsl({hue} 60% 64%)" />
-      <stop offset="1" stop-color="hsl({hue2} 56% 45%)" />
-    </linearGradient>
-  </defs>
-  <path d="{}" fill="url(#{fill_id})" />
-  <g class="av-eyes" fill="#141018">
-    <rect class="av-eye" x="{ex1}" y="{ey}" width="3" height="4.4" rx="1.5" />
-    <rect class="av-eye" x="{ex2}" y="{ey}" width="3" height="4.4" rx="1.5" />
-  </g>
-</svg>"##,
-        shape_info.path
-    );
+    let svg = build_face_svg(&id, hue, hue2, shape_info.path, size, ex1, ex2, ey);
 
     let class = if busy {
         "av av-face is-busy"
@@ -169,5 +175,29 @@ mod tests {
         let id_with_dots = "bot.id";
         let sanitised = sanitise_id(id_with_dots);
         assert_eq!(sanitised, "bot_id");
+    }
+
+    #[test]
+    fn test_avatar_malicious_id_blocked_from_svg() {
+        // Bite check: render the avatar for a bot id x"><script> and verify the
+        // output contains no <script and no "><  - proves sanitisation is active.
+        let malicious_id = r#"x"><script>"#;
+        let hue = 180;
+        let hue2 = 202;
+        let path = "M16 0 C24.8 0 32 7.2 32 16 C32 24.8 24.8 32 16 32 C7.2 32 0 24.8 0 16 C0 7.2 7.2 0 16 0 Z";
+        let size = 30.0;
+        let ex1 = 12.0;
+        let ex2 = 20.0;
+        let ey = 10.0;
+
+        let svg = build_face_svg(malicious_id, hue, hue2, path, size, ex1, ex2, ey);
+
+        // The SVG must not contain the raw malicious pattern or script tags
+        assert!(!svg.contains("<script"),
+                "Avatar SVG must not contain <script (injection blocked)");
+        assert!(!svg.contains(r#""><"#),
+                "Avatar SVG must not contain \">< (attribute escape blocked)");
+        assert!(!svg.contains(r#"x"><"#),
+                "Avatar SVG must not contain raw malicious id");
     }
 }
