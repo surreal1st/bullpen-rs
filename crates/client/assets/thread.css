@@ -5,8 +5,14 @@
    rules - see the ticket's Source list for exact line ranges, plus
    `.md table`/`.md th`/`.md td` (styles.css:734-749, not in the ticket's own
    grep list but needed once `markdown.rs` renders GFM tables at all).
-   `.bubble-model`, attachment/error/reaction/hover-toolbar rules are NOT
-   ported: `bubble.rs` renders none of that (see its doc comment).
+   `.bubble-model`, attachment/reaction/hover-toolbar rules are NOT ported:
+   `bubble.rs` renders none of that (see its doc comment).
+
+   S1-F-11 (F7) adds `.upstream-error`/`.upstream-error-label`
+   (styles.css:512-524) and `.mono` (styles.css:80-83, needed by the
+   `<pre class="mono">` inside it) - `.withheld`/`.withheld-*` are NOT
+   ported alongside them: `bubble.rs` has no "held back by Bullpen" branch
+   (see its own doc comment on why).
 
    `.shell`, `.rail` (width) and `.pane-empty` at the bottom are NOT a port -
    S0-05 never had a second pane to lay the rail out beside, so nothing in
@@ -411,4 +417,31 @@
   color: var(--danger);
   font-size: 0.8rem;
   padding: 0 1.15rem;
+}
+
+/* F7 (S1-F-11): ported from styles.css:80-83, 512-524. */
+.mono {
+  font-family: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+  font-size: 0.88em;
+}
+
+.upstream-error {
+  margin-top: 0.5rem;
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--line));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--danger) 8%, var(--panel));
+  padding: 0.7rem 0.85rem;
+}
+
+.upstream-error-label {
+  color: var(--danger);
+  font-size: 0.8rem;
+  font-weight: 560;
+}
+
+.upstream-error pre {
+  margin: 0.45rem 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: #f0b3a0;
 }

@@ -7,12 +7,24 @@ use crate::api;
 use crate::avatar::Avatar;
 use crate::types::{Bot, RoomSummary};
 use dioxus::prelude::*;
-use std::collections::HashSet;
 
 /// A group chat tops out here - the server's own `check_roster` enforces
 /// the same number (`crates/store/src/rooms.rs`), so a client bug here is a
 /// worse UX, never a way around the limit.
 pub const MAX_ROOM_MEMBERS: usize = 6;
+
+/// F8 (S1-F-11): toggles `id` in an ORDERED pick list - removes it if
+/// present, appends it if not (unless already at `cap`). A free function so
+/// the ordering claim (first picked stays first, `member_ids[0]` is what the
+/// server makes the room's owner - `crates/store/src/rooms.rs`'s `to_room`)
+/// is provable by a plain `cargo test`, not just by eye in the browser.
+fn toggle_picked(list: &mut Vec<String>, id: &str, cap: usize) {
+    if let Some(pos) = list.iter().position(|existing| existing == id) {
+        list.remove(pos);
+    } else if list.len() < cap {
+        list.push(id.to_string());
+    }
+}
 
 #[derive(Clone, PartialEq)]
 pub enum PickerMode {
@@ -34,9 +46,18 @@ pub fn RoomPicker(
         PickerMode::Edit(room) => room.title.clone(),
         PickerMode::Create => String::new(),
     };
-    let initial_picked: HashSet<String> = match &mode {
-        PickerMode::Edit(room) => room.member_ids.iter().cloned().collect(),
-        PickerMode::Create => HashSet::new(),
+    // F8 (S1-F-11): an ORDERED `Vec`, not a `HashSet` - `member_ids[0]` is
+    // what the server makes the room's owner and the first speaker of every
+    // round (`crates/store/src/rooms.rs`'s `to_room`), so a nondeterministic
+    // iteration order here used to hand a random member the owner slot every
+    // time "Growth" (say) was recreated with the same three bots, and
+    // rewrote `conversations.bot_id` to a random pick on every membership
+    // edit. Editing an existing room starts from its own `member_ids`, which
+    // is already in "Josh picked them" order - the owner it already has
+    // stays first unless he unchecks it.
+    let initial_picked: Vec<String> = match &mode {
+        PickerMode::Edit(room) => room.member_ids.clone(),
+        PickerMode::Create => Vec::new(),
     };
     let edit_id = match &mode {
         PickerMode::Edit(room) => Some(room.id.clone()),
@@ -69,7 +90,7 @@ pub fn RoomPicker(
         .iter()
         .filter(|b| !b.hidden)
         .map(|b| {
-            let checked = picked.read().contains(&b.id);
+            let checked = picked.read().iter().any(|id| id == &b.id);
             (b.clone(), checked, !checked && at_cap, b.id.clone())
         })
         .collect();
@@ -81,7 +102,9 @@ pub fn RoomPicker(
         }
         let edit_id = edit_id.clone();
         let title_value = title.read().clone();
-        let member_ids: Vec<String> = picked.read().iter().cloned().collect();
+        // Sent in pick order - `picked` is already that order (see its doc
+        // above), so this is a plain clone, not a re-sort.
+        let member_ids: Vec<String> = picked.read().clone();
         saving.set(true);
         error.set(None);
         spawn(async move {
@@ -138,12 +161,7 @@ pub fn RoomPicker(
                                     checked,
                                     disabled,
                                     onchange: move |_| {
-                                        let mut set = picked.write();
-                                        if set.contains(&checkbox_id) {
-                                            set.remove(&checkbox_id);
-                                        } else if set.len() < MAX_ROOM_MEMBERS {
-                                            set.insert(checkbox_id.clone());
-                                        }
+                                        toggle_picked(&mut picked.write(), &checkbox_id, MAX_ROOM_MEMBERS);
                                     },
                                 }
                                 Avatar {
@@ -174,5 +192,37 @@ pub fn RoomPicker(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// F8's bite check: change `push` to `insert(0, ...)` (or collect through
+    /// a `HashSet` again) and this goes red - whichever bot was picked FIRST
+    /// must stay first, since that is the id the server makes the room's
+    /// owner.
+    #[test]
+    fn toggle_picked_keeps_first_picked_first() {
+        let mut list = Vec::new();
+        toggle_picked(&mut list, "arthur", 6);
+        toggle_picked(&mut list, "grok", 6);
+        toggle_picked(&mut list, "elly", 6);
+        assert_eq!(list, vec!["arthur", "grok", "elly"]);
+    }
+
+    #[test]
+    fn toggle_picked_removes_without_disturbing_order() {
+        let mut list = vec!["arthur".to_string(), "grok".to_string(), "elly".to_string()];
+        toggle_picked(&mut list, "grok", 6);
+        assert_eq!(list, vec!["arthur", "elly"]);
+    }
+
+    #[test]
+    fn toggle_picked_refuses_past_the_cap() {
+        let mut list = vec!["a".to_string(), "b".to_string()];
+        toggle_picked(&mut list, "c", 2);
+        assert_eq!(list, vec!["a", "b"]);
     }
 }

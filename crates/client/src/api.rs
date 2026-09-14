@@ -4,7 +4,8 @@
 //! `:1424-1449` (`readSse`).
 
 use crate::types::{
-    ConversationView, RoomResponse, RoomSummary, RoomsResponse, WorkingBot, WorkingResponse,
+    AuthStatus, ConversationView, RoomResponse, RoomSummary, RoomsResponse, WorkingBot,
+    WorkingResponse,
 };
 use gloo_net::http::{Request, Response};
 use serde::{Deserialize, Serialize};
@@ -115,16 +116,26 @@ pub async fn fetch_working(conversation_id: &str) -> Result<Vec<WorkingBot>, Str
 }
 
 /// One frame of `POST /api/bots/:id/messages`'s stream. A strict subset of
-/// `StreamEvent` in `shared/types.ts:201-209` - S1-07a only has to react to
-/// the three kinds the mock (and eventually S1-06) actually sends for a
-/// plain send; `notice`/`tool_call`/`tool_result`/`approval_needed`/`error`
-/// collapse into `Ignored` rather than being treated as failures, so a kind
-/// this ticket does not handle degrades instead of breaking the stream.
+/// `StreamEvent` in `shared/types.ts:201-209` - S1-07a only had to react to
+/// the three kinds the mock (and eventually S1-06) actually sent for a plain
+/// send; `notice`/`tool_call`/`tool_result`/`approval_needed` still collapse
+/// into `Ignored` rather than being treated as failures, so a kind this
+/// ticket does not handle degrades instead of breaking the stream.
+///
+/// F7 (S1-F-11): `error` is no longer folded into `Ignored` - with no
+/// OpenRouter key configured, sending a message used to leave the streaming
+/// bubble blank and the composer re-enabled with no message anywhere on
+/// screen, the run row's "No OpenRouter key..." visible only in server logs.
+/// The server's SSE frame is `{"type":"error","message":"...","status":...}`
+/// (`crates/server/src/routes/messages.rs::run_event_json`); `status` is not
+/// carried here since `thread.rs`'s render (`.upstream-error`, ported from
+/// `MessageRow.tsx:195-215`) only ever shows `message`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StreamEvent {
     Run { run_id: String },
     Delta { text: String },
     Done { model: Option<String> },
+    Error { message: String },
     Ignored,
 }
 
@@ -138,6 +149,8 @@ struct RawFrame {
     text: Option<String>,
     #[serde(default)]
     model: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
 }
 
 fn parse_frame(json: &str) -> Option<StreamEvent> {
@@ -150,6 +163,9 @@ fn parse_frame(json: &str) -> Option<StreamEvent> {
             text: raw.text.unwrap_or_default(),
         },
         "done" => StreamEvent::Done { model: raw.model },
+        "error" => StreamEvent::Error {
+            message: raw.message.unwrap_or_default(),
+        },
         _ => StreamEvent::Ignored,
     })
 }
@@ -181,6 +197,84 @@ pub fn feed(buffer: &mut Vec<u8>, chunk: &[u8]) -> Vec<StreamEvent> {
         }
     }
     events
+}
+
+/// F14 (S1-F-11): opening a bot is what makes it read - ported from
+/// `App.tsx:758`'s `fetch(/api/bots/${id}/seen)`. Fire this, then have the
+/// caller refetch the roster so the dot clears; unlike the TS original this
+/// does not parse the response body (it carries a fresh roster of its own,
+/// but `app.rs` already owns a `fetch_roster` for that and there is no
+/// reason for two different shapes of "the current roster" in one client).
+pub async fn mark_bot_seen(bot_id: &str) -> Result<(), String> {
+    let url = format!("/api/bots/{bot_id}/seen");
+    let resp = Request::post(&url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("{url} -> {}", resp.status()));
+    }
+    Ok(())
+}
+
+/// Same as `mark_bot_seen`, for a group chat - ported from
+/// `App.tsx:769`'s `fetch(/api/rooms/${room.id}/seen)`.
+pub async fn mark_room_seen(room_id: &str) -> Result<(), String> {
+    let url = format!("/api/rooms/{room_id}/seen");
+    let resp = Request::post(&url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("{url} -> {}", resp.status()));
+    }
+    Ok(())
+}
+
+/// `GET /api/auth/status` - the gate's first question on every boot. Ported
+/// from `Gate.tsx:67-77`.
+pub async fn auth_status() -> Result<AuthStatus, String> {
+    let resp = Request::get("/api/auth/status")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("/api/auth/status -> {}", resp.status()));
+    }
+    resp.json::<AuthStatus>().await.map_err(|e| e.to_string())
+}
+
+#[derive(Serialize)]
+struct LoginBody<'a> {
+    password: &'a str,
+}
+
+#[derive(Deserialize)]
+struct LoginError {
+    error: String,
+}
+
+/// `POST /api/auth/login` - ported from `Gate.tsx:88-123`'s `signIn`. The
+/// server answers with a `Set-Cookie` on success; `credentials: include` is
+/// belt-and-suspenders for a same-origin fetch (the browser default already
+/// sends cookies here), kept explicit per the ticket's own instruction so a
+/// future reverse-proxy split between client and API origins does not
+/// silently drop the session cookie.
+pub async fn login(password: &str) -> Result<(), String> {
+    let resp = Request::post("/api/auth/login")
+        .credentials(web_sys::RequestCredentials::Include)
+        .json(&LoginBody { password })
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if resp.ok() {
+        return Ok(());
+    }
+    match resp.json::<LoginError>().await {
+        Ok(err) => Err(err.error),
+        Err(_) => Err("That did not work.".to_string()),
+    }
 }
 
 #[derive(Serialize)]
@@ -268,6 +362,25 @@ mod tests {
         let mut buffer = Vec::new();
         let events = feed(&mut buffer, b": ping\ndata: \ndata:  \n");
         assert!(events.is_empty());
+    }
+
+    /// F7's bite check: fold `"error"` back into the `_ => StreamEvent::Ignored`
+    /// catch-all in `parse_frame` and this goes red - a run that fails
+    /// (`{"type":"error","message":"..."}`, `routes/messages.rs::run_event_json`)
+    /// would once again vanish instead of reaching `thread.rs`'s bubble.
+    #[test]
+    fn feed_parses_an_error_frame() {
+        let mut buffer = Vec::new();
+        let events = feed(
+            &mut buffer,
+            b"data: {\"type\":\"error\",\"message\":\"No OpenRouter key configured.\"}\n",
+        );
+        assert_eq!(
+            events,
+            vec![StreamEvent::Error {
+                message: "No OpenRouter key configured.".into()
+            }]
+        );
     }
 
     /// The bite check: break `feed`'s buffering (e.g. reset `buffer` at the

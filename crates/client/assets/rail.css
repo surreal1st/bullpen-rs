@@ -11,7 +11,10 @@
 
    Deliberate divergences: `:root` custom properties (vapor palette, Bullpen-
    night's look study 2026-09-10, theme knobs and spring easing) are ported
-   wholesale; `.modal-*` and `.room-picker-*` use them but are new in S1-07b. */
+   wholesale; `.modal-*` and `.room-picker-*` use them but are new in S1-07b.
+
+   S1-F-11 adds `.gate*` (ported from `shell.css:4220-4298` - see that block's
+   own comment for what is deliberately not ported alongside it). */
 :root {
   --bg: #16181d;
   --panel: #1e2128;
@@ -480,4 +483,91 @@
   border-color: var(--seam);
   color: #14100e;
   font-weight: 600;
+}
+
+/* S1-F-11's added item: the sign-in gate. Ported from
+   `projects/bullpen-night/src/client/shell.css:4220-4298` (`.gate`,
+   `.gate-card`, `.gate-card h1`, `.gate-label`, `.gate-input`,
+   `.gate-input:focus-visible`, `.gate-button`, `.gate-button:disabled`,
+   `.gate-problem`, `.gate-note`), byte-close to the named rules - the
+   invite-flow markup Gate.tsx also has (`.gate-*` rows this file's `App`
+   never renders) is not ported, since bullpen-rs has no invite feature yet. */
+.gate {
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  background: var(--bg);
+  padding: 24px;
+}
+
+.gate-card {
+  width: 100%;
+  max-width: 320px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 24px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+}
+
+.gate-card h1 {
+  margin: 0 0 6px;
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.gate-label {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+.gate-input {
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--raised);
+  color: var(--ink);
+  font: inherit;
+}
+
+.gate-input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.gate-button {
+  margin-top: 4px;
+  padding: 9px 11px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #0b0d10;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.gate-button:disabled {
+  background: var(--raised);
+  color: var(--faint);
+  cursor: default;
+}
+
+.gate-problem {
+  margin: 2px 0 0;
+  font-size: 12.5px;
+  color: var(--seam);
+}
+
+.gate-note {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--muted);
 }

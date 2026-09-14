@@ -15,11 +15,12 @@ mod runs;
 
 use crate::auth::presented_token;
 use crate::{ApiResult, AppError, AppState};
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::IntoResponse;
-use axum::routing::get;
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
 use axum::{Json, Router};
+use rusqlite::OptionalExtension;
 use serde::Serialize;
 use serde_json::json;
 
@@ -30,6 +31,8 @@ pub fn router() -> Router<AppState> {
         .route("/api/auth/status", get(auth_status))
         .route("/api/auth/check", get(auth_check))
         .route("/api/roster", get(roster))
+        .route("/api/bots/{id}/seen", post(mark_bot_seen))
+        .route("/api/bots/{id}/unseen", post(mark_bot_unseen))
         .merge(auth::router())
         .merge(conversations::router())
         .merge(rooms::router())
@@ -151,4 +154,92 @@ async fn roster(State(state): State<AppState>) -> ApiResult<impl IntoResponse> {
     let sections = store::list_sections(&db)?;
     let bots = store::list_roster(&db)?;
     Ok(Json(RosterResponse { sections, bots }))
+}
+
+fn no_such_bot() -> Response {
+    (StatusCode::NOT_FOUND, Json(json!({"error": "no such bot"}))).into_response()
+}
+
+fn now_iso() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+/// One millisecond before `iso`, same format - the timestamp `mark_bot_unseen`
+/// backdates `last_seen_at` to. Falls back to `iso` itself on a parse
+/// failure (a hand-seeded test row, say) rather than erroring the whole
+/// request over a cosmetic one-millisecond miss.
+fn backdate_1ms(iso: &str) -> String {
+    match chrono::DateTime::parse_from_rfc3339(iso) {
+        Ok(dt) => (dt.with_timezone(&chrono::Utc) - chrono::Duration::milliseconds(1))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        Err(_) => iso.to_string(),
+    }
+}
+
+/// F14 (S1-F-11): `POST /api/bots/:id/seen`, ported from `app.ts:2366-2374`'s
+/// `markSeen`. Opening a bot's conversation is what makes it read - stamped
+/// with "now" rather than the newest message's time, so a reply that lands
+/// while it is open counts as seen instead of reappearing as unread the
+/// moment the pane closes. Store has no query API for the `bots` table's
+/// write half yet (`crates/store/src/bots.rs` is read-only), so this writes
+/// the one column directly - same posture `crate::rooms`/`runs.rs` already
+/// take with `db.conn()` for writes their own crate has no query for.
+async fn mark_bot_seen(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Response> {
+    let db = state.db();
+    if store::get_bot(&db, &id)?.is_none() {
+        return Ok(no_such_bot());
+    }
+    db.conn().execute(
+        "UPDATE bots SET last_seen_at = ?1 WHERE id = ?2",
+        rusqlite::params![now_iso(), id],
+    )?;
+    let bots = store::list_roster(&db)?;
+    Ok(Json(json!({ "bots": bots })).into_response())
+}
+
+/// The menu's "Mark as Unread" - the deliberate opposite of `mark_bot_seen`.
+/// Ported from `app.ts:2377-2382`'s `markUnread`. Unread is a TIMESTAMP
+/// comparison (`created_at > last_seen_at`, `store::roster::list_roster`),
+/// not a flag, so there is no boolean to clear - this backs `last_seen_at`
+/// up to one millisecond before the bot's own last assistant message, which
+/// makes that one message (and nothing further back) count as unread again.
+/// "The bot's own" deliberately excludes room conversations (`kind = 'room'`),
+/// matching `list_roster`'s own unread count, which already excludes them
+/// for the same bot id (a room's owner is a real bot row too) - backdating
+/// off a room reply would move this bot's clock without the roster's own
+/// count ever agreeing unread went up. This is a documented narrowing of
+/// the TS query, which does not filter by kind, to match the Rust roster's
+/// own rule. A bot with no assistant message yet is a harmless no-op, same
+/// as the TS.
+async fn mark_bot_unseen(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Response> {
+    let db = state.db();
+    if store::get_bot(&db, &id)?.is_none() {
+        return Ok(no_such_bot());
+    }
+    let last_at: Option<String> = db
+        .conn()
+        .query_row(
+            "SELECT m.created_at
+               FROM messages m
+               JOIN conversations c ON c.id = m.conversation_id
+              WHERE c.bot_id = ?1 AND c.kind != 'room' AND m.role = 'assistant'
+              ORDER BY m.created_at DESC, m.seq DESC LIMIT 1",
+            rusqlite::params![id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(last_at) = last_at {
+        db.conn().execute(
+            "UPDATE bots SET last_seen_at = ?1 WHERE id = ?2",
+            rusqlite::params![backdate_1ms(&last_at), id],
+        )?;
+    }
+    let bots = store::list_roster(&db)?;
+    Ok(Json(json!({ "bots": bots })).into_response())
 }

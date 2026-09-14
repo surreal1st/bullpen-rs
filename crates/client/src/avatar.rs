@@ -46,7 +46,16 @@ pub fn hue_for(section_id: Option<&str>, section_ids: &[String], name: &str) -> 
 /// sanitised to prevent breaking out of the id="" attribute with markup injection.
 #[cfg_attr(not(test), allow(dead_code))]
 #[allow(clippy::too_many_arguments)]
-fn build_face_svg(id: &str, hue: i32, hue2: i32, path: &str, size: f64, ex1: f64, ex2: f64, ey: f64) -> String {
+fn build_face_svg(
+    id: &str,
+    hue: i32,
+    hue2: i32,
+    path: &str,
+    size: f64,
+    ex1: f64,
+    ex2: f64,
+    ey: f64,
+) -> String {
     let fill_id = format!("face-{}", sanitise_id(id));
     format!(
         r##"<svg viewBox="0 0 32 32" width="{size}" height="{size}">
@@ -153,8 +162,11 @@ mod tests {
 
         // Only alphanumeric, underscore, and hyphen should remain
         for c in sanitised.chars() {
-            assert!(c.is_ascii_alphanumeric() || c == '_' || c == '-',
-                    "Unexpected character in sanitised id: {}", c);
+            assert!(
+                c.is_ascii_alphanumeric() || c == '_' || c == '-',
+                "Unexpected character in sanitised id: {}",
+                c
+            );
         }
     }
 
@@ -194,11 +206,17 @@ mod tests {
         let svg = build_face_svg(malicious_id, hue, hue2, path, size, ex1, ex2, ey);
 
         // The SVG must not contain the raw malicious pattern or script tags
-        assert!(!svg.contains("<script"),
-                "Avatar SVG must not contain <script (injection blocked)");
-        assert!(!svg.contains(r#""><"#),
-                "Avatar SVG must not contain \">< (attribute escape blocked)");
-        assert!(!svg.contains(r#"x"><"#),
-                "Avatar SVG must not contain raw malicious id");
+        assert!(
+            !svg.contains("<script"),
+            "Avatar SVG must not contain <script (injection blocked)"
+        );
+        assert!(
+            !svg.contains(r#""><"#),
+            "Avatar SVG must not contain \">< (attribute escape blocked)"
+        );
+        assert!(
+            !svg.contains(r#"x"><"#),
+            "Avatar SVG must not contain raw malicious id"
+        );
     }
 }

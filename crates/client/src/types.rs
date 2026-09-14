@@ -151,3 +151,14 @@ pub struct WorkingResponse {
     #[serde(default)]
     pub working: Vec<WorkingBot>,
 }
+
+/// `GET /api/auth/status`'s response shape - the gate's first question on
+/// every boot (`app.rs`, ported from `Gate.tsx:67-77`). `role` is not
+/// carried: this client has no member-vs-owner distinction yet (S5b's
+/// invites, `role` in the TS response, are out of scope for S1-F-11).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthStatus {
+    pub configured: bool,
+    pub signed_in: bool,
+}

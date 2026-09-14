@@ -28,12 +28,19 @@ use std::rc::Rc;
 /// `thread_id` is `Some(room.id)` when this pane is a group chat opened
 /// through its owner bot (`rail.rs`'s `GroupRow`) - S1-07b's addition over
 /// S1-07a, which only ever talked to a bot's default conversation.
+///
+/// `on_seen` (F14, S1-F-11) fires once the `/seen` call below resolves, so
+/// `app.rs` can refetch the roster/room list the dot is drawn from - ported
+/// from `App.tsx:758,769`'s `fetch(.../seen).then(() => loadBots())`. This
+/// component has no access to those lists itself (they live above it, in
+/// `app.rs`), so it can only ask for a refresh, not perform one.
 #[component]
 pub fn ChatPane(
     bot_id: String,
     bot_name: String,
     #[props(default)] thread_id: Option<String>,
     #[props(default)] section_ids: Vec<String>,
+    on_seen: EventHandler<()>,
 ) -> Element {
     let mut messages = use_signal(Vec::<Message>::new);
     let mut streaming = use_signal(|| None::<String>);
@@ -46,6 +53,30 @@ pub fn ChatPane(
     // reason `messages`/`streaming` below are `Signal`s the read-only
     // `Thread` takes rather than owned values.
     let mut conversation_id = use_signal(|| None::<String>);
+
+    // F14: opening this pane is what makes it read. `thread_id` distinguishes
+    // a room (owns its own `seen_at` on the `conversations` row) from a bot's
+    // own default conversation (owns `last_seen_at` on the `bots` row) - see
+    // `crates/server/src/routes/mod.rs`'s `mark_bot_seen` and
+    // `crates/server/src/routes/rooms.rs`'s `mark_seen` for the two different
+    // columns this clears. Runs once per mount (this component is remounted
+    // by a fresh `key` on every switch, never patched in place - see the doc
+    // above), which is exactly "on open".
+    let seen_bot_id = bot_id.clone();
+    let seen_thread_id = thread_id.clone();
+    use_effect(move || {
+        let bot_id = seen_bot_id.clone();
+        let thread_id = seen_thread_id.clone();
+        spawn(async move {
+            let result = match &thread_id {
+                Some(room_id) => api::mark_room_seen(room_id).await,
+                None => api::mark_bot_seen(&bot_id).await,
+            };
+            if result.is_ok() {
+                on_seen.call(());
+            }
+        });
+    });
 
     let fetch_bot_id = bot_id.clone();
     let fetch_thread_id = thread_id.clone();
@@ -100,6 +131,23 @@ pub fn ChatPane(
                             content: assembled.clone(),
                             model,
                             error: None,
+                            created_at: now_iso(),
+                        });
+                        streaming.set(None);
+                    }
+                    // F7 (S1-F-11): a run that failed used to be an `Ignored`
+                    // frame - the streaming bubble went blank, the composer
+                    // re-enabled, and nothing on screen said why. Whatever
+                    // text arrived before the failure is kept (a partial
+                    // answer is still evidence), with `error` set so
+                    // `bubble.rs` renders the `.upstream-error` box under it.
+                    api::StreamEvent::Error { message } => {
+                        messages.write().push(Message {
+                            id: format!("local-{}", now_iso()),
+                            role: Role::Assistant,
+                            content: assembled.clone(),
+                            model: None,
+                            error: Some(message),
                             created_at: now_iso(),
                         });
                         streaming.set(None);

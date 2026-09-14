@@ -9,6 +9,16 @@
 //! reply chained onto member two or later - no SSE stream for this tab -
 //! still shows up) and `:986-1000`/`:1266-1276` for where a room's own
 //! title/members and the working bar sit.
+//!
+//! S1-F-11's added item: `App` (the component `main.rs` launches) is now the
+//! sign-in gate, ported from `Gate.tsx`. It owns nothing about bots/rooms
+//! itself - once a session is confirmed it renders `AppShell`, which is
+//! everything this file used to be before this ticket. F-05 (`S1-F-fixes.md`)
+//! made every `/api/*` route except `auth/*`/`health`/`version`/`invites/*`
+//! answer 401/503 with no session; without a door in front of it, the app
+//! rendered but never fetched anything real (`/api/roster` 401, a spinner
+//! forever) - "nobody can open the app now that F-05 landed" is this
+//! ticket's own framing for why this exists.
 
 use crate::api;
 use crate::events::{ChangeKind, subscribe_events};
@@ -39,8 +49,127 @@ enum Selection {
     Room(RoomSummary),
 }
 
+/// What the gate is showing. Mirrors `Gate.tsx`'s `State` union, minus the
+/// `invited` branch - S5b's invite links are a separate feature this ticket
+/// does not port (see `AuthStatus`'s own doc on why `role` is dropped too).
+#[derive(Clone, PartialEq)]
+enum GateState {
+    Checking,
+    Setup,
+    /// `problem` is the last sign-in attempt's error, if any - `None` on
+    /// first paint, same as `Gate.tsx`'s `{ kind: "locked" }` (no `problem`
+    /// key) vs `{ kind: "locked", problem }`.
+    Locked(Option<String>),
+    Open,
+}
+
+/// The sign-in gate - everything between the open internet and the app
+/// shell. Ported from `Gate.tsx:41-254`, trimmed to the two states this
+/// ticket asks for: a password form when a password is set but no session is
+/// presented, and a "no password set" notice when none is set yet. The
+/// server is what actually enforces this (`crate::auth::require_session` on
+/// the Rust side) - this is only the door, same disclaimer `Gate.tsx`'s own
+/// doc comment makes about itself.
 #[component]
 pub fn App() -> Element {
+    let mut gate = use_signal(|| GateState::Checking);
+
+    use_effect(move || {
+        spawn(async move {
+            match api::auth_status().await {
+                Ok(status) if !status.configured => gate.set(GateState::Setup),
+                Ok(status) if status.signed_in => gate.set(GateState::Open),
+                Ok(_) => gate.set(GateState::Locked(None)),
+                Err(_) => gate.set(GateState::Locked(Some("Cannot reach Bullpen.".to_string()))),
+            }
+        });
+    });
+
+    let mut password = use_signal(String::new);
+    let mut busy = use_signal(|| false);
+
+    let mut sign_in = move || {
+        if *busy.read() || password.read().is_empty() {
+            return;
+        }
+        busy.set(true);
+        spawn(async move {
+            let attempt = password.read().clone();
+            let result = api::login(&attempt).await;
+            busy.set(false);
+            match result {
+                Ok(()) => {
+                    password.set(String::new());
+                    gate.set(GateState::Open);
+                }
+                Err(err) => gate.set(GateState::Locked(Some(err))),
+            }
+        });
+    };
+
+    let body = match gate.read().clone() {
+        GateState::Checking => rsx! {
+            div { class: "gate", "aria-busy": "true" }
+        },
+        GateState::Setup => rsx! {
+            div { class: "gate",
+                div { class: "gate-card",
+                    h1 { "Bullpen" }
+                    p { class: "gate-note",
+                        "No password is set on this server yet, so it is refusing everything. Set one, then reload."
+                    }
+                }
+            }
+        },
+        GateState::Locked(problem) => rsx! {
+            div { class: "gate",
+                form {
+                    class: "gate-card",
+                    onsubmit: move |evt| {
+                        evt.prevent_default();
+                        sign_in();
+                    },
+                    h1 { "Bullpen" }
+                    label { class: "gate-label", r#for: "gate-password", "Password" }
+                    input {
+                        id: "gate-password",
+                        r#type: "password",
+                        autocomplete: "current-password",
+                        autofocus: true,
+                        value: "{password}",
+                        oninput: move |evt| password.set(evt.value()),
+                        class: "gate-input",
+                    }
+                    button {
+                        r#type: "submit",
+                        class: "gate-button",
+                        disabled: *busy.read() || password.read().is_empty(),
+                        if *busy.read() { "Signing in…" } else { "Sign in" }
+                    }
+                    if let Some(problem) = problem {
+                        p { class: "gate-problem", "{problem}" }
+                    }
+                }
+            }
+        },
+        GateState::Open => rsx! {
+            AppShell {}
+        },
+    };
+
+    rsx! {
+        document::Stylesheet { href: asset!("/assets/rail.css") }
+        document::Stylesheet { href: asset!("/assets/thread.css") }
+        {body}
+    }
+}
+
+/// Everything this file was before S1-F-11's gate: fetches the roster and
+/// rooms, subscribes to server-side changes, and renders the rail beside
+/// whichever `ChatPane` is open. Only reached once `App`'s gate confirms a
+/// session - see this file's top doc comment.
+#[component]
+fn AppShell() -> Element {
     let mut roster = use_signal::<Option<Result<Roster, String>>>(|| None);
     let mut rooms = use_signal(Vec::<RoomSummary>::new);
     let mut selected = use_signal::<Option<Selection>>(|| None);
@@ -147,6 +276,19 @@ pub fn App() -> Element {
                             bot_name: room.title.clone(),
                             thread_id: Some(room.id.clone()),
                             section_ids: section_ids.clone(),
+                            // F14: the dot only clears once the roster/room
+                            // list this rail reads from is refetched - `/seen`
+                            // itself does not push a "roster" change (see
+                            // `routes/rooms.rs::mark_seen`, which touches no
+                            // change bus), so this pane asks for that refresh
+                            // explicitly rather than waiting on SSE.
+                            on_seen: move |_| {
+                                spawn(async move {
+                                    if let Ok(list) = api::fetch_rooms().await {
+                                        rooms.set(list);
+                                    }
+                                });
+                            },
                         }
                     } else if let Some(bot) = selected_bot {
                         ChatPane {
@@ -154,6 +296,11 @@ pub fn App() -> Element {
                             bot_id: bot.id.clone(),
                             bot_name: bot.name.clone(),
                             section_ids: section_ids.clone(),
+                            on_seen: move |_| {
+                                spawn(async move {
+                                    roster.set(Some(fetch_roster().await));
+                                });
+                            },
                         }
                     } else {
                         div { class: "pane pane-empty", "Pick a bot to start talking." }
@@ -188,9 +335,7 @@ pub fn App() -> Element {
         },
     };
 
-    rsx! {
-        document::Stylesheet { href: asset!("/assets/rail.css") }
-        document::Stylesheet { href: asset!("/assets/thread.css") }
-        {body}
-    }
+    // Stylesheets are loaded once, by `App` itself (this component is only
+    // ever reached through its gate) - see that component's own rsx!.
+    body
 }
