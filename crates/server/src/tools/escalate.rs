@@ -9,10 +9,22 @@
 //! climbed model for its remaining steps instead - `tools/mod.rs`'s
 //! `ToolBox` tracks "what model is this run on right now" for exactly this
 //! tool to read and write, and `runs.rs`'s tool loop applies a climb the
-//! instant this call returns. No `low_budget` top-rung closing either:
-//! that reads the live OpenRouter balance, which nothing wires into a tool
-//! call yet (S2-05 owns the spend ceiling) - so the top rung is never
-//! closed for budget from here, only `may_escalate` gates this tool at all.
+//! instant this call returns.
+//!
+//! S2-F-04: `low_budget` (TS's `inLastReserve`, `spend.ts:154-162`) now
+//! closes the top rung - see `climb`'s tier-2 arm. TS reads the LIVE
+//! OpenRouter balance through a `CreditsPort`; that port lives on
+//! `AppState` (`crates/server/src/spend.rs`, wired in `lib.rs`) but reaches
+//! this deep only through `tools::build`'s dispatch closure
+//! (`crates/server/src/tools/mod.rs`), which is outside this ticket's
+//! owned files. `spend_in_last_reserve` below reads the same ceiling
+//! against LOCALLY-summed month-to-date spend instead
+//! (`spend::spend_by_bot`, the same source `GET /api/spend`'s bot
+//! breakdown already uses): the same question, answered from a `&Db`
+//! this function already has, off only by anything spent outside
+//! Bullpen on the same key. Tightening this to the live `CreditsPort`
+//! belongs to whichever ticket next touches `tools/mod.rs`'s dispatch
+//! closure.
 
 use model::ToolSpec;
 use model::ladder::{self, EscalationKind, Trigger};
@@ -94,8 +106,25 @@ pub fn run(db: &Db, trigger: Trigger, current_model: &str, args: &str) -> (Strin
     }
 }
 
-/// One rung up, never two. Port of `escalation.ts`'s `climb` (280-333),
-/// minus `low_budget` (see this module's doc).
+/// Whether the LOCAL month-to-date spend is within the last 15% of the
+/// platform ceiling - closes the top rung only, same guard TS's
+/// `inLastReserve` computes from the live OpenRouter balance (see this
+/// module's doc for why this reads local spend instead). A read failure
+/// counts as low budget, same as `inLastReserve`'s `catch => true`.
+fn spend_in_last_reserve(db: &Db) -> bool {
+    let ceiling = crate::spend::get_ceiling(db);
+    if ceiling <= 0.0 {
+        return true;
+    }
+    let month = crate::spend::current_month(chrono::Utc::now());
+    let spent: f64 = match crate::spend::spend_by_bot(db, &month) {
+        Ok(rows) => rows.iter().map(|r| r.cost_usd).sum(),
+        Err(_) => return true,
+    };
+    ceiling - spent <= ceiling * 0.15
+}
+
+/// One rung up, never two. Port of `escalation.ts`'s `climb` (280-333).
 fn climb(db: &Db, current: &str, kind: EscalationKind) -> Result<Climb, String> {
     let tier = ladder::tier_of(db, current);
     if tier == 3 {
@@ -135,7 +164,17 @@ fn climb(db: &Db, current: &str, kind: EscalationKind) -> Result<Climb, String> 
             note: format!("{}, and the specialist could not either", kind.as_str()),
         });
     }
-    // tier == 2: the only rung left is the top one.
+    // tier == 2: the only rung left is the top one. Only this rung closes
+    // for budget - a ladder that stopped entirely at 85% spent would turn
+    // a spending guard into a work stoppage, and every rung underneath
+    // still costs a fraction of this one.
+    if spend_in_last_reserve(db) {
+        return Err(
+            "The strongest model is closed because the spend ceiling is nearly reached. Say \
+             plainly what you could not work out and stop."
+                .to_string(),
+        );
+    }
     Ok(Climb {
         model: ladder::premium_model(db),
         note: format!("{}, and nothing below this could do it", kind.as_str()),
@@ -186,6 +225,60 @@ mod tests {
         let premium = ladder::premium_model(&db);
         let err = climb(&db, &premium, EscalationKind::Reason).expect_err("already maxed");
         assert!(err.contains("already the strongest"));
+    }
+
+    /// Seeds one provider-reported assistant message this calendar month,
+    /// so `spend::spend_by_bot`'s current-month sum sees it - raw SQL
+    /// rather than `store::append_message`, which always stamps `now()`
+    /// and cannot backdate into a different month for the "two months"
+    /// case elsewhere in this ticket's `tests/spend.rs`.
+    fn seed_this_months_spend(db: &Db, bot_id: &str, cost_usd: f64) {
+        db.conn()
+            .execute(
+                "INSERT INTO bots (id, name, purpose, instructions, model, created_at) \
+                 VALUES (?1, ?1, '', '', NULL, '2026-01-01T00:00:00Z')",
+                rusqlite::params![bot_id],
+            )
+            .expect("seed bot");
+        let conversation_id =
+            store::get_or_create_conversation(db, bot_id).expect("get_or_create_conversation");
+        store::append_message(
+            db,
+            &conversation_id,
+            "assistant",
+            "done",
+            store::NewMessage {
+                usage: Some(store::Usage {
+                    cost_usd,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .expect("seed assistant message");
+    }
+
+    #[test]
+    fn climb_closes_the_top_rung_when_spend_is_in_the_last_reserve() {
+        let db = open_db();
+        crate::spend::set_ceiling(&db, 100.0).expect("set ceiling");
+        seed_this_months_spend(&db, "spender", 90.0);
+
+        let mid_model = ladder::mid_model(&db);
+        let err =
+            climb(&db, &mid_model, EscalationKind::Reason).expect_err("top rung should be closed");
+        assert!(err.contains("nearly reached"), "{err}");
+    }
+
+    #[test]
+    fn climb_still_reaches_premium_when_spend_is_fine() {
+        let db = open_db();
+        crate::spend::set_ceiling(&db, 100.0).expect("set ceiling");
+        seed_this_months_spend(&db, "spender", 10.0);
+
+        let mid_model = ladder::mid_model(&db);
+        let step = climb(&db, &mid_model, EscalationKind::Reason).expect("should still climb");
+        assert_eq!(step.model, ladder::premium_model(&db));
     }
 
     #[test]

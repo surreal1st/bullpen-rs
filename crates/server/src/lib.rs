@@ -50,15 +50,31 @@ pub struct AppState {
     login_throttle: Arc<auth::LoginThrottle>,
     /// S2-06: the model catalog for searching available models.
     pub catalog: Arc<dyn Catalog>,
+    /// S2-F-04: the account's real OpenRouter balance - what the spend
+    /// ceiling gate (`routes/messages.rs`) and the spend panel
+    /// (`routes/spend.rs`) both read.
+    pub credits: Arc<dyn spend::CreditsPort>,
 }
 
 impl AppState {
     pub fn new(db: Db) -> Self {
-        Self::build(db, default_client_root(), default_port(), default_catalog())
+        Self::build(
+            db,
+            default_client_root(),
+            default_port(),
+            default_catalog(),
+            default_credits(),
+        )
     }
 
     pub fn with_client_root(db: Db, client_root: String) -> Self {
-        Self::build(db, client_root, default_port(), default_catalog())
+        Self::build(
+            db,
+            client_root,
+            default_port(),
+            default_catalog(),
+            default_credits(),
+        )
     }
 
     /// S1-06: lets a test swap in a scripted `ModelPort` (`model::fake`, or
@@ -66,12 +82,49 @@ impl AppState {
     /// resolution `new` uses - the seam route tests need to drive real runs
     /// without an OpenRouter key.
     pub fn with_port(db: Db, port: Arc<dyn model::ModelPort>) -> Self {
-        Self::build(db, default_client_root(), port, default_catalog())
+        Self::build(
+            db,
+            default_client_root(),
+            port,
+            default_catalog(),
+            default_credits(),
+        )
     }
 
     /// S2-06: lets a test swap in a fixture catalog while keeping the same port.
     pub fn with_catalog(db: Db, catalog: Arc<dyn Catalog>) -> Self {
-        Self::build(db, default_client_root(), default_port(), catalog)
+        Self::build(
+            db,
+            default_client_root(),
+            default_port(),
+            catalog,
+            default_credits(),
+        )
+    }
+
+    /// S2-F-04: lets a test swap in a scripted `CreditsPort` (`spend::FakeCredits`)
+    /// while keeping the same port/catalog `new` uses - the 402/warning
+    /// HTTP cases only need this to differ from `new`.
+    pub fn with_credits(db: Db, credits: Arc<dyn spend::CreditsPort>) -> Self {
+        Self::build(
+            db,
+            default_client_root(),
+            default_port(),
+            default_catalog(),
+            credits,
+        )
+    }
+
+    /// S2-F-04: lets a test swap in BOTH a scripted `ModelPort` and a
+    /// scripted `CreditsPort` - the spend-gate HTTP tests that need a run
+    /// to actually drive (to see the starting notice, not just the 402
+    /// path) need both at once.
+    pub fn with_port_and_credits(
+        db: Db,
+        port: Arc<dyn model::ModelPort>,
+        credits: Arc<dyn spend::CreditsPort>,
+    ) -> Self {
+        Self::build(db, default_client_root(), port, default_catalog(), credits)
     }
 
     fn build(
@@ -79,6 +132,7 @@ impl AppState {
         client_root: String,
         port: Arc<dyn model::ModelPort>,
         catalog: Arc<dyn Catalog>,
+        credits: Arc<dyn spend::CreditsPort>,
     ) -> Self {
         // F1: `routing_log` is self-creating (same convention as
         // `rules::ensure_table`), but nothing in production ever called it -
@@ -99,6 +153,7 @@ impl AppState {
             room_engine,
             login_throttle: Arc::new(auth::LoginThrottle::new()),
             catalog,
+            credits,
         }
     }
 
@@ -134,6 +189,15 @@ fn default_catalog() -> Arc<dyn Catalog> {
     } else {
         Arc::new(model::FixtureCatalog::from_json("[]").unwrap())
     }
+}
+
+/// S2-F-04: the live OpenRouter credits reader - what a production
+/// server's spend ceiling gate and spend panel read from. No "empty"
+/// fallback like `default_catalog` needs: an unconfigured key just
+/// answers every call with an error, which `gate_run`/`get_spend` both
+/// already treat as "unreadable" rather than a panic.
+fn default_credits() -> Arc<dyn spend::CreditsPort> {
+    Arc::new(spend::OpenRouterCredits::new(model::KeySource::Env))
 }
 
 /// Fallback for anything the API router didn't match: `/api/*` gets a plain

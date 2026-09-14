@@ -1,6 +1,8 @@
 //! S2-05: month-to-date spend and the ceiling gate. Port of
 //! `projects/bullpen-night/src/server/spend.ts`.
 
+use std::time::{Duration, Instant};
+
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use store::Db;
@@ -140,4 +142,147 @@ pub fn spend_by_bot(db: &Db, month: &str) -> rusqlite::Result<Vec<BotSpend>> {
         result.push(row?);
     }
     Ok(result)
+}
+
+// ---------------------------------------------------------------------
+// S2-F-04: the account's real balance. F3/D6: `gate_run` was only ever
+// called with `account_usage = None`, which its own `None` arm always
+// allows - so the 402 branch above was dead and this ceiling could never
+// actually fire. `CreditsPort` is what closes that: `AppState` holds a
+// live `OpenRouterCredits` (`crates/server/src/lib.rs`), and
+// `routes/messages.rs` reads it before every `gate_run` call now. Port of
+// `createOpenRouterCredits` (`projects/bullpen-night/src/server/spend.ts:37-64`).
+// ---------------------------------------------------------------------
+
+/// Reads the account's all-time OpenRouter usage - what the ceiling gate
+/// and `GET /api/spend`'s balance panel both need. `FakeCredits` below is
+/// the test double; `OpenRouterCredits` is what production runs with.
+#[async_trait::async_trait]
+pub trait CreditsPort: Send + Sync {
+    /// Dollars spent, all time, across everything using this key.
+    async fn total_usage(&self) -> Result<f64, String>;
+}
+
+const CREDITS_URL: &str = "https://openrouter.ai/api/v1/credits";
+/// Same TTL as `spend.ts`'s `CACHE_MS`.
+const CREDITS_CACHE_TTL: Duration = Duration::from_secs(30);
+
+struct CreditsCache {
+    at: Instant,
+    value: f64,
+}
+
+/// The live OpenRouter credits reader. The key is resolved fresh through
+/// `KeySource` on every fetch (never cached itself, same posture
+/// `model::OpenRouterCatalog` takes), and every error that could carry it
+/// goes through [`model::redact`] before it leaves this type.
+pub struct OpenRouterCredits {
+    client: reqwest::Client,
+    key_source: model::KeySource,
+    cache: tokio::sync::Mutex<Option<CreditsCache>>,
+}
+
+impl OpenRouterCredits {
+    pub fn new(key_source: model::KeySource) -> Self {
+        Self {
+            client: reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(30))
+                .build()
+                .expect("client builder failed"),
+            key_source,
+            cache: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    async fn fetch(&self) -> Result<f64, String> {
+        let key = self
+            .key_source
+            .resolve()
+            .ok_or_else(|| "No OpenRouter key configured.".to_string())?;
+        let res = self
+            .client
+            .get(CREDITS_URL)
+            .bearer_auth(&key)
+            .send()
+            .await
+            .map_err(|e| model::redact(&e.to_string(), Some(&key)))?;
+        if !res.status().is_success() {
+            let status = res.status().as_u16();
+            return Err(model::redact(
+                &format!("OpenRouter credits returned {status}"),
+                Some(&key),
+            ));
+        }
+        let body: RawCreditsResponse = res
+            .json()
+            .await
+            .map_err(|e| model::redact(&e.to_string(), Some(&key)))?;
+        Ok(body.data.and_then(|d| d.total_usage).unwrap_or(0.0))
+    }
+}
+
+#[async_trait::async_trait]
+impl CreditsPort for OpenRouterCredits {
+    async fn total_usage(&self) -> Result<f64, String> {
+        {
+            let cache = self.cache.lock().await;
+            if let Some(c) = cache.as_ref()
+                && c.at.elapsed() < CREDITS_CACHE_TTL
+            {
+                return Ok(c.value);
+            }
+        }
+        let value = self.fetch().await?;
+        let mut cache = self.cache.lock().await;
+        *cache = Some(CreditsCache {
+            at: Instant::now(),
+            value,
+        });
+        Ok(value)
+    }
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct RawCreditsResponse {
+    data: Option<RawCreditsData>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct RawCreditsData {
+    total_usage: Option<f64>,
+}
+
+/// A `CreditsPort` that answers a fixed value (or error) every call. For
+/// tests: no key, no network, no cache to reason about.
+pub struct FakeCredits {
+    result: std::sync::Mutex<Result<f64, String>>,
+}
+
+impl FakeCredits {
+    /// Answers `total_usage` with this dollar figure every call.
+    pub fn usage(value: f64) -> Self {
+        Self {
+            result: std::sync::Mutex::new(Ok(value)),
+        }
+    }
+
+    /// Answers every call with this error - the credits-read-failure case
+    /// `gate_run`/`get_spend` both have to handle (a read failure ALLOWS
+    /// the run - see `gate_run`'s doc - but still says so).
+    pub fn failing(message: impl Into<String>) -> Self {
+        Self {
+            result: std::sync::Mutex::new(Err(message.into())),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl CreditsPort for FakeCredits {
+    async fn total_usage(&self) -> Result<f64, String> {
+        self.result
+            .lock()
+            .expect("fake credits mutex poisoned")
+            .clone()
+    }
 }

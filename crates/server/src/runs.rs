@@ -251,6 +251,32 @@ impl RunManager {
     /// `start`, minus the `notice`/routing/snapshot legwork out of scope for
     /// S1.
     pub fn start(self: &Arc<Self>, options: StartOptions) -> String {
+        self.start_inner(options, None)
+    }
+
+    /// S2-F-04: same as `start`, but with a notice emitted BEFORE the
+    /// drive task is spawned - so it is guaranteed to land first in the
+    /// backlog `subscribe` replays, whatever the tokio scheduler does
+    /// with the spawned task afterward (a routed-model notice from
+    /// `drive` itself, or `escalate`'s, would otherwise race it on a
+    /// multi-threaded runtime). Used for the spend ceiling's
+    /// 15%-headroom warning (`routes/messages.rs`). `start` keeps its
+    /// existing one-argument shape on purpose: `StartOptions` has no
+    /// `starting_notice` field, so every other caller - rooms, every
+    /// test - keeps compiling with nothing new to fill in.
+    pub fn start_with_notice(
+        self: &Arc<Self>,
+        options: StartOptions,
+        starting_notice: Option<String>,
+    ) -> String {
+        self.start_inner(options, starting_notice)
+    }
+
+    fn start_inner(
+        self: &Arc<Self>,
+        options: StartOptions,
+        starting_notice: Option<String>,
+    ) -> String {
         let id = Uuid::new_v4().to_string();
         let now = now_iso();
 
@@ -306,6 +332,13 @@ impl RunManager {
         // ROOM round's later members visible even though nobody holds an SSE
         // connection for them.
         self.changes.touch(ChangeKind::Working);
+
+        // S2-F-04: emitted here, synchronously, before the drive task is
+        // even spawned - see `start_with_notice`'s doc for why the
+        // ordering matters.
+        if let Some(message) = starting_notice {
+            self.emit(&id, RunEvent::Notice { message });
+        }
 
         let manager = Arc::clone(self);
         let run_id = id.clone();

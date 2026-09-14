@@ -123,22 +123,37 @@ async fn post_message(
             .into_response());
     }
 
-    // S2-05: ceiling gate. Checked BEFORE the run starts and never during:
-    // stopping an answer halfway wastes what was already spent and loses the
-    // reply. The gate only refuses to START.
+    // S2-05/S2-F-04: ceiling gate, reading the account's real spend now
+    // (F3/D6: this used to hardcode `account_usage = None`, whose arm
+    // always allows - the 402 branch below was dead code). Checked BEFORE
+    // the run starts and never during: stopping an answer halfway wastes
+    // what was already spent and loses the reply. The gate only refuses
+    // to START. `db` is never held across the credits `.await` - see
+    // `AppState::db`'s doc on why a guard held across an await would not
+    // compile inside a spawned task, and the same reasoning applies here
+    // to any future caller of this handler under a runtime that cares.
+    let ceiling = {
+        let db = state.db();
+        spend::get_ceiling(&db)
+    };
+    let account_usage = state.credits.total_usage().await.ok();
     let gate_check = {
         let db = state.db();
-        let ceiling = spend::get_ceiling(&db);
-        // For now, account_usage is None (S2-05 doesn't read OpenRouter yet)
-        spend::gate_run(&db, ceiling, None)
+        spend::gate_run(&db, ceiling, account_usage)
     };
-    if let spend::GateResult::Denied { reason } = gate_check {
-        return Ok((
-            StatusCode::PAYMENT_REQUIRED,
-            Json(json!({"error": reason, "kind": "spend-ceiling"})),
-        )
-            .into_response());
-    }
+    // Allowed carries a warning (near the ceiling, or the balance could
+    // not be read) that has to reach the run as its first event - see
+    // `RunManager::start_with_notice`'s doc.
+    let starting_notice = match gate_check {
+        spend::GateResult::Denied { reason } => {
+            return Ok((
+                StatusCode::PAYMENT_REQUIRED,
+                Json(json!({"error": reason, "kind": "spend-ceiling"})),
+            )
+                .into_response());
+        }
+        spend::GateResult::Allowed { warning } => warning,
+    };
 
     // 🔴 `@someone` sends this turn to that bot instead, in the same
     // thread; `@everyone` inside a room wakes every member and forbids
@@ -287,17 +302,21 @@ async fn post_message(
             .register(&conversation_id, round, everyone);
     }
 
-    let run_id = state.runs.start(StartOptions {
-        bot_id: speaker.id.clone(),
-        conversation_id: conversation_id.clone(),
-        model,
-        messages,
-        trigger: Trigger::Chat,
-        // Only a real ROUND (more than the owner alone) needs to chain and
-        // costs N times one answer - a narrowed `@mention` inside a room
-        // leaves `round` empty and is priced like any other chat turn.
-        room: is_room_round,
-    });
+    let run_id = state.runs.start_with_notice(
+        StartOptions {
+            bot_id: speaker.id.clone(),
+            conversation_id: conversation_id.clone(),
+            model,
+            messages,
+            trigger: Trigger::Chat,
+            // Only a real ROUND (more than the owner alone) needs to chain
+            // and costs N times one answer - a narrowed `@mention` inside a
+            // room leaves `round` empty and is priced like any other chat
+            // turn.
+            room: is_room_round,
+        },
+        starting_notice,
+    );
 
     // The stream SUBSCRIBES to the run. It does not drive it, so closing
     // the tab costs nothing.

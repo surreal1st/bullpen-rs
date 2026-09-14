@@ -17,6 +17,12 @@ model = { workspace = true }
 # S1-05: `runs.rs` writes the `runs` row with raw SQL against `Db::conn()`,
 # same as `store` itself does - no query API for that table exists yet.
 rusqlite = { workspace = true }
+# S2-F-04: `spend::OpenRouterCredits` reads OpenRouter's credits endpoint
+# directly, the same way `model::catalog::OpenRouterCatalog` does - a
+# `CreditsPort` trait object needs `async-trait` for the same reason
+# `model::Catalog` does.
+reqwest = { workspace = true }
+async-trait = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }

@@ -1,7 +1,7 @@
 //! S2-05: GET/PUT /api/spend and /api/spend/ceiling. Port of
 //! `projects/bullpen-night/src/server/app.ts:1345-1380`.
 
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::response::IntoResponse;
 use axum::routing::{get, put};
 use axum::{Json, Router};
@@ -32,16 +32,31 @@ struct GetSpendResponse {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AccountSpend {
-    /// Dollars purchased on the account.
-    total_credits: f64,
-    /// Dollars spent, all time, across everything using this key.
+    /// Dollars spent, all time, across everything using this key -
+    /// `CreditsPort::total_usage`'s own number. TS's fuller `AccountSpend`
+    /// (`totalCredits`/`remaining` too) needs `total_credits`, which
+    /// nothing on `AppState` reads yet - no client panel consumes this
+    /// route today (`grep -rn /api/spend crates/client` is empty), so
+    /// there is nothing this would silently break.
     total_usage: f64,
-    /// Dollars left.
-    remaining: f64,
 }
 
-async fn get_spend(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
-    let month = spend::current_month(chrono::Utc::now());
+#[derive(Deserialize)]
+struct SpendQuery {
+    #[serde(default)]
+    month: Option<String>,
+}
+
+async fn get_spend(
+    State(state): State<AppState>,
+    Query(query): Query<SpendQuery>,
+) -> Result<impl IntoResponse, AppError> {
+    // F11: `?month=` (`app.ts:1346`) was previously ignored - the panel
+    // could only ever see the current month.
+    let month = query
+        .month
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(|| spend::current_month(chrono::Utc::now()));
     let ceiling = {
         let db = state.db();
         spend::get_ceiling(&db)
@@ -52,17 +67,28 @@ async fn get_spend(State(state): State<AppState>) -> Result<impl IntoResponse, A
         spend::spend_by_bot(&db, &month)?
     };
 
-    // Note: S2-05 does not implement OpenRouter credits reading yet.
-    // That would require a CreditsPort (network dependency).
-    // For now, return the database info only.
-    Ok(Json(GetSpendResponse {
-        month,
-        ceiling,
-        account: None,
-        bots,
-        account_readable: false,
-        error: None,
-    }))
+    // F3/D6: reads the real balance now instead of hardcoding
+    // `account: None, accountReadable: false` - a read failure answers
+    // readable=false with the (already-redacted, by `CreditsPort`) error
+    // rather than a panic or a 500.
+    match state.credits.total_usage().await {
+        Ok(total_usage) => Ok(Json(GetSpendResponse {
+            month,
+            ceiling,
+            account: Some(AccountSpend { total_usage }),
+            bots,
+            account_readable: true,
+            error: None,
+        })),
+        Err(err) => Ok(Json(GetSpendResponse {
+            month,
+            ceiling,
+            account: None,
+            bots,
+            account_readable: false,
+            error: Some(err),
+        })),
+    }
 }
 
 #[derive(Deserialize, Default)]
