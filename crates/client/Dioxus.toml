@@ -6,5 +6,6 @@ title = "Bullpen"
 base_path = "bullpen"
 
 [web.resource]
+dev = []
 style = []
 script = []
