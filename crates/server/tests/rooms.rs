@@ -179,13 +179,20 @@ async fn read_next_frame(
 }
 
 // 1. `POST /api/rooms` with 1 id -> 400 "at least two"; 7 -> 400 "at most
-//    six"; 3 -> 201 with `memberIds`.
+//    six"; 6 -> 201 with `memberIds`; thread with 6 members -> 400.
 #[tokio::test]
 async fn create_room_route_enforces_the_roster_size() {
     let db = open_db();
     seed_bot(&db, "arthur", "Arthur");
     seed_bot(&db, "riley", "Riley");
     seed_bot(&db, "jason", "Jason");
+    seed_bot(&db, "b0", "Bot0");
+    seed_bot(&db, "b1", "Bot1");
+    seed_bot(&db, "b2", "Bot2");
+    seed_bot(&db, "b3", "Bot3");
+    seed_bot(&db, "b4", "Bot4");
+    seed_bot(&db, "b5", "Bot5");
+    seed_bot(&db, "b6", "Bot6");
     let app = app_for(db, Arc::new(ScriptedPort::new(vec![])));
 
     let (status, body) = post_json(
@@ -197,7 +204,7 @@ async fn create_room_route_enforces_the_roster_size() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(body["error"].as_str().unwrap().contains("at least two"));
 
-    let seven: Vec<String> = (0..7).map(|i| format!("b{i}")).collect();
+    let seven = vec!["b0", "b1", "b2", "b3", "b4", "b5", "b6"];
     let (status, body) = post_json(
         app.clone(),
         "/api/rooms",
@@ -206,6 +213,20 @@ async fn create_room_route_enforces_the_roster_size() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(body["error"].as_str().unwrap().contains("at most six"));
+
+    let six = vec!["b0", "b1", "b2", "b3", "b4", "b5"];
+    let (status, body) = post_json(
+        app.clone(),
+        "/api/rooms",
+        json!({"title": "BigGroup", "memberIds": six}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(
+        body["room"]["memberIds"].as_array().unwrap().len(),
+        6,
+        "got {body:?}"
+    );
 
     let (status, body) = post_json(
         app.clone(),
@@ -219,6 +240,16 @@ async fn create_room_route_enforces_the_roster_size() {
         3,
         "got {body:?}"
     );
+
+    // Thread with 6 members (7 total including owner) -> 400
+    let (status, body) = post_json(
+        app.clone(),
+        "/api/bots/arthur/threads",
+        json!({"members": ["b0", "b1", "b2", "b3", "b4", "b5"]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"].as_str().unwrap().contains("at most six"));
 }
 
 // 2. A message into a 3-bot room: three model requests in owner-then-members

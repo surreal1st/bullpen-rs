@@ -176,8 +176,8 @@ pub fn validate_members(db: &Db, bot_id: &str, members: &[String]) -> Result<Vec
         }
     }
 
-    if unique.len() > MAX_ROOM_MEMBERS {
-        return Err("A room can have at most six other bots.".to_string());
+    if unique.len() > MAX_ROOM_MEMBERS - 1 {
+        return Err("A room can have at most six bots.".to_string());
     }
 
     for id in &unique {
