@@ -14,7 +14,8 @@
 use std::sync::{Arc, Mutex};
 
 use futures::StreamExt;
-use model::{CHEAP_DEFAULT_MODEL, ModelEvent, ModelPort, ModelRequest, ToolSpec};
+use model::ladder::{Trigger, default_model, model_for_run};
+use model::{ModelEvent, ModelPort, ModelRequest, ModelUsage, ToolSpec};
 use serde::Deserialize;
 use serde_json::json;
 use store::{Db, NewMessage};
@@ -25,41 +26,52 @@ use crate::tools::RoomHook;
 pub fn spec() -> ToolSpec {
     ToolSpec {
         name: "message_bot".to_string(),
-        description: "Ask another bot a question, or post to a group chat by its title. \
-Given a bot's id or name: runs a short nested turn and returns its reply. Given a room's \
-title: posts your message there for the room to see."
+        description: "Ask another bot on the roster something and use its answer, or name a \
+group chat instead of a bot to post there so every member sees it and can weigh in. Use it \
+when the question is squarely someone else's area, not to avoid thinking."
             .to_string(),
         parameters: json!({
             "type": "object",
             "properties": {
-                "to": { "type": "string", "description": "a bot's id/name, or a room's title" },
-                "message": { "type": "string" }
+                "bot": { "type": "string", "description": "The bot's name (such as Jason) or a group chat's title." },
+                "question": { "type": "string", "description": "What to ask, in full. It has no idea what you are working on." }
             },
-            "required": ["to", "message"]
+            "required": ["bot", "question"]
         }),
     }
 }
 
 #[derive(Deserialize)]
 struct Args {
-    to: String,
-    message: String,
+    bot: String,
+    question: String,
 }
 
+/// F3: the second element is the delegated model's own spend, when the bot
+/// branch actually reached a model - `None` for the room branch and for
+/// every early return, so `runs.rs`'s tool loop has nothing to add for
+/// those. F2: `trigger`/`room` are the CALLER's, threaded down from
+/// `tools::build` so the colleague's call is floored the same way the
+/// caller's own would be.
 pub async fn run(
     db: &Arc<Mutex<Db>>,
     port: &Arc<dyn ModelPort>,
     caller_bot_id: &str,
     room_hook: &RoomHook,
+    trigger: Trigger,
+    room: bool,
     args: &str,
-) -> String {
+) -> (String, Option<ModelUsage>) {
     let Ok(parsed) = serde_json::from_str::<Args>(args) else {
-        return "Could not read `to`/`message`.".to_string();
+        return ("Could not read `bot`/`question`.".to_string(), None);
     };
-    let to = parsed.to.trim();
-    let message = parsed.message.trim();
-    if message.is_empty() {
-        return "Nothing was said: the message was empty.".to_string();
+    let to = parsed.bot.trim();
+    let question = parsed.question.trim();
+    if question.is_empty() {
+        return (
+            "Nothing was asked: the question was empty.".to_string(),
+            None,
+        );
     }
 
     // 1. A room, matched by title.
@@ -70,7 +82,7 @@ pub async fn run(
             .into_iter()
             .find(|r| r.title.eq_ignore_ascii_case(to))
     };
-    if let Some(room) = room_match {
+    if let Some(room_summary) = room_match {
         let caller_name = {
             let db = db.lock().expect("db mutex poisoned");
             store::get_bot(&db, caller_bot_id)
@@ -82,12 +94,12 @@ pub async fn run(
             // Guest-attributed unless the caller is the room's own database
             // owner - the same rule an @mention reply uses.
             let owner_is_caller =
-                room.member_ids.first().map(String::as_str) == Some(caller_bot_id);
+                room_summary.member_ids.first().map(String::as_str) == Some(caller_bot_id);
             store::append_message(
                 &db,
-                &room.id,
+                &room_summary.id,
                 "assistant",
-                message,
+                question,
                 NewMessage {
                     bot_id: if owner_is_caller {
                         None
@@ -111,37 +123,69 @@ pub async fn run(
             .lock()
             .expect("room hook mutex poisoned")
             .as_ref()
-            .is_some_and(|hook| hook(&room.id, false));
+            .is_some_and(|hook| hook(&room_summary.id, false));
         let said_by = caller_name.unwrap_or_else(|| "You".to_string());
         if !awakened {
-            return format!("The {} room already has a round in progress.", room.title);
+            return (
+                format!(
+                    "The {} room already has a round in progress.",
+                    room_summary.title
+                ),
+                None,
+            );
         }
-        return format!(
-            "Posted to the {} room. {said_by} said: {message}",
-            room.title
+        return (
+            format!(
+                "Posted to the {} room. {said_by} said: {question}",
+                room_summary.title
+            ),
+            None,
         );
     }
 
     // 2. A bot, matched by id or name.
-    let target = {
+    let bots = {
         let db = db.lock().expect("db mutex poisoned");
-        store::list_bots(&db)
-            .expect("list_bots")
-            .into_iter()
-            .find(|b| b.id == to || b.name.eq_ignore_ascii_case(to))
+        store::list_bots(&db).expect("list_bots")
     };
+    let target = bots
+        .iter()
+        .find(|b| b.id == to || b.name.eq_ignore_ascii_case(to))
+        .cloned();
+    // F10: an unresolvable name hands back the whole roster so the model can
+    // retry with a real one, instead of a dead end it can only apologise for.
     let Some(bot) = target else {
-        return format!("No such bot or room: {to}");
+        let roster = bots
+            .iter()
+            .map(|b| b.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return (
+            format!("There is no bot called that. The roster is: {roster}"),
+            None,
+        );
     };
+    // F10: a bot asking itself is a paid model call for nothing - it already
+    // has the answer.
+    if bot.id == caller_bot_id {
+        return ("That is you. Answer it yourself.".to_string(), None);
+    }
 
     let framed = format!(
-        "A colleague is asking you this, on Josh's behalf:\n\n{message}\n\nAnswer as yourself, \
+        "A colleague is asking you this, on Josh's behalf:\n\n{question}\n\nAnswer as yourself, \
 briefly. If it is not your area, say whose it is rather than guessing."
     );
-    let request_model = bot
-        .model
-        .clone()
-        .unwrap_or_else(|| CHEAP_DEFAULT_MODEL.to_string());
+    // F2: the colleague's OWN pin does not get to opt out of the caller's
+    // floor - `model_for_run` is the only place a run's model is settled,
+    // same as the TS `askBot` (`delegate.ts:105`).
+    let request_model = {
+        let db_guard = db.lock().expect("db mutex poisoned");
+        let raw = bot
+            .model
+            .clone()
+            .unwrap_or_else(|| default_model(&db_guard));
+        model_for_run(&db_guard, trigger, &raw, room)
+    };
     let messages = {
         let db = db.lock().expect("db mutex poisoned");
         prompt::build_prompt(&db, &bot, &[HistoryTurn::user(framed)])
@@ -153,21 +197,28 @@ briefly. If it is not your area, say whose it is rather than guessing."
         ..Default::default()
     });
     let mut text = String::new();
+    let mut usage: Option<ModelUsage> = None;
     while let Some(event) = stream.next().await {
         match event {
             ModelEvent::Delta { text: chunk } => text.push_str(&chunk),
-            ModelEvent::Done { .. } => break,
+            ModelEvent::Done { usage: u, .. } => {
+                usage = u;
+                break;
+            }
             // No nested tool loop here - see the module doc.
-            ModelEvent::ToolCalls { .. } => break,
+            ModelEvent::ToolCalls { usage: u, .. } => {
+                usage = u;
+                break;
+            }
             ModelEvent::Error { message, .. } => {
-                return format!("{} could not answer: {message}", bot.name);
+                return (format!("{} could not answer: {message}", bot.name), usage);
             }
         }
     }
 
     if text.trim().is_empty() {
-        format!("{} had nothing to say.", bot.name)
+        (format!("{} had nothing to say.", bot.name), usage)
     } else {
-        format!("{}: {}", bot.name, text.trim())
+        (format!("{}: {}", bot.name, text.trim()), usage)
     }
 }

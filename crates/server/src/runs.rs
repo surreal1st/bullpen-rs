@@ -259,10 +259,11 @@ impl RunManager {
         let run_id = id.clone();
         let bot_id = options.bot_id.clone();
         let conversation_id = options.conversation_id.clone();
+        let floor = (options.trigger, options.room);
         let messages = options.messages;
         tokio::spawn(async move {
             manager
-                .drive(run_id, bot_id, conversation_id, model, messages)
+                .drive(run_id, bot_id, conversation_id, model, messages, floor)
                 .await;
         });
 
@@ -383,12 +384,18 @@ impl RunManager {
         )
     }
 
-    fn toolbox_for(self: &Arc<Self>, bot_id: &str) -> ToolBox {
+    /// F2: `trigger`/`room` are the CALLER's - forwarded into the toolbox so
+    /// a nested `message_bot` delegated call is floored the same way this
+    /// run's own model choice was, rather than trusting the callee's raw
+    /// pin.
+    fn toolbox_for(self: &Arc<Self>, bot_id: &str, trigger: Trigger, room: bool) -> ToolBox {
         tools::build(
             Arc::clone(&self.db),
             Arc::clone(&self.port),
             bot_id.to_string(),
             Arc::clone(&self.start_room_turn),
+            trigger,
+            room,
         )
     }
 
@@ -399,8 +406,13 @@ impl RunManager {
         conversation_id: String,
         model: String,
         messages: Vec<ModelMessage>,
+        // F2: the caller's (trigger, room) floor, bundled into one param so
+        // this stays under clippy's `too_many_arguments` - both are only
+        // ever used together, threaded straight into the toolbox below.
+        floor: (Trigger, bool),
     ) {
-        let toolbox = self.toolbox_for(&bot_id);
+        let (trigger, room) = floor;
+        let toolbox = self.toolbox_for(&bot_id, trigger, room);
         let outcome = self.run_turn(&run_id, model, messages, &toolbox).await;
         self.settle(&run_id, &bot_id, &conversation_id, outcome);
     }
@@ -538,7 +550,13 @@ impl RunManager {
                         args: call.arguments.clone(),
                     },
                 );
-                let result = toolbox.run(&call.name, &call.arguments).await;
+                let (result, delegated_usage) = toolbox.run(&call.name, &call.arguments).await;
+                // F3: a `message_bot` call that reached a colleague's model
+                // spent real money nobody watching THIS run would otherwise
+                // see charged to it - folded into the same accumulator
+                // `settle` already writes to `cost_usd`/the token columns
+                // (TS `runs.ts:1186-1204`, "Delegated cost lands here").
+                usage = add_usage(usage, delegated_usage);
                 let clipped: String = result.chars().take(4000).collect();
                 self.emit(
                     run_id,

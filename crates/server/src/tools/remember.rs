@@ -11,35 +11,35 @@ use store::Db;
 pub fn spec() -> ToolSpec {
     ToolSpec {
         name: "remember".to_string(),
-        description: "Write one fact or event to your own memory log, so a future run of yours \
-can recall it. Use for things worth knowing later, not for what you already said in this reply."
+        description: "Save one durable fact so a future conversation has it. Use it for \
+decisions, preferences and facts that outlive this conversation, never for chit-chat."
             .to_string(),
         parameters: json!({
             "type": "object",
             "properties": {
-                "content": { "type": "string" }
+                "fact": { "type": "string", "description": "One fact, stated plainly and in full." }
             },
-            "required": ["content"]
+            "required": ["fact"]
         }),
     }
 }
 
 #[derive(Deserialize)]
 struct Args {
-    content: String,
+    fact: String,
 }
 
 pub fn run(db: &Arc<Mutex<Db>>, bot_id: &str, args: &str) -> String {
     let Ok(parsed) = serde_json::from_str::<Args>(args) else {
-        return "Could not read `content`.".to_string();
+        return "Could not read `fact`.".to_string();
     };
-    let content = parsed.content.trim();
-    if content.is_empty() {
-        return "Nothing to remember: the content was empty.".to_string();
+    let fact = parsed.fact.trim();
+    if fact.is_empty() {
+        return "Nothing to remember: the fact was empty.".to_string();
     }
 
     let db = db.lock().expect("db mutex poisoned");
-    store::remember(&db, bot_id, content, "bot").expect("remember");
+    store::remember(&db, bot_id, fact, "bot").expect("remember");
 
     "Remembered.".to_string()
 }

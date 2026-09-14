@@ -580,7 +580,7 @@ async fn message_bot_into_its_own_room_mid_round_does_not_start_a_second_round()
     seed_bot(&db, "arthur", "Arthur");
     seed_bot(&db, "riley", "Riley");
 
-    let message_bot_args = json!({"to": "Loop", "message": "echo"}).to_string();
+    let message_bot_args = json!({"bot": "Loop", "question": "echo"}).to_string();
     let port = Arc::new(ScriptedPort::new(vec![
         text_script("ok"), // arthur's (owner's) leg
         vec![ModelEvent::ToolCalls {
@@ -692,5 +692,116 @@ async fn an_instant_error_owner_run_still_chains_to_member_two() {
             .iter()
             .any(|id| id.as_deref() == Some("jason")),
         "expected jason to have answered: {answered_bot_ids:?}"
+    );
+}
+
+// 10. F13: port of `test/rooms.test.ts:484` - a caller who is NOT a room
+//     member reaches it by `message_bot`+title. The message posts under the
+//     CALLER's own name (guest-attributed - arthur owns none of "Growth"'s
+//     member slots, riley does), and wakes the round the same way a person
+//     typing into it does.
+#[tokio::test]
+async fn message_bot_by_title_posts_under_the_callers_name_and_wakes_the_round() {
+    let db = open_db();
+    let cookie = seed_session(&db);
+    seed_bot(&db, "arthur", "Arthur");
+    seed_bot(&db, "riley", "Riley");
+    seed_bot(&db, "jason", "Jason");
+
+    let ask_growth = json!({"bot": "Growth", "question": "check the numbers"}).to_string();
+    let port = Arc::new(ScriptedPort::new(vec![
+        vec![ModelEvent::ToolCalls {
+            calls: vec![ToolCall {
+                id: "c1".to_string(),
+                name: "message_bot".to_string(),
+                arguments: ask_growth,
+            }],
+            usage: None,
+        }], // arthur's own run: asks the Growth room by title
+        text_script("ok"), // arthur's own final answer, then riley's and
+                            // jason's room legs - all the same reply text.
+    ]));
+    let app = app_for(db, Arc::clone(&port) as Arc<dyn ModelPort>);
+
+    // arthur is deliberately NOT a member - riley is "Growth"'s owner.
+    let room_id = create_room(&app, "Growth", &["riley", "jason"], &cookie).await;
+
+    let resp = app
+        .clone()
+        .oneshot(post_req(
+            "/api/bots/arthur/messages",
+            json!({"text": "ask the growth room to check the numbers"}),
+            &cookie,
+        ))
+        .await
+        .expect("oneshot");
+    let _ = resp.into_body().collect().await.expect("collect");
+
+    let mut posted_bot_id: Option<Value> = None;
+    for _ in 0..300 {
+        let messages = conversation_messages(&app, "riley", &room_id, &cookie).await;
+        if let Some(m) = messages.iter().find(|m| m["content"] == "check the numbers") {
+            posted_bot_id = Some(m["botId"].clone());
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        posted_bot_id,
+        Some(Value::String("arthur".to_string())),
+        "expected the post stamped under arthur's own name"
+    );
+
+    // The post itself plus riley and jason both weighing in.
+    let n = wait_for_assistant_count(&app, "riley", &room_id, 3, &cookie).await;
+    assert_eq!(n, 3, "got {n}");
+}
+
+// 11. F2: a `message_bot` call made DURING a room round is floored the same
+//     way the round's own per-member turns are - a colleague's premium pin
+//     does not get to opt out just because the ask came through
+//     `message_bot` rather than the round engine directly. Bite: drop the
+//     `model_for_run` wrap in `message_bot::run` and the delegated request
+//     below reads Jason's raw pin instead of the room's cheap floor.
+#[tokio::test]
+async fn message_bot_floors_the_delegated_call_during_a_room_round() {
+    let db = open_db();
+    let cookie = seed_session(&db);
+    seed_bot(&db, "arthur", "Arthur");
+    seed_bot(&db, "riley", "Riley");
+    seed_bot(&db, "jason", "Jason");
+    // "opus" is a PREMIUM_MARKERS name - the exact shape of pin that ran the
+    // bill up in production if a delegated call ever ignored the floor.
+    pin_model(&db, "jason", "anthropic/claude-opus-5");
+
+    let ask_jason = json!({"bot": "Jason", "question": "check the numbers"}).to_string();
+    let port = Arc::new(ScriptedPort::new(vec![
+        vec![ModelEvent::ToolCalls {
+            calls: vec![ToolCall {
+                id: "c1".to_string(),
+                name: "message_bot".to_string(),
+                arguments: ask_jason,
+            }],
+            usage: None,
+        }], // arthur's room leg, step 1: asks Jason (a NON-member)
+        text_script("Looks fine."), // the delegated call to Jason, arthur's
+                                     // own final answer, and riley's own
+                                     // room leg all reuse this same reply.
+    ]));
+    let app = app_for(db, Arc::clone(&port) as Arc<dyn ModelPort>);
+
+    let room_id = create_room(&app, "Pair", &["arthur", "riley"], &cookie).await;
+    send_message(&app, "arthur", &room_id, "go", &cookie).await;
+    wait_for_assistant_count(&app, "arthur", &room_id, 2, &cookie).await;
+
+    let requests = port.requests();
+    let delegated = requests
+        .iter()
+        .find(|r| as_text(&r.messages[0].content).contains("You are **Jason**."))
+        .expect("expected a delegated call addressed to Jason");
+    assert_eq!(
+        delegated.model,
+        model::CHEAP_DEFAULT_MODEL,
+        "the delegated call must go through the room's cheap-model floor, not Jason's own pin"
     );
 }
