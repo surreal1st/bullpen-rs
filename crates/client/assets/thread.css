@@ -586,6 +586,42 @@
   min-width: 0;
 }
 
+/* S4-05: the judge's own line ("Why it's asking: <reason>"), shown only
+   when the auto-review judge (not the grid's plain ask) produced this
+   approval - see `approvals.rs`'s `judge_line`. Reused as-is by the
+   Settings "Auto review" card's log table (`settings.rs`'s
+   `AutoReviewSection`) so the two surfaces read as one feature. */
+.approval-judge {
+  margin: 0.3rem 0 0;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.judge-badge {
+  display: inline-block;
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  border-radius: 5px;
+  padding: 0 0.3rem;
+  margin-right: 0.3rem;
+}
+
+.judge-risky {
+  color: #f0c674;
+  border: 1px solid #4a3f21;
+}
+
+.judge-dangerous {
+  color: #e5534b;
+  border: 1px solid #5c2521;
+}
+
+.judge-safe {
+  color: var(--muted);
+  border: 1px solid var(--line);
+}
+
 /* A question is a colleague asking which way to go, not a command about to
    run - cool and quiet rather than the amber "something is about to happen
    to your machine" ground. */

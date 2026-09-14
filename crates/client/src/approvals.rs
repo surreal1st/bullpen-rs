@@ -83,6 +83,23 @@ fn cause_of(trigger: Option<&str>) -> &'static str {
     }
 }
 
+/// S4-05: what the "Why it's asking" line shows, derived from the two
+/// judge columns `GET /api/approvals` now carries. `None` whenever either
+/// half is missing - a plain grid "ask" (never judged) sends both `null`,
+/// and a lone verdict with no reason (or vice versa) is not a state the
+/// server ever produces, so treated the same as absent rather than guessed
+/// at. Kept as a free function, not inlined into the component, so the
+/// "renders nothing when both fields are null" bite is a plain `#[test]`
+/// rather than a browser shot.
+fn judge_line(verdict: Option<&str>, reason: Option<&str>) -> Option<(&'static str, String)> {
+    let (verdict, reason) = (verdict?, reason?);
+    let class = match verdict {
+        "dangerous" => "dangerous",
+        _ => "risky",
+    };
+    Some((class, format!("Why it's asking: {reason}")))
+}
+
 /// Renders a tool call's arguments for the card. A single-key object shows
 /// its one value bare (what matters when approving `shell` is the command,
 /// not its JSON encoding); anything else is pretty-printed at one-space
@@ -146,6 +163,8 @@ pub fn Approvals() -> Element {
                     tool_name: group.head.tool_name.clone(),
                     tool_args: group.head.tool_args.clone(),
                     trigger: group.head.trigger.clone(),
+                    judge_verdict: group.head.judge_verdict.clone(),
+                    judge_reason: group.head.judge_reason.clone(),
                     group_ids: group.ids.clone(),
                     count: group.count,
                     items,
@@ -161,6 +180,8 @@ fn ApprovalCard(
     tool_name: String,
     tool_args: String,
     trigger: Option<String>,
+    judge_verdict: Option<String>,
+    judge_reason: Option<String>,
     group_ids: Vec<String>,
     count: usize,
     items: Signal<Vec<PendingApproval>>,
@@ -184,6 +205,7 @@ fn ApprovalCard(
         "approval"
     };
     let cause = cause_of(trigger.as_deref());
+    let judge = judge_line(judge_verdict.as_deref(), judge_reason.as_deref());
 
     rsx! {
         article { class: "{card_class}",
@@ -201,6 +223,12 @@ fn ApprovalCard(
                 p { class: "approval-question", "{q.question}" }
             } else {
                 pre { class: "mono approval-args", "{pretty(&tool_args)}" }
+            }
+            if let Some((badge_class, text)) = judge {
+                p { class: "approval-judge",
+                    span { class: "judge-badge judge-{badge_class}", "{badge_class}" }
+                    " {text}"
+                }
             }
             if let Some(q) = question {
                 div { class: "approval-answer",
@@ -307,5 +335,34 @@ fn ApprovalCard(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::judge_line;
+
+    #[test]
+    fn renders_nothing_when_both_fields_are_null() {
+        assert_eq!(judge_line(None, None), None);
+    }
+
+    #[test]
+    fn renders_nothing_with_only_a_verdict_or_only_a_reason() {
+        assert_eq!(judge_line(Some("risky"), None), None);
+        assert_eq!(judge_line(None, Some("could delete data")), None);
+    }
+
+    #[test]
+    fn risky_gets_the_amber_badge() {
+        let (class, text) = judge_line(Some("risky"), Some("touches the repo")).unwrap();
+        assert_eq!(class, "risky");
+        assert_eq!(text, "Why it's asking: touches the repo");
+    }
+
+    #[test]
+    fn dangerous_gets_the_red_badge() {
+        let (class, _) = judge_line(Some("dangerous"), Some("could wipe the drive")).unwrap();
+        assert_eq!(class, "dangerous");
     }
 }

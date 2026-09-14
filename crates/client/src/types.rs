@@ -183,6 +183,13 @@ pub struct PendingApproval {
     pub created_at: String,
     #[serde(default)]
     pub trigger: Option<String>,
+    /// S4-05: set only when the auto-review judge (not the grid's plain
+    /// ask) produced this approval - null for an ordinary grid "ask" and
+    /// for anything predating migration 20. See `judge.rs`'s Design doc.
+    #[serde(default)]
+    pub judge_verdict: Option<String>,
+    #[serde(default)]
+    pub judge_reason: Option<String>,
 }
 
 /// `GET /api/approvals`'s response shape.
@@ -294,6 +301,33 @@ pub struct RoutingState {
     pub text: String,
     #[serde(default)]
     pub log: Vec<RoutingLogEntry>,
+}
+
+/// One row of the Auto review card's "Last 20 judgements" table. Mirrors
+/// `store::auto_review::LogEntry` on the wire - a strict subset (no
+/// `bot_id`/`run_id`/`tool_name`: the card has nothing to link them to
+/// yet, same reasoning as `RoutingLogEntry` above).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoReviewLogEntry {
+    pub id: String,
+    pub created_at: String,
+    pub description: String,
+    pub verdict: String,
+    pub decision: String,
+}
+
+/// `GET`/`PUT /api/auto-review/judge`'s response shape.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+pub struct AutoReviewState {
+    pub enabled: bool,
+}
+
+/// `GET /api/auto-review/log`'s response shape.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct AutoReviewLogResponse {
+    #[serde(default)]
+    pub entries: Vec<AutoReviewLogEntry>,
 }
 
 /// `GET`/`PUT /api/rules`'s response shape.

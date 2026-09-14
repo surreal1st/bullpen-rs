@@ -426,6 +426,21 @@
   color: var(--ink-dim);
 }
 
+/* S4-05: the Auto review card's "Last 20 judgements" table - same shape as
+   `.routing-log` above, kept as its own class since it is a distinct card
+   (`settings.rs`'s `AutoReviewSection`), not a rename of the routing one.
+   `.judge-badge`/`.judge-risky`/`.judge-dangerous`/`.judge-safe` are
+   defined once in `thread.css` (the approval card's own badge) and reused
+   here verbatim so the two surfaces read as one feature. */
+.autoreview-log {
+  margin-top: 0.9rem;
+}
+
+.autoreview-log .muted {
+  font-size: 0.82rem;
+  color: var(--ink-dim);
+}
+
 .rule-table {
   width: 100%;
   border-collapse: collapse;

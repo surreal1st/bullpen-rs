@@ -4,12 +4,12 @@
 //! `:1424-1449` (`readSse`).
 
 use crate::types::{
-    ApprovalsResponse, AuthStatus, Bot, BotPatchResponse, BotToolsField, ConversationView,
-    CoreStatus, MadeTool, MemoryEntry, MemoryEntryField, MemoryView, ModelError, ModelField,
-    ModelsResponse, OpenQuestion, PendingApproval, PermissionsField, ProjectField, ProjectSummary,
-    ProjectsField, QuestionsResponse, RoomResponse, RoomSummary, RoomsResponse, RoutingState,
-    RulesField, SharedCoreField, SharedLogField, Tier1Models, Tier1Response, WorkingBot,
-    WorkingResponse,
+    ApprovalsResponse, AuthStatus, AutoReviewLogEntry, AutoReviewLogResponse, AutoReviewState, Bot,
+    BotPatchResponse, BotToolsField, ConversationView, CoreStatus, MadeTool, MemoryEntry,
+    MemoryEntryField, MemoryView, ModelError, ModelField, ModelsResponse, OpenQuestion,
+    PendingApproval, PermissionsField, ProjectField, ProjectSummary, ProjectsField,
+    QuestionsResponse, RoomResponse, RoomSummary, RoomsResponse, RoutingState, RulesField,
+    SharedCoreField, SharedLogField, Tier1Models, Tier1Response, WorkingBot, WorkingResponse,
 };
 use gloo_net::http::{Request, Response};
 use serde::{Deserialize, Serialize};
@@ -583,6 +583,51 @@ pub async fn put_routing_enabled(enabled: bool) -> Result<RoutingState, String> 
 
 pub async fn put_routing_text(text: &str) -> Result<RoutingState, String> {
     put_routing(serde_json::json!({ "text": text })).await
+}
+
+/// S4-05: `GET /api/auto-review/judge` - the platform toggle for the risky-
+/// tool judge (`crates/server/src/judge.rs`, default ON when absent).
+pub async fn fetch_judge() -> Result<AutoReviewState, String> {
+    let resp = Request::get("/api/auto-review/judge")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("/api/auto-review/judge -> {}", resp.status()));
+    }
+    resp.json::<AutoReviewState>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// `PUT /api/auto-review/judge`.
+pub async fn put_judge(enabled: bool) -> Result<AutoReviewState, String> {
+    let resp = Request::put("/api/auto-review/judge")
+        .json(&serde_json::json!({ "enabled": enabled }))
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("/api/auto-review/judge -> {}", resp.status()));
+    }
+    resp.json::<AutoReviewState>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// `GET /api/auto-review/log?limit=<limit>` - the "Last 20 judgements" table
+/// on the Auto review settings card.
+pub async fn fetch_judge_log(limit: u32) -> Result<Vec<AutoReviewLogEntry>, String> {
+    let url = format!("/api/auto-review/log?limit={limit}");
+    let resp = Request::get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("{url} -> {}", resp.status()));
+    }
+    resp.json::<AutoReviewLogResponse>()
+        .await
+        .map(|body| body.entries)
+        .map_err(|e| e.to_string())
 }
 
 pub async fn fetch_rules() -> Result<String, String> {

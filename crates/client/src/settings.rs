@@ -10,7 +10,7 @@
 use crate::api;
 use crate::message_time::format_time;
 use crate::model_chip::short_model;
-use crate::types::{CatalogEntry, RoutingState};
+use crate::types::{AutoReviewLogEntry, AutoReviewState, CatalogEntry, RoutingState};
 use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 use std::cell::Cell;
@@ -60,6 +60,7 @@ fn GeneralSettings() -> Element {
                 ModelsSection {}
                 RulesSection {}
                 RoutingSection {}
+                AutoReviewSection {}
             }
         }
         section { class: "stg-group",
@@ -626,6 +627,99 @@ fn RoutingSection() -> Element {
                                     td { "{format_time(&entry.created_at)}" }
                                     td { "{entry.verdict}" }
                                     td { "{entry.model}" }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/* --------------------------------------------------------------- Auto review */
+
+/// S4-05: the platform toggle for `crates/server/src/judge.rs` (the cheap
+/// second-opinion model that judges risky tool calls the grid already said
+/// Allow to) plus its "Last 20 judgements" log. Same shape as
+/// `RoutingSection` above - a toggle and a read-only log table - but no
+/// rule text box: the judge has no free-text rule of its own, only the
+/// on/off switch `PUT /api/auto-review/judge` flips.
+#[component]
+fn AutoReviewSection() -> Element {
+    let mut state = use_signal(|| None::<AutoReviewState>);
+    let mut log = use_signal(Vec::<AutoReviewLogEntry>::new);
+
+    use_effect(move || {
+        spawn(async move {
+            if let Ok(s) = api::fetch_judge().await {
+                state.set(Some(s));
+            }
+            if let Ok(entries) = api::fetch_judge_log(20).await {
+                log.set(entries);
+            }
+        });
+    });
+
+    let toggle = move |_| {
+        let Some(current) = *state.read() else {
+            return;
+        };
+        spawn(async move {
+            if let Ok(s) = api::put_judge(!current.enabled).await {
+                state.set(Some(s));
+            }
+        });
+    };
+
+    let enabled = state.read().as_ref().map(|s| s.enabled).unwrap_or(false);
+    let entries = log.read().clone();
+
+    rsx! {
+        div { class: "stg-sub", "data-slot": "auto-review",
+            h4 { class: "stg-sub-h", "Auto review" }
+            p { class: "set-note",
+                "Before a risky call the grid already allowed - shell, a desk action, SSH, delegating to another bot, reading a file - a cheap classifier judges it for risk to your data, machine, money or reputation. A risky or dangerous verdict asks first instead of running unwatched."
+            }
+
+            if state.read().is_some() {
+                div { class: "stg-row",
+                    span { "Judge risky calls before they run" }
+                    button {
+                        r#type: "button",
+                        role: "switch",
+                        "aria-checked": "{enabled}",
+                        "aria-label": "Judge risky calls before they run",
+                        class: if enabled { "stg-toggle is-on" } else { "stg-toggle" },
+                        onclick: toggle,
+                        span { class: "stg-toggle-knob" }
+                    }
+                }
+            }
+
+            div { class: "autoreview-log",
+                h4 { class: "stg-sub-h", "Last 20 judgements" }
+                if entries.is_empty() {
+                    p { class: "muted", "Nothing judged yet." }
+                } else {
+                    table { class: "rule-table",
+                        thead {
+                            tr {
+                                th { "Time" }
+                                th { "Verdict" }
+                                th { "Call" }
+                                th { "Decision" }
+                            }
+                        }
+                        tbody {
+                            for entry in entries.iter() {
+                                tr { key: "{entry.id}",
+                                    td { "{format_time(&entry.created_at)}" }
+                                    td {
+                                        span { class: "judge-badge judge-{entry.verdict}", "{entry.verdict}" }
+                                    }
+                                    td { "{entry.description}" }
+                                    td { "{entry.decision}" }
                                 }
                             }
                         }
