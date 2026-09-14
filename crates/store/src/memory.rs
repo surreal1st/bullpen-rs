@@ -77,7 +77,7 @@ pub fn remember(db: &Db, bot_id: &str, content: &str, source: &str) -> rusqlite:
 fn recent_log(db: &Db, bot_id: &str, limit: i64) -> rusqlite::Result<Vec<LogEntry>> {
     let mut stmt = db.conn().prepare(
         "SELECT id, content, source, created_at FROM memory_log
-          WHERE bot_id = ?1 ORDER BY created_at DESC LIMIT ?2",
+          WHERE bot_id = ?1 ORDER BY created_at DESC, rowid DESC LIMIT ?2",
     )?;
     let rows = stmt
         .query_map(params![bot_id, limit], |row| {

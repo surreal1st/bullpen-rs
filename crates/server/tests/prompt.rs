@@ -136,6 +136,16 @@ fn recall_holds_the_newest_within_budget_and_names_the_older_count() {
         "30 entries at ~200 tokens must not all fit in a 1200-token budget"
     );
 
+    // The newest entry (entry-029) must be present, the oldest (entry-000) must be absent.
+    assert!(
+        system.contains("entry-029"),
+        "the newest entry (entry-029) must be kept"
+    );
+    assert!(
+        !system.contains("entry-000"),
+        "the oldest entry (entry-000) must be dropped"
+    );
+
     let older_line = system
         .lines()
         .find(|l| l.starts_with("There are ") && l.contains("older notes"))
