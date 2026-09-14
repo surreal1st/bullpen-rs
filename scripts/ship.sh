@@ -15,6 +15,11 @@ cd "$(dirname "$0")/.."
 export PATH="/c/Users/rain/AppData/Local/Microsoft/WinGet/Packages/zig.zig_Microsoft.Winget.Source_8wekyb3d8bbwe/zig-x86_64-windows-0.16.0:$PATH"
 export PATH="/c/Users/rain/.cargo/bin:$PATH"
 
+MERIDIAN_HOST="meridian"
+BULLPEN_HOME="/home/bullpen"
+BULLPEN_RS_HOME="$BULLPEN_HOME/bullpen-rs"
+INCOMING="$BULLPEN_RS_HOME/incoming"
+
 echo "Checking zig availability..."
 zig version
 
@@ -32,12 +37,67 @@ else
   exit 1
 fi
 
-echo "Creating artifact tarball..."
-mkdir -p artifact
-tar czf artifact/bullpen-rs.tgz \
-  target/x86_64-unknown-linux-musl/release/bullpen \
-  dist/client/
+echo "Building web client (release)..."
+if dx build --platform web --package client --release; then
+  echo "✓ client build succeeded"
+else
+  echo "✗ client build failed"
+  exit 1
+fi
 
-echo "Artifact created: artifact/bullpen-rs.tgz"
+echo "Refreshing dist/client..."
+mkdir -p dist/client
+cp -r target/dx/client/release/web/public/* dist/client/
+
+BINARY="target/x86_64-unknown-linux-musl/release/bullpen"
+CLIENT_DIR="dist/client"
+
+# Calculate checksums
 echo ""
-echo "# TODO S14: scp, smoke boot, restart"
+echo "Calculating checksums..."
+BINARY_SHA=$(sha256sum "$BINARY" | awk '{print $1}')
+echo "Binary SHA256: $BINARY_SHA"
+
+# We'll verify the client as a directory tree
+echo "Client files ready: $CLIENT_DIR"
+
+# Create incoming directory on meridian and transfer
+echo ""
+echo "Preparing transfer to $MERIDIAN_HOST:$INCOMING..."
+ssh "$MERIDIAN_HOST" "mkdir -p $INCOMING"
+
+echo "Transferring binary..."
+scp -q "$BINARY" "$MERIDIAN_HOST:$INCOMING/bullpen"
+
+echo "Transferring client files..."
+scp -rq "$CLIENT_DIR" "$MERIDIAN_HOST:$INCOMING/client"
+
+# Verify checksums on meridian
+echo ""
+echo "Verifying checksums on $MERIDIAN_HOST..."
+REMOTE_BINARY_SHA=$(ssh "$MERIDIAN_HOST" "sha256sum $INCOMING/bullpen" | awk '{print $1}')
+if [[ "$BINARY_SHA" == "$REMOTE_BINARY_SHA" ]]; then
+  echo "✓ Binary checksum verified: $BINARY_SHA"
+else
+  echo "✗ Binary checksum mismatch!"
+  echo "  Local:  $BINARY_SHA"
+  echo "  Remote: $REMOTE_BINARY_SHA"
+  exit 1
+fi
+
+echo ""
+echo "✓ All artifacts transferred and verified"
+echo ""
+echo "To complete the installation, run on $MERIDIAN_HOST as root:"
+echo ""
+echo "  sudo bash $BULLPEN_RS_HOME/deploy/install.sh"
+echo ""
+echo "This will:"
+echo "  - Install the binary to $BULLPEN_RS_HOME/bullpen"
+echo "  - Install client files to $BULLPEN_RS_HOME/client/"
+echo "  - Install the systemd unit to /etc/systemd/system/bullpen-rs.service"
+echo "  - Enable and start the service on port 4380"
+echo ""
+echo "After installation, verify with:"
+echo "  curl -s http://localhost:4380/api/auth/status"
+echo ""

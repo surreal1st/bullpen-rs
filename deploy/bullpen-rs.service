@@ -1,0 +1,53 @@
+[Unit]
+Description=Bullpen-rs by Rainmade
+Documentation=https://github.com/rainmade/bullpen-rs
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bullpen
+Group=bullpen
+WorkingDirectory=/home/bullpen/bullpen-rs
+ExecStart=/home/bullpen/bullpen-rs/bullpen
+Environment=BULLPEN_PORT=4380
+Environment=BULLPEN_HOST=0.0.0.0
+Environment=BULLPEN_DATA_DIR=/home/bullpen/bullpen-rs
+Environment=BULLPEN_CLIENT_ROOT=/home/bullpen/bullpen-rs/client
+# The sandbox daemon is bullpen's OWN rootless Docker, never the host one.
+Environment=XDG_RUNTIME_DIR=/run/user/1004
+Environment=DOCKER_HOST=unix:///run/user/1004/docker.sock
+# The ssh tool is OFF unless this points at a real key. Provisioned 2026-09-11:
+# an ed25519 keypair owned by bullpen, authorized for rainmade on this host, so
+# a bot can reach the files and services meridian hosts.
+Environment=BULLPEN_SSH_KEY=/home/bullpen/.ssh/id_ed25519
+Environment=BULLPEN_SANDBOX=on
+# Secrets live here, mode 600, owned by bullpen. Never in the repo, never in a
+# unit file, never on a command line.
+EnvironmentFile=/home/bullpen/bullpen.env
+Restart=on-failure
+RestartSec=2
+
+# Hard ceilings. meridian has 62 GB and has already lost every service once to a
+# single process taking 59.7 GB of it. Bullpen must never be that process.
+MemoryMax=2G
+MemoryHigh=1500M
+MemorySwapMax=0
+CPUQuota=200%
+TasksMax=512
+
+# Hardening. The app writes only under its own home.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/bullpen
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target
