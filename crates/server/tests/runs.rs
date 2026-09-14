@@ -404,22 +404,28 @@ async fn working_reports_thinking_then_tool_phrasing_then_empties_and_gates_the_
     );
 }
 
-// 5. `stop(run_id)` between steps -> status failed, error "Stopped.".
+// 5. `stop(run_id)` BEFORE the first model call (F6): `take_stop` catches it
+//    before `run_turn` ever touches the model, so no text is ever produced.
+//    Status failed, error "Stopped.", and NO assistant message - TS calls
+//    `fail()` for exactly this case (`runs.ts:965-968`, `:1741-1752`) and
+//    writes nothing at all. `POST /api/bots/arthur/messages` then
+//    `POST /api/runs/:id/stop` immediately used to leave an empty assistant
+//    bubble sitting in the thread; this is that scenario.
 #[tokio::test]
-async fn stop_fails_the_run_with_stopped() {
+async fn stop_before_first_step_fails_the_run_with_stopped_and_writes_no_message() {
     let db = open_db();
     seed_bot(&db, "arthur", "Arthur");
     let conversation_id = own_conversation(&db, "arthur");
 
-    // Never actually reached if `stop` wins the race, as it always does on
-    // the current-thread test runtime: `stop` runs before the spawned task
-    // is ever polled, since nothing between `start` and `stop` awaits.
+    // Never actually reached: `stop` runs before the spawned task is ever
+    // polled, since nothing between `start` and `stop` awaits on the
+    // current-thread test runtime.
     let port = model::fake::text_port("should not be reached", "test/model");
 
     let manager = Arc::new(RunManager::new(Arc::clone(&db), as_port(port)));
     let run_id = manager.start(StartOptions {
         bot_id: "arthur".to_string(),
-        conversation_id,
+        conversation_id: conversation_id.clone(),
         model: "test/model".to_string(),
         messages: vec![ModelMessage::user("hi")],
         trigger: Trigger::Chat,
@@ -436,4 +442,84 @@ async fn stop_fails_the_run_with_stopped() {
     let (status, error) = run_row(&db, &run_id);
     assert_eq!(status, "failed");
     assert_eq!(error.as_deref(), Some("Stopped."));
+
+    let messages = {
+        let db = db.lock().unwrap();
+        store::list_messages(&db, &conversation_id).unwrap()
+    };
+    assert!(
+        messages.iter().all(|m| m.role != "assistant"),
+        "expected no assistant message for a run stopped before its first step, got {messages:?}"
+    );
+}
+
+// 6. `stop(run_id)` BETWEEN steps (S1-05 acceptance 5, F20): step 1's tool
+//    call runs to completion, but step 2 (the final answer, held behind its
+//    own gate) never starts - `take_stop` catches it at the top of the next
+//    iteration. Status failed, error "Stopped.", and (F6) still no
+//    assistant message: `list_tasks` produced a tool call but no text, so
+//    `state.text` is empty exactly as it is in test 5.
+//
+//    The version of this test that used to live here started `stop` before
+//    the spawned task was ever polled, so - despite its name - it exercised
+//    "stopped before the first model call" (test 5 above), not this. Moving
+//    `take_stop` out of the loop body to a single pre-loop check would have
+//    left it green regardless; only `rooms.rs`'s
+//    `stopping_a_held_run_over_http_fails_it_with_stopped` covered the real
+//    between-steps semantics. This ports that test's `GatedPort` technique
+//    to drive `RunManager` directly.
+#[tokio::test]
+async fn stop_between_steps_fails_the_run_with_stopped_and_writes_no_message() {
+    let db = open_db();
+    seed_bot(&db, "arthur", "Arthur");
+    let conversation_id = own_conversation(&db, "arthur");
+
+    let (gate_tx, gate_rx) = tokio::sync::oneshot::channel();
+    let (_held_tx, held_rx) = tokio::sync::oneshot::channel();
+    let port = GatedPort {
+        turn: Mutex::new(0),
+        gate: Mutex::new(Some(gate_rx)),
+        held: Mutex::new(Some(held_rx)),
+    };
+
+    let manager = Arc::new(RunManager::new(Arc::clone(&db), as_port(port)));
+    let run_id = manager.start(StartOptions {
+        bot_id: "arthur".to_string(),
+        conversation_id: conversation_id.clone(),
+        model: "test/model".to_string(),
+        messages: vec![ModelMessage::user("hi")],
+        trigger: Trigger::Chat,
+        room: false,
+    });
+
+    // Give the spawned task a chance to reach step 1's model call and
+    // suspend on the still-closed gate before we stop it - otherwise
+    // `stop` could land before step 1's own `take_stop` check even runs,
+    // which is test 5 above, not this.
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    manager.stop(&run_id);
+    // Step 1 now runs: it asks for `list_tasks`, which completes (proving
+    // `take_stop` is a per-iteration check, not a one-time guard) - step 2
+    // is what the stop actually catches, and it is held behind `held_rx`,
+    // never signaled here, so it must never be reached.
+    let _ = gate_tx.send(());
+
+    let events = drain(manager.subscribe(&run_id)).await;
+    assert!(
+        matches!(events.last(), Some(RunEvent::Error { message, .. }) if message == "Stopped."),
+        "expected a Stopped. error event, got {events:?}"
+    );
+
+    let (status, error) = run_row(&db, &run_id);
+    assert_eq!(status, "failed");
+    assert_eq!(error.as_deref(), Some("Stopped."));
+
+    let messages = {
+        let db = db.lock().unwrap();
+        store::list_messages(&db, &conversation_id).unwrap()
+    };
+    assert!(
+        messages.iter().all(|m| m.role != "assistant"),
+        "expected no assistant message for a run stopped between steps with no text, got {messages:?}"
+    );
 }

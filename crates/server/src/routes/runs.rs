@@ -30,17 +30,21 @@ async fn working(State(state): State<AppState>, Path(id): Path<String>) -> ApiRe
 }
 
 async fn stop(State(state): State<AppState>, Path(id): Path<String>) -> Response {
-    let running = {
+    // F17: TS `stop` (`runs.ts:791-795`) refuses only `done`/`failed` - a run
+    // parked `waiting` (S2's approvals) is still stoppable. Matching only
+    // `status = 'running'` answered 404 for a waiting run even though
+    // `RunManager::working` already reports it as working.
+    let stoppable = {
         let db = state.db();
         db.conn()
             .query_row(
-                "SELECT 1 FROM runs WHERE id = ?1 AND status = 'running'",
+                "SELECT 1 FROM runs WHERE id = ?1 AND status NOT IN ('done', 'failed')",
                 rusqlite::params![id],
                 |_| Ok(()),
             )
             .is_ok()
     };
-    if !running {
+    if !stoppable {
         return (
             StatusCode::NOT_FOUND,
             Json(json!({"error": "that run is not running"})),

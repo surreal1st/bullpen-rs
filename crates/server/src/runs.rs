@@ -96,7 +96,17 @@ struct RunState {
 
 enum Outcome {
     Answered(RunState),
-    Failed { state: RunState, failure: String },
+    Failed {
+        state: RunState,
+        failure: String,
+        /// F5: the upstream HTTP status behind this failure, when there was
+        /// one - carried through to `RunEvent::Error` so a 429 reaches the
+        /// browser as a 429 (TS `fail(runId, message, status)`,
+        /// `runs.ts:1741-1752`) instead of a bare message. `None` for
+        /// anything that is not itself an upstream error: a stop, the step
+        /// ceiling.
+        status: Option<u16>,
+    },
 }
 
 /// Fired once a run settles. Aliased so the `RunManager` field below does
@@ -422,6 +432,7 @@ impl RunManager {
                         steps,
                     },
                     failure: "Stopped.".to_string(),
+                    status: None,
                 };
             }
             steps += 1;
@@ -470,7 +481,7 @@ impl RunManager {
                         resolved_model = m;
                         usage = add_usage(usage, u);
                     }
-                    ModelEvent::Error { message, .. } => {
+                    ModelEvent::Error { message, status } => {
                         return Outcome::Failed {
                             state: RunState {
                                 messages,
@@ -480,6 +491,7 @@ impl RunManager {
                                 steps,
                             },
                             failure: message,
+                            status,
                         };
                     }
                 }
@@ -553,6 +565,7 @@ impl RunManager {
                 steps,
             },
             failure: format!("Stopped after {MAX_STEPS} tool steps without an answer."),
+            status: None,
         }
     }
 
@@ -568,9 +581,13 @@ impl RunManager {
         conversation_id: &str,
         outcome: Outcome,
     ) {
-        let (status, failure, state) = match outcome {
-            Outcome::Answered(state) => ("done", None, state),
-            Outcome::Failed { state, failure } => ("failed", Some(failure), state),
+        let (status, failure, state, upstream_status) = match outcome {
+            Outcome::Answered(state) => ("done", None, state, None),
+            Outcome::Failed {
+                state,
+                failure,
+                status,
+            } => ("failed", Some(failure), state, status),
         };
         let usage = state.usage.clone().unwrap_or(ModelUsage {
             cost_usd: 0.0,
@@ -641,7 +658,19 @@ impl RunManager {
             return;
         }
 
-        let saved_id: Option<String> = {
+        // F6: a run that failed with no text at all - stopped before its
+        // first model call, stopped between steps before one produced any,
+        // or an instant upstream error on the very first call - writes NO
+        // assistant message, mirroring TS's `fail()` (`runs.ts:965-968`,
+        // `:1741-1752`), which updates only the run row and never touches
+        // the conversation. Without this, `POST .../stop` right after
+        // starting a run left an empty assistant bubble sitting in the
+        // thread forever - and so did a room member whose leg failed
+        // before writing a word (`rooms.rs`'s
+        // `an_instant_error_owner_run_still_chains_to_member_two`).
+        let saved_id: Option<String> = if status == "failed" && state.text.is_empty() {
+            None
+        } else {
             let db = self.db();
             let owner = store::get_conversation(&db, conversation_id)
                 .unwrap_or_else(|err| {
@@ -682,7 +711,7 @@ impl RunManager {
                 run_id,
                 RunEvent::Error {
                     message: failure.unwrap_or_default(),
-                    status: None,
+                    status: upstream_status,
                 },
             );
         } else if let Some(saved_id) = saved_id {
