@@ -9,12 +9,25 @@
 //! `POST /api/bots/:id/messages`), so nothing here should need to change
 //! once S1-06 lands; the final shot against the real server is owed to it.
 
-use crate::types::ConversationView;
-use gloo_net::http::Request;
+use crate::types::{
+    ConversationView, RoomResponse, RoomSummary, RoomsResponse, WorkingBot, WorkingResponse,
+};
+use gloo_net::http::{Request, Response};
 use serde::{Deserialize, Serialize};
 
-pub async fn fetch_conversation(bot_id: &str) -> Result<ConversationView, String> {
-    let url = format!("/api/bots/{bot_id}/conversation");
+/// `thread_id` selects a room's own conversation rather than the owner
+/// bot's default one - S1-07b's rail opens a room through its owner
+/// (`crates/client/src/rail.rs`'s `GroupRow`), same as the ticket's Target
+/// says.
+pub async fn fetch_conversation(
+    bot_id: &str,
+    thread_id: Option<&str>,
+) -> Result<ConversationView, String> {
+    let mut url = format!("/api/bots/{bot_id}/conversation");
+    if let Some(thread_id) = thread_id {
+        url.push_str("?thread=");
+        url.push_str(thread_id);
+    }
     let resp = Request::get(&url).send().await.map_err(|e| e.to_string())?;
     if !resp.ok() {
         return Err(format!("{url} -> {}", resp.status()));
@@ -22,6 +35,89 @@ pub async fn fetch_conversation(bot_id: &str) -> Result<ConversationView, String
     resp.json::<ConversationView>()
         .await
         .map_err(|e| e.to_string())
+}
+
+pub async fn fetch_rooms() -> Result<Vec<RoomSummary>, String> {
+    let resp = Request::get("/api/rooms")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("/api/rooms -> {}", resp.status()));
+    }
+    let body = resp
+        .json::<RoomsResponse>()
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(body.rooms)
+}
+
+#[derive(Serialize)]
+struct RoomBody<'a> {
+    title: &'a str,
+    #[serde(rename = "memberIds")]
+    member_ids: &'a [String],
+}
+
+/// The server's own error shape on a rejected create/update, e.g. the
+/// picker's cap or "pick at least two" - `{"error": "..."}"` from
+/// `crates/server/src/routes/rooms.rs`.
+#[derive(Deserialize)]
+struct RoomError {
+    error: String,
+}
+
+async fn room_result(resp: Response) -> Result<RoomSummary, String> {
+    if resp.ok() {
+        let body = resp
+            .json::<RoomResponse>()
+            .await
+            .map_err(|e| e.to_string())?;
+        return Ok(body.room);
+    }
+    let status = resp.status();
+    match resp.json::<RoomError>().await {
+        Ok(err) => Err(err.error),
+        Err(_) => Err(format!("/api/rooms -> {status}")),
+    }
+}
+
+pub async fn create_room(title: &str, member_ids: &[String]) -> Result<RoomSummary, String> {
+    let resp = Request::post("/api/rooms")
+        .json(&RoomBody { title, member_ids })
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    room_result(resp).await
+}
+
+pub async fn update_room(
+    id: &str,
+    title: &str,
+    member_ids: &[String],
+) -> Result<RoomSummary, String> {
+    let url = format!("/api/rooms/{id}");
+    let resp = Request::patch(&url)
+        .json(&RoomBody { title, member_ids })
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    room_result(resp).await
+}
+
+pub async fn fetch_working(conversation_id: &str) -> Result<Vec<WorkingBot>, String> {
+    let url = format!("/api/conversations/{conversation_id}/working");
+    let resp = Request::get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("{url} -> {}", resp.status()));
+    }
+    let body = resp
+        .json::<WorkingResponse>()
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(body.working)
 }
 
 /// One frame of `POST /api/bots/:id/messages`'s stream. A strict subset of
@@ -96,16 +192,21 @@ pub fn feed(buffer: &mut Vec<u8>, chunk: &[u8]) -> Vec<StreamEvent> {
 #[derive(Serialize)]
 struct SendBody<'a> {
     text: &'a str,
+    #[serde(rename = "threadId", skip_serializing_if = "Option::is_none")]
+    thread_id: Option<&'a str>,
 }
 
 /// Sends the message and drives `on_event` for every frame in the response
 /// stream. A `content-type: application/json` response - a run already in
 /// flight absorbed this message as an interjection, `App.tsx:503-509` -
 /// calls `on_event` zero times and returns `Ok(())`, same as the original.
+/// `thread_id` posts into a room's own conversation rather than the owner
+/// bot's default one - see `fetch_conversation`'s doc.
 #[cfg(feature = "web")]
 pub async fn send_message(
     bot_id: &str,
     text: &str,
+    thread_id: Option<&str>,
     mut on_event: impl FnMut(StreamEvent),
 ) -> Result<(), String> {
     use wasm_bindgen::{JsCast, JsValue};
@@ -114,7 +215,7 @@ pub async fn send_message(
 
     let url = format!("/api/bots/{bot_id}/messages");
     let resp = Request::post(&url)
-        .json(&SendBody { text })
+        .json(&SendBody { text, thread_id })
         .map_err(|e| e.to_string())?
         .send()
         .await

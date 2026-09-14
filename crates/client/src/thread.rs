@@ -12,34 +12,55 @@ use crate::bubble::Bubble;
 use crate::composer::Composer;
 use crate::message_time::{day_key, format_day, format_time, now_iso};
 use crate::types::{Message, Role};
+use crate::working_bar::WorkingBar;
 use dioxus::prelude::*;
 use js_sys::Date;
 use std::rc::Rc;
 
-/// Owns one bot's conversation: fetches it, renders it, and drives sends.
-/// Give this a `key: "{bot_id}"` at the call site (see `app.rs`) - a fresh
-/// `bot_id` should be a fresh component instance, not a signal update, so
-/// switching bots resets every signal here for free instead of needing its
-/// own "is this a switch or a refresh" logic (`isConversationSwitch` in the
-/// original - out of scope while there is only ever one thread open).
+/// Owns one bot's (or room's) conversation: fetches it, renders it, and
+/// drives sends. Give this a `key` unique to the open conversation at the
+/// call site (see `app.rs`) - a fresh key should be a fresh component
+/// instance, not a signal update, so switching what is open resets every
+/// signal here for free instead of needing its own "is this a switch or a
+/// refresh" logic (`isConversationSwitch` in the original - out of scope
+/// while there is only ever one thread open).
+///
+/// `thread_id` is `Some(room.id)` when this pane is a group chat opened
+/// through its owner bot (`rail.rs`'s `GroupRow`) - S1-07b's addition over
+/// S1-07a, which only ever talked to a bot's default conversation.
 #[component]
-pub fn ChatPane(bot_id: String, bot_name: String) -> Element {
+pub fn ChatPane(
+    bot_id: String,
+    bot_name: String,
+    #[props(default)] thread_id: Option<String>,
+    #[props(default)] section_ids: Vec<String>,
+) -> Element {
     let mut messages = use_signal(Vec::<Message>::new);
     let mut streaming = use_signal(|| None::<String>);
     let mut sending = use_signal(|| false);
     let mut load_error = use_signal(|| None::<String>);
+    // The working bar needs the REAL conversation id (a bot's default
+    // thread is created lazily server-side, so `thread_id` alone is not
+    // always it) - a `Signal` rather than a plain field so `working_bar.rs`'s
+    // `use_effect` re-runs once the fetch below resolves it, the same
+    // reason `messages`/`streaming` below are `Signal`s the read-only
+    // `Thread` takes rather than owned values.
+    let mut conversation_id = use_signal(|| None::<String>);
 
     let fetch_bot_id = bot_id.clone();
+    let fetch_thread_id = thread_id.clone();
     use_effect(move || {
         let bot_id = fetch_bot_id.clone();
+        let thread_id = fetch_thread_id.clone();
         spawn(async move {
-            match api::fetch_conversation(&bot_id).await {
+            match api::fetch_conversation(&bot_id, thread_id.as_deref()).await {
                 // Ported behaviour from 0.4.8 (the ticket's own callout):
                 // nothing re-renders when the fetched data is identical.
                 // `ConversationView` derives `PartialEq`, so this is a
                 // direct compare rather than the original's
                 // serialize-and-compare `sameData`.
                 Ok(view) => {
+                    conversation_id.set(Some(view.conversation_id.clone()));
                     if *messages.peek() != view.messages {
                         messages.set(view.messages);
                     }
@@ -50,8 +71,10 @@ pub fn ChatPane(bot_id: String, bot_name: String) -> Element {
     });
 
     let send_bot_id = bot_id.clone();
+    let send_thread_id = thread_id.clone();
     let on_send = move |text: String| {
         let bot_id = send_bot_id.clone();
+        let thread_id = send_thread_id.clone();
         messages.write().push(Message {
             id: format!("local-{}", now_iso()),
             role: Role::User,
@@ -64,25 +87,26 @@ pub fn ChatPane(bot_id: String, bot_name: String) -> Element {
         sending.set(true);
         spawn(async move {
             let mut assembled = String::new();
-            let result = api::send_message(&bot_id, &text, |event| match event {
-                api::StreamEvent::Delta { text } => {
-                    assembled.push_str(&text);
-                    streaming.set(Some(assembled.clone()));
-                }
-                api::StreamEvent::Done { model } => {
-                    messages.write().push(Message {
-                        id: format!("local-{}", now_iso()),
-                        role: Role::Assistant,
-                        content: assembled.clone(),
-                        model,
-                        error: None,
-                        created_at: now_iso(),
-                    });
-                    streaming.set(None);
-                }
-                api::StreamEvent::Run { .. } | api::StreamEvent::Ignored => {}
-            })
-            .await;
+            let result =
+                api::send_message(&bot_id, &text, thread_id.as_deref(), |event| match event {
+                    api::StreamEvent::Delta { text } => {
+                        assembled.push_str(&text);
+                        streaming.set(Some(assembled.clone()));
+                    }
+                    api::StreamEvent::Done { model } => {
+                        messages.write().push(Message {
+                            id: format!("local-{}", now_iso()),
+                            role: Role::Assistant,
+                            content: assembled.clone(),
+                            model,
+                            error: None,
+                            created_at: now_iso(),
+                        });
+                        streaming.set(None);
+                    }
+                    api::StreamEvent::Run { .. } | api::StreamEvent::Ignored => {}
+                })
+                .await;
             if let Err(err) = result {
                 streaming.set(None);
                 load_error.set(Some(err));
@@ -96,7 +120,13 @@ pub fn ChatPane(bot_id: String, bot_name: String) -> Element {
             if let Some(err) = load_error.read().clone() {
                 p { class: "composer-error", "{err}" }
             }
-            Thread { messages, streaming, bot_name: bot_name.clone() }
+            Thread {
+                messages,
+                streaming,
+                bot_name: bot_name.clone(),
+                conversation_id,
+                section_ids: section_ids.clone(),
+            }
             Composer { bot_name: bot_name.clone(), disabled: *sending.read(), on_send }
         }
     }
@@ -117,6 +147,8 @@ fn Thread(
     messages: Signal<Vec<Message>>,
     streaming: Signal<Option<String>>,
     bot_name: String,
+    conversation_id: Signal<Option<String>>,
+    #[props(default)] section_ids: Vec<String>,
 ) -> Element {
     let mut anchor = use_signal(|| None::<Rc<MountedData>>);
 
@@ -190,6 +222,10 @@ fn Thread(
                     live: true,
                 }
             }
+            // Last thing inside `.thread`, above the scroll anchor, so it
+            // rides the bottom the way a typing indicator does - ported
+            // placement from `App.tsx:1276-1286`.
+            WorkingBar { conversation_id, section_ids: section_ids.clone() }
             div { onmounted: move |evt| anchor.set(Some(evt.data())) }
         }
     }

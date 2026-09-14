@@ -250,3 +250,223 @@
 .bot.is-renaming {
   cursor: default;
 }
+
+/* ---------- group chats ---------- */
+
+.rail-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.7rem 0.35rem 0.3rem;
+}
+
+.rail-group-title {
+  text-transform: uppercase;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.11em;
+  color: var(--faint);
+}
+
+.rail-new-room {
+  border: 0;
+  background: transparent;
+  color: var(--faint);
+  border-radius: var(--radius-sm);
+  width: 20px;
+  height: 20px;
+  line-height: 1;
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+
+.rail-new-room:hover {
+  background: var(--sel);
+  color: var(--ink);
+}
+
+/* A group chat's stacked-faces avatar: up to four of the members' own
+   faces, in a 2x2 cluster - ported from `shell.css:5934-5989` (the styling
+   backing `GroupAvatar.tsx`, which S1-07b's ticket names directly even
+   though its CSS lives in a file the ticket does not). */
+.group-av {
+  position: relative;
+  flex: none;
+  display: block;
+}
+
+.group-av-face {
+  position: absolute;
+  display: block;
+  line-height: 0;
+  border-radius: 999px;
+  box-shadow: 0 0 0 2px var(--panel);
+}
+
+.group-av-face .av {
+  display: block;
+}
+
+.group-av-face-0 {
+  left: 0;
+  top: 0;
+}
+
+.group-av-face-1 {
+  right: 0;
+  top: 0;
+}
+
+.group-av-face-2 {
+  left: 0;
+  bottom: 0;
+}
+
+.group-av-face-3 {
+  right: 0;
+  bottom: 0;
+}
+
+/* A fifth member and beyond collapse into a count rather than a cluster
+   that no longer reads at rail size. */
+.group-av-more {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.05rem;
+  height: 1.05rem;
+  padding: 0 0.2rem;
+  border-radius: 999px;
+  background: var(--seam);
+  color: #14100e;
+  font-weight: 700;
+  line-height: 1;
+}
+
+/* ---------- room picker modal ---------- */
+/* NOT a port - `GroupChatPicker.tsx`'s own styling lives in a bigger CSS
+   file S1-07b's ticket does not name (`shell.css`'s `.modal*`/
+   `.room-picker-*` rules cover other modals too). Minimal, undecorated
+   glue that reuses this file's own tokens, same posture `thread.css`
+   already takes for `.shell`/`.rail`/`.pane-empty`. */
+.modal-scrim {
+  position: fixed;
+  inset: 0;
+  background: rgb(10 12 16 / 55%);
+  display: grid;
+  place-items: center;
+  z-index: 20;
+}
+
+.modal {
+  background: var(--panel);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  width: min(420px, calc(100vw - 2rem));
+  max-height: calc(100vh - 2rem);
+  overflow-y: auto;
+}
+
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.9rem 1rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.modal-head h2 {
+  font-size: 0.95rem;
+  margin: 0;
+}
+
+.modal-x {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.modal-body {
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+.room-picker-title {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.room-picker-title input {
+  background: var(--raised);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  color: var(--ink);
+  padding: 0.4rem 0.55rem;
+  font: inherit;
+}
+
+.room-picker-hint {
+  font-size: 0.75rem;
+  color: var(--muted);
+  margin: 0;
+}
+
+.room-picker-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.room-picker-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.82rem;
+}
+
+.notice-inline {
+  color: var(--danger);
+  font-size: 0.78rem;
+  margin: 0;
+}
+
+.room-picker-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+.thread-new {
+  border: 1px solid var(--line-strong);
+  background: var(--raised);
+  color: var(--ink);
+  border-radius: var(--radius-sm);
+  padding: 0.4rem 0.8rem;
+  font: inherit;
+  cursor: pointer;
+}
+
+.thread-new:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.room-picker-create {
+  background: var(--seam);
+  border-color: var(--seam);
+  color: #14100e;
+  font-weight: 600;
+}

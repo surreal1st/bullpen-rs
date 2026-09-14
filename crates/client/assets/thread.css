@@ -328,6 +328,57 @@
   max-width: 100%;
 }
 
+/* ---------- working bar ---------- */
+/* Ported from `styles.css:309-355` (`.working-bar`/`.working-face`/
+   `.working-what`/`.is-waiting`), byte-close to the named rules. */
+
+.working-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.55rem;
+  padding: 0.35rem 0.1rem 0.15rem;
+  /* Never shrinks under flex pressure - the faces are the point, and a
+     squashed 24px avatar reads as a rendering fault. */
+  flex-shrink: 0;
+}
+
+.working-face {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  max-width: 100%;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1;
+  /* The hover line is a `title`, so the cursor should say there is one. */
+  cursor: default;
+}
+
+/* The line rides beside the face, truncated rather than wrapped mid-phrase. */
+.working-what {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 14rem;
+}
+
+/* A bot parked on an approval is STOPPED, not working, and its face already
+   holds still (`busy={false}` on the Avatar). The seam colour is what says
+   this one is waiting on Josh rather than getting on with it - the same
+   orange the rest of the app spends only on things that want him. */
+.working-face.is-waiting {
+  color: var(--seam);
+}
+
+@media (max-width: 640px) {
+  /* On a phone the sentence is most of the width. The faces alone still say
+     who is working, and the line stays reachable by hover or screen reader. */
+  .working-what {
+    max-width: 8rem;
+  }
+}
+
 /* ---------- shell glue (not a port - see module doc) ---------- */
 
 .shell {

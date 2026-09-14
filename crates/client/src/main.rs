@@ -8,8 +8,10 @@ mod events;
 mod markdown;
 mod message_time;
 mod rail;
+mod room_picker;
 mod thread;
 mod types;
+mod working_bar;
 
 use app::App;
 
