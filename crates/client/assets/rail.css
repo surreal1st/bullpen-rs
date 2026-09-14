@@ -54,11 +54,17 @@
   display: grid;
   grid-template-rows: auto 1fr;
   min-height: 0;
+  overflow-y: auto;
 }
 
 .rail {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  /* Single row: `.roster` is the rail's only child, so it is the rail's
+     one scroller (S4-03 D4 fix) - the old 3-row template (auto/1fr/auto)
+     left `.roster` auto-placed into the first "auto" track, sized to its
+     full content instead of the fr track, so a long roster grew the whole
+     page instead of scrolling inside the rail. */
+  grid-template-rows: minmax(0, 1fr);
   min-height: 0;
   background: rgb(20 22 27 / 72%);
   backdrop-filter: saturate(180%) blur(22px);
