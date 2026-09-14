@@ -13,14 +13,21 @@ use server::{AppState, build_app};
 use std::fs;
 use std::path::PathBuf;
 use tower::ServiceExt;
+use uuid::Uuid;
 
 const FIXTURE: &str = "d:/rainmade/.scratch/bullpen-rs/fixtures/ts-made.db";
 
 /// A private copy of the fixture db for one test. Never opens `FIXTURE`
 /// directly - every test gets its own file so they cannot stomp each other.
 fn fixture_copy(name: &str) -> store::Db {
-    let temp = std::env::temp_dir().join(format!("bullpen_rs_first_routes_{name}.db"));
+    let unique_id = Uuid::new_v4();
+    let temp = std::env::temp_dir().join(format!("bullpen_rs_first_routes_{name}_{unique_id}.db"));
+
+    // Remove any stale WAL/SHM sidecars from previous runs
+    let _ = fs::remove_file(format!("{}-wal", temp.display()));
+    let _ = fs::remove_file(format!("{}-shm", temp.display()));
     let _ = fs::remove_file(&temp);
+
     fs::copy(PathBuf::from(FIXTURE), &temp).expect("copy fixture");
     store::Db::open(temp.to_str().expect("temp path is valid utf-8")).expect("open db copy")
 }
