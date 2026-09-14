@@ -4,11 +4,14 @@
 //! `:1424-1449` (`readSse`).
 
 use crate::types::{
-    ApprovalsResponse, AuthStatus, ConversationView, OpenQuestion, PendingApproval,
-    QuestionsResponse, RoomResponse, RoomSummary, RoomsResponse, WorkingBot, WorkingResponse,
+    ApprovalsResponse, AuthStatus, Bot, BotPatchResponse, BotToolsField, ConversationView,
+    MadeTool, ModelError, ModelField, ModelsResponse, OpenQuestion, PendingApproval,
+    PermissionsField, QuestionsResponse, RoomResponse, RoomSummary, RoomsResponse, RoutingState,
+    RulesField, Tier1Models, Tier1Response, WorkingBot, WorkingResponse,
 };
 use gloo_net::http::{Request, Response};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// `thread_id` selects a room's own conversation rather than the owner
 /// bot's default one - S1-07b's rail opens a room through its owner
@@ -441,6 +444,273 @@ pub async fn send_message(
         }
     }
     Ok(())
+}
+
+/* -------------------------------------------------------------- S2-09b: settings */
+
+/// Shared GET for the three plain model settings (`/api/default-model`,
+/// `/api/mid-model`, `/api/premium-model`): all answer `{"model": "..."}"`.
+async fn get_model_field(url: &str) -> Result<String, String> {
+    let resp = Request::get(url).send().await.map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("{url} -> {}", resp.status()));
+    }
+    resp.json::<ModelField>()
+        .await
+        .map(|b| b.model)
+        .map_err(|e| e.to_string())
+}
+
+/// Shared PUT for the same three settings. A refusal (premium default, an
+/// empty id) comes back as a 400 with `{"error": "..."}"` - surfaced so the
+/// caller can show it, same as `General.tsx`'s own `refusal` banner.
+async fn put_model_field(url: &str, model: &str) -> Result<String, String> {
+    #[derive(Serialize)]
+    struct Req<'a> {
+        model: &'a str,
+    }
+    let resp = Request::put(url)
+        .json(&Req { model })
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if resp.ok() {
+        return resp
+            .json::<ModelField>()
+            .await
+            .map(|b| b.model)
+            .map_err(|e| e.to_string());
+    }
+    match resp.json::<ModelError>().await {
+        Ok(err) => Err(err.error),
+        Err(_) => Err(format!("{url} -> {}", resp.status())),
+    }
+}
+
+pub async fn fetch_default_model() -> Result<String, String> {
+    get_model_field("/api/default-model").await
+}
+
+pub async fn put_default_model(model: &str) -> Result<String, String> {
+    put_model_field("/api/default-model", model).await
+}
+
+pub async fn fetch_mid_model() -> Result<String, String> {
+    get_model_field("/api/mid-model").await
+}
+
+pub async fn put_mid_model(model: &str) -> Result<String, String> {
+    put_model_field("/api/mid-model", model).await
+}
+
+pub async fn fetch_premium_model() -> Result<String, String> {
+    get_model_field("/api/premium-model").await
+}
+
+pub async fn put_premium_model(model: &str) -> Result<String, String> {
+    put_model_field("/api/premium-model", model).await
+}
+
+pub async fn fetch_tier1_models() -> Result<Tier1Models, String> {
+    let resp = Request::get("/api/tier1-models")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("/api/tier1-models -> {}", resp.status()));
+    }
+    resp.json::<Tier1Response>()
+        .await
+        .map(|b| b.models)
+        .map_err(|e| e.to_string())
+}
+
+pub async fn put_tier1_model(kind: &str, model: &str) -> Result<String, String> {
+    #[derive(Serialize)]
+    struct Req<'a> {
+        kind: &'a str,
+        model: &'a str,
+    }
+    let resp = Request::put("/api/tier1-models")
+        .json(&Req { kind, model })
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if resp.ok() {
+        return resp
+            .json::<ModelField>()
+            .await
+            .map(|b| b.model)
+            .map_err(|e| e.to_string());
+    }
+    match resp.json::<ModelError>().await {
+        Ok(err) => Err(err.error),
+        Err(_) => Err(format!("/api/tier1-models -> {}", resp.status())),
+    }
+}
+
+pub async fn fetch_routing() -> Result<RoutingState, String> {
+    let resp = Request::get("/api/routing")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("/api/routing -> {}", resp.status()));
+    }
+    resp.json::<RoutingState>().await.map_err(|e| e.to_string())
+}
+
+async fn put_routing(body: serde_json::Value) -> Result<RoutingState, String> {
+    let resp = Request::put("/api/routing")
+        .json(&body)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("/api/routing -> {}", resp.status()));
+    }
+    resp.json::<RoutingState>().await.map_err(|e| e.to_string())
+}
+
+pub async fn put_routing_enabled(enabled: bool) -> Result<RoutingState, String> {
+    put_routing(serde_json::json!({ "enabled": enabled })).await
+}
+
+pub async fn put_routing_text(text: &str) -> Result<RoutingState, String> {
+    put_routing(serde_json::json!({ "text": text })).await
+}
+
+pub async fn fetch_rules() -> Result<String, String> {
+    let resp = Request::get("/api/rules")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("/api/rules -> {}", resp.status()));
+    }
+    resp.json::<RulesField>()
+        .await
+        .map(|b| b.rules)
+        .map_err(|e| e.to_string())
+}
+
+pub async fn put_rules(rules: &str) -> Result<String, String> {
+    #[derive(Serialize)]
+    struct Req<'a> {
+        rules: &'a str,
+    }
+    let resp = Request::put("/api/rules")
+        .json(&Req { rules })
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("/api/rules -> {}", resp.status()));
+    }
+    resp.json::<RulesField>()
+        .await
+        .map(|b| b.rules)
+        .map_err(|e| e.to_string())
+}
+
+/// `GET /api/models?q=...`, `all=1` for the full catalogue - ported from
+/// `ModelPicker.tsx`'s own fetch. `js_sys::encode_uri_component` matches the
+/// TS `encodeURIComponent` this is a straight port of.
+pub async fn fetch_models(query: &str, show_all: bool) -> Result<ModelsResponse, String> {
+    let encoded: String = js_sys::encode_uri_component(query).into();
+    let url = if show_all {
+        format!("/api/models?all=1&q={encoded}")
+    } else {
+        format!("/api/models?q={encoded}")
+    };
+    let resp = Request::get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("{url} -> {}", resp.status()));
+    }
+    resp.json::<ModelsResponse>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+pub async fn fetch_permissions(bot_id: &str) -> Result<HashMap<String, String>, String> {
+    let url = format!("/api/bots/{bot_id}/permissions");
+    let resp = Request::get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("{url} -> {}", resp.status()));
+    }
+    resp.json::<PermissionsField>()
+        .await
+        .map(|b| b.permissions)
+        .map_err(|e| e.to_string())
+}
+
+pub async fn put_permissions(
+    bot_id: &str,
+    permissions: &HashMap<String, String>,
+) -> Result<HashMap<String, String>, String> {
+    #[derive(Serialize)]
+    struct Req<'a> {
+        permissions: &'a HashMap<String, String>,
+    }
+    let url = format!("/api/bots/{bot_id}/permissions");
+    let resp = Request::put(&url)
+        .json(&Req { permissions })
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("{url} -> {}", resp.status()));
+    }
+    resp.json::<PermissionsField>()
+        .await
+        .map(|b| b.permissions)
+        .map_err(|e| e.to_string())
+}
+
+/// `GET /api/bot-tools` - W5's bot-written-tool list. Not built on the Rust
+/// server yet, so a 404/network failure degrades to an empty list, same as
+/// `PermissionsEditor.tsx`'s own `.catch(() => setMade([]))`.
+pub async fn fetch_bot_tools() -> Vec<MadeTool> {
+    let Ok(resp) = Request::get("/api/bot-tools").send().await else {
+        return Vec::new();
+    };
+    if !resp.ok() {
+        return Vec::new();
+    }
+    resp.json::<BotToolsField>()
+        .await
+        .map(|b| b.tools)
+        .unwrap_or_default()
+}
+
+/// `PATCH /api/bots/:id` - pins a model and/or sets the reasoning effort
+/// (`crates/server/src/routes/bots.rs`, added by this same ticket). `body`
+/// carries only the keys being changed - `null` for `model` clears the pin,
+/// matching the route's own "key present" semantics.
+pub async fn patch_bot(bot_id: &str, body: serde_json::Value) -> Result<Bot, String> {
+    let url = format!("/api/bots/{bot_id}");
+    let resp = Request::patch(&url)
+        .json(&body)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if resp.ok() {
+        return resp
+            .json::<BotPatchResponse>()
+            .await
+            .map(|b| b.bot)
+            .map_err(|e| e.to_string());
+    }
+    match resp.json::<ModelError>().await {
+        Ok(err) => Err(err.error),
+        Err(_) => Err(format!("{url} -> {}", resp.status())),
+    }
 }
 
 #[cfg(test)]

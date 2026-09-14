@@ -202,16 +202,24 @@ async fn put_default_model(
     };
 
     // A premium default is refused outright
-    if looks_premium(&model) || model == get_premium_model(&db) {
+    refuse_if_premium(&db, &model)?;
+
+    let saved = set_default_model(&db, &model);
+    Ok(Json(json!({ "model": saved })).into_response())
+}
+
+/// The premium-pin refusal `/api/default-model` uses above, pulled out so
+/// `routes/bots.rs`'s per-bot model PATCH (S2-09b) gives byte-identical text
+/// rather than a second copy that can drift.
+pub(crate) fn refuse_if_premium(db: &store::Db, model: &str) -> Result<(), crate::AppError> {
+    if looks_premium(model) || model == get_premium_model(db) {
         return Err(crate::AppError::bad_request(
             "That is a premium model, and this is what every unpinned bot and every routine falls \
              back to. It is also what a timer run downgrades TO, so setting it here would defeat \
              the downgrade entirely. Pick a cheap model; premium belongs on Escalate.",
         ));
     }
-
-    let saved = set_default_model(&db, &model);
-    Ok(Json(json!({ "model": saved })).into_response())
+    Ok(())
 }
 
 /// Mid model GET handler

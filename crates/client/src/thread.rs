@@ -12,8 +12,10 @@ use crate::approvals::Approvals;
 use crate::bubble::Bubble;
 use crate::composer::Composer;
 use crate::message_time::{day_key, format_day, format_time, now_iso};
+use crate::model_chip::ModelChip;
+use crate::permissions_editor::PermissionsEditor;
 use crate::questions::Questions;
-use crate::types::{Message, Role};
+use crate::types::{Bot, Message, Role};
 use crate::working_bar::WorkingBar;
 use dioxus::prelude::*;
 use js_sys::Date;
@@ -42,6 +44,14 @@ pub fn ChatPane(
     bot_name: String,
     #[props(default)] thread_id: Option<String>,
     #[props(default)] section_ids: Vec<String>,
+    // S2-09b: the full roster row for the open bot, when this pane is a
+    // bot's own conversation (not a room - `app.rs` only ever has one bot
+    // object to hand over there). Carries the model pin/effort the header's
+    // chip and the permissions grid below it both need. `None` for a room:
+    // neither the chip nor the grid is a single bot's own setting in that
+    // case, so this ticket narrows both to the non-room path (see this
+    // component's own `## Result` note on the gap).
+    #[props(default)] bot: Option<Bot>,
     on_seen: EventHandler<()>,
 ) -> Element {
     let mut messages = use_signal(Vec::<Message>::new);
@@ -165,8 +175,38 @@ pub fn ChatPane(
         });
     };
 
+    // S2-09b: a local echo of the open bot's pin/effort, seeded from the
+    // `bot` prop and updated by `ModelChip`'s own `on_saved` - this pane has
+    // no roster of its own to write a PATCH's result back into (that lives
+    // above it, in `app.rs`), so the chip and the permissions grid read
+    // their own copy rather than going stale until the next full roster
+    // fetch. A known, scoped gap: the RAIL's copy (e.g. a "default" tag on
+    // the bot row, if one is ever added there) still only refreshes on the
+    // next roster load.
+    let mut local_bot = use_signal(|| bot.clone());
+    use_effect(move || {
+        local_bot.set(bot.clone());
+    });
+
     rsx! {
         div { class: "pane",
+            if let Some(current) = local_bot.read().clone() {
+                div { class: "pane-head",
+                    div { class: "pane-head-who",
+                        b { "{bot_name}" }
+                    }
+                    div { class: "pane-head-meta",
+                        ModelChip {
+                            bot: current,
+                            on_saved: move |updated: Bot| local_bot.set(Some(updated)),
+                        }
+                    }
+                }
+                section { class: "pane-perms",
+                    h4 { class: "stg-sub-h", "Permissions" }
+                    PermissionsEditor { bot_id: bot_id.clone() }
+                }
+            }
             if let Some(err) = load_error.read().clone() {
                 p { class: "composer-error", "{err}" }
             }

@@ -78,6 +78,19 @@ pub struct Bot {
     // string ..., expected i64").
     #[serde(rename = "lastAt", default)]
     pub last_at: Option<String>,
+    // S2-09b: the model chip's own fields. `model` is `None` for "no pin,
+    // runs the platform default"; `effort` always has a value server-side
+    // (defaults to "medium" in `crates/store/src/bots.rs::row_to_bot`), kept
+    // here as a bare `String` rather than a duplicate enum - the chip only
+    // ever compares it against the three literal values.
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default = "default_effort")]
+    pub effort: String,
+}
+
+fn default_effort() -> String {
+    "medium".to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Default)]
@@ -213,4 +226,139 @@ pub struct QuestionsResponse {
 pub struct AuthStatus {
     pub configured: bool,
     pub signed_in: bool,
+}
+
+/* ---------------------------------------------------------- S2-09b: settings */
+
+/// `{"model": "..."}"`, the shape every plain model GET/PUT
+/// (`/api/default-model`, `/api/mid-model`, `/api/premium-model`) answers
+/// with on success.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ModelField {
+    pub model: String,
+}
+
+/// `{"error": "..."}"`, a refused model PUT (a premium pin, an empty id).
+#[derive(Debug, Clone, Deserialize)]
+pub struct ModelError {
+    pub error: String,
+}
+
+/// The two models an unpinned bot climbs through on the way to Escalate.
+/// Ported from `General.tsx`'s `Tier1Kind` union - kept as plain field
+/// access (`get`/`kind` strings) rather than an enum, since every caller
+/// already has the kind as the bare string the server itself uses
+/// ("code"/"reason"/"vision").
+#[derive(Debug, Clone, PartialEq, Deserialize, Default)]
+pub struct Tier1Models {
+    #[serde(default)]
+    pub code: String,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub vision: String,
+}
+
+impl Tier1Models {
+    pub fn get(&self, kind: &str) -> &str {
+        match kind {
+            "code" => &self.code,
+            "reason" => &self.reason,
+            "vision" => &self.vision,
+            _ => "",
+        }
+    }
+}
+
+/// `GET /api/tier1-models`'s response shape.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Tier1Response {
+    pub models: Tier1Models,
+}
+
+/// One row of the routing card's "Last 20 routings" table. Mirrors
+/// `model::routing::RoutingLogEntry` on the wire.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoutingLogEntry {
+    pub id: String,
+    pub created_at: String,
+    pub verdict: String,
+    pub model: String,
+}
+
+/// `GET`/`PUT /api/routing`'s response shape.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct RoutingState {
+    pub enabled: bool,
+    pub text: String,
+    #[serde(default)]
+    pub log: Vec<RoutingLogEntry>,
+}
+
+/// `GET`/`PUT /api/rules`'s response shape.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RulesField {
+    pub rules: String,
+}
+
+/// One row of `GET /api/models`. A strict subset of `settings.rs::ModelInfo`:
+/// the picker draws price, provider support and the mainstream tag, with no
+/// use yet for `contextLength`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogEntry {
+    pub id: String,
+    pub name: String,
+    pub in_per_m: f64,
+    pub out_per_m: f64,
+    #[serde(default)]
+    pub supports_tools: bool,
+    #[serde(default)]
+    pub batch_only: bool,
+    #[serde(default)]
+    pub mainstream: bool,
+}
+
+/// `GET /api/models`'s response shape.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ModelsResponse {
+    #[serde(default)]
+    pub models: Vec<CatalogEntry>,
+    #[serde(default)]
+    pub total: usize,
+    #[serde(rename = "mainstreamTotal", default)]
+    pub mainstream_total: usize,
+}
+
+/// `GET`/`PUT /api/bots/:id/permissions`'s response shape. Decisions are
+/// kept as bare strings ("allow"/"ask"/"deny") rather than a duplicate enum
+/// of `server::permissions::Decision` - this crate does not depend on
+/// `server`, and the grid only ever compares against the three literals.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PermissionsField {
+    pub permissions: std::collections::HashMap<String, String>,
+}
+
+/// One bot-written tool from `GET /api/bot-tools` (W5, not yet built on the
+/// Rust server - `api::fetch_bot_tools` degrades to an empty list on a 404,
+/// same as the TS original's `.catch(() => setMade([]))`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MadeTool {
+    pub name: String,
+    pub bot_name: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct BotToolsField {
+    #[serde(default)]
+    pub tools: Vec<MadeTool>,
+}
+
+/// `PATCH /api/bots/:id`'s success shape (`crates/server/src/routes/bots.rs`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct BotPatchResponse {
+    pub bot: Bot,
 }

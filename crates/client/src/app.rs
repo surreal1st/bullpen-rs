@@ -24,6 +24,7 @@ use crate::api;
 use crate::events::{ChangeKind, subscribe_events};
 use crate::rail::Rail;
 use crate::room_picker::{PickerMode, RoomPicker};
+use crate::settings::SettingsModal;
 use crate::thread::ChatPane;
 use crate::types::{RoomSummary, Roster};
 use dioxus::prelude::*;
@@ -160,6 +161,7 @@ pub fn App() -> Element {
     rsx! {
         document::Stylesheet { href: asset!("/assets/rail.css") }
         document::Stylesheet { href: asset!("/assets/thread.css") }
+        document::Stylesheet { href: asset!("/assets/settings.css") }
         {body}
     }
 }
@@ -174,6 +176,11 @@ fn AppShell() -> Element {
     let mut rooms = use_signal(Vec::<RoomSummary>::new);
     let mut selected = use_signal::<Option<Selection>>(|| None);
     let mut picker = use_signal::<Option<PickerMode>>(|| None);
+    // S2-09b: the settings modal has no natural place in the roster/rail
+    // shape yet (no gear slot in `rail.rs`), so it floats as its own button
+    // rather than waiting on that placement decision - see `settings.rs`'s
+    // own doc comment for what it renders.
+    let mut settings_open = use_signal(|| false);
     // Bumped whenever a "roster" change lands while a ROOM is open, to
     // force that `ChatPane` to remount and re-fetch - ported from
     // `App.tsx`'s `roomOpen.current` branch: a room's second (and later)
@@ -296,6 +303,7 @@ fn AppShell() -> Element {
                             bot_id: bot.id.clone(),
                             bot_name: bot.name.clone(),
                             section_ids: section_ids.clone(),
+                            bot: Some(bot.clone()),
                             on_seen: move |_| {
                                 spawn(async move {
                                     roster.set(Some(fetch_roster().await));
@@ -337,5 +345,17 @@ fn AppShell() -> Element {
 
     // Stylesheets are loaded once, by `App` itself (this component is only
     // ever reached through its gate) - see that component's own rsx!.
-    body
+    rsx! {
+        {body}
+        button {
+            class: "settings-fab",
+            title: "Settings",
+            "aria-label": "Settings",
+            onclick: move |_| settings_open.set(true),
+            "⚙"
+        }
+        if *settings_open.read() {
+            SettingsModal { on_close: move |_| settings_open.set(false) }
+        }
+    }
 }

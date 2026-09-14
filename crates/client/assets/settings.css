@@ -1,0 +1,843 @@
+/* S2-09b: the settings modal (General tab: models, routing, rules), the
+   per-bot permissions grid, and the thread header's model chip + popover.
+
+   Ported byte-close from `projects/bullpen-night/src/client/shell.css`:
+   `.stg-*` (5334-5670), `.field`/`.refusal`/`.editor-note` (254-330),
+   `.picker*` (375-520, 3918-3945, 5716-5750), `.rungs*` (3884-3920),
+   `.rules-box`/`.rules-foot` (3008-3030), `.perms`/`.perm-*` (1268-1330),
+   `.routing-log` (5766-5775), `.rule-table` (5077-5100), `.model-chip`/
+   `.chip-model`/`.effort-*` (5776-5920). `.modal*`/`.mono`/`.muted` reuse
+   tokens already ported into `rail.css`/`thread.css` - `.muted` itself was
+   never actually defined as a class in either (every prior use was an
+   inline `color: var(--muted)` style), so it is added here, once, rather
+   than duplicated per caller.
+
+   New in this ticket, not a port: `.pane-head`/`.pane-perms` (S2-09b's own
+   placement of the chip and the permissions grid - PermissionsEditor has
+   no bullpen-rs BotEditor to live inside yet, see `thread.rs`'s doc on
+   `ChatPane`'s `bot` prop), `.chip-backdrop` (closes the popover on an
+   outside click without a `web_sys` document listener - see
+   `model_chip.rs`'s own doc), and `.settings-fab` (the settings button
+   itself - `rail.rs` has no gear slot yet, see `app.rs`'s doc comment). */
+
+.muted {
+  color: var(--muted);
+}
+
+/* ------------------------------------------------------- pane header/perms */
+
+.pane-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+  padding: 0.7rem 1.15rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.pane-head-who b {
+  font-size: 0.95rem;
+}
+
+.pane-head-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.pane-perms {
+  padding: 0.7rem 1.15rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.settings-fab {
+  position: fixed;
+  right: 1rem;
+  bottom: 1rem;
+  width: 2.4rem;
+  height: 2.4rem;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  background: var(--raised);
+  color: var(--ink);
+  font-size: 1.1rem;
+  cursor: pointer;
+  z-index: 30;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 40%);
+}
+
+.settings-fab:hover {
+  background: var(--sel);
+}
+
+/* --------------------------------------------------------------- .field */
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.field > span {
+  font-size: 0.78rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.field small {
+  color: #5c6a7b;
+  font-size: 0.76rem;
+}
+
+.refusal {
+  border-radius: 10px;
+  padding: 0.7rem 0.85rem;
+  border: 1px solid color-mix(in srgb, var(--danger) 42%, var(--line));
+  background: color-mix(in srgb, var(--danger) 9%, var(--panel));
+  margin-bottom: 0.8rem;
+}
+
+.refusal b {
+  color: var(--danger);
+}
+
+.refusal p {
+  margin: 0.3rem 0 0;
+  font-size: 0.88rem;
+}
+
+/* --------------------------------------------------------------- .picker */
+
+.picker {
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: #0f151d;
+  overflow: hidden;
+}
+
+.picker-current {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.6rem 0.7rem;
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+
+.picker-tag {
+  color: #46525f;
+  font-size: 0.68rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.picker-clear {
+  margin-left: auto;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  border-radius: 7px;
+  padding: 0.18rem 0.55rem;
+  font: inherit;
+  font-size: 0.76rem;
+  cursor: pointer;
+}
+
+.picker-search {
+  width: 100%;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink);
+  padding: 0.5rem 0.7rem;
+  font: inherit;
+}
+
+.picker-search:focus-visible {
+  outline: none;
+  background: #121a23;
+}
+
+.picker-list {
+  max-height: 15rem;
+  overflow-y: auto;
+}
+
+.picker-list .muted {
+  padding: 0.7rem;
+  font-size: 0.85rem;
+}
+
+.picker-row {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  padding: 0.42rem 0.7rem;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.picker-row:hover {
+  background: #141d27;
+}
+
+.picker-row.is-on {
+  background: #1a2836;
+}
+
+.picker-row-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.86rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.picker-row-vendor {
+  color: #55616f;
+  font-size: 0.72rem;
+  margin-left: 0.45rem;
+}
+
+.picker-row-facts {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--muted);
+  font-size: 0.76rem;
+  white-space: nowrap;
+}
+
+.picker-row.is-batch {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+.picker-batch {
+  color: var(--danger);
+  font-size: 0.68rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.picker-no-tools {
+  color: #b08a5a;
+  font-size: 0.68rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.picker-more {
+  padding: 0.5rem 0.7rem;
+  font-size: 0.78rem;
+}
+
+.picker-legend {
+  margin: 0;
+  padding: 0.45rem 0.7rem;
+  border-top: 1px solid var(--line);
+  color: #55616f;
+  font-size: 0.72rem;
+}
+
+.picker-error {
+  padding: 0.7rem;
+  color: #f0b3a0;
+}
+
+.picker-error pre {
+  margin: 0.3rem 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 0.76rem;
+}
+
+.picker-toggle {
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid var(--line-strong);
+  color: var(--ink-dim);
+  border-radius: 999px;
+  padding: 0.2rem 0.7rem;
+  font: inherit;
+  font-size: 0.76rem;
+  cursor: pointer;
+  transition: background var(--fast) var(--spring), color var(--fast) var(--spring);
+}
+
+.picker-toggle:hover {
+  background: rgb(255 255 255 / 6%);
+  color: var(--ink);
+}
+
+.picker.is-open .picker-toggle {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #0d1219;
+}
+
+.picker-scope {
+  margin: 0.35rem 0 0;
+  padding: 0 0.15rem;
+}
+
+.picker-scope-link {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 0.82rem;
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.picker-scope-link:hover {
+  opacity: 0.85;
+}
+
+.picker-mainstream {
+  font-size: 0.72rem;
+  color: var(--ink-dim);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0.05rem 0.4rem;
+}
+
+.mainstream-select {
+  width: 100%;
+  background: #0f151d;
+  border: 1px solid var(--line);
+  color: var(--ink);
+  border-radius: 8px;
+  padding: 0.4rem 0.55rem;
+  font: inherit;
+  font-size: 0.83rem;
+  margin-top: 0.6rem;
+}
+
+/* ---------------------------------------------------------------- .rungs */
+
+.rungs {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  margin: 0 0 1.1rem;
+  padding: 0.85rem 0.9rem 0.95rem 1.05rem;
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--accent);
+  border-radius: var(--radius);
+  background: rgb(255 255 255 / 2.5%);
+}
+
+.rungs-h {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.rungs-h > span {
+  font-size: 0.78rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+}
+
+.rungs-h small {
+  color: #5c6a7b;
+  font-size: 0.76rem;
+  max-width: 76ch;
+}
+
+/* ----------------------------------------------------------- rules/routing */
+
+.rules-box {
+  width: 100%;
+  margin-top: 0.6rem;
+  padding: 0.7rem 0.8rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--ink);
+  font: 0.85rem/1.6 ui-monospace, "Cascadia Mono", Consolas, monospace;
+  resize: vertical;
+}
+
+.rules-box:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.rules-foot {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  margin-top: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.rules-warn {
+  color: #5c6a7b;
+  font-size: 0.78rem;
+}
+
+.set-note {
+  color: #5c6a7b;
+  font-size: 0.82rem;
+  margin: 0 0 0.3rem;
+}
+
+.routing-log {
+  margin-top: 0.9rem;
+}
+
+.routing-log .muted {
+  font-size: 0.82rem;
+  color: var(--ink-dim);
+}
+
+.rule-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+  table-layout: fixed;
+}
+
+.rule-table th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--muted);
+  padding: 0.4rem 0.5rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.rule-table td {
+  padding: 0.45rem 0.5rem;
+  border-bottom: 1px solid var(--line);
+}
+
+/* ----------------------------------------------------------------- .perms */
+
+.perms {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.perm-row {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  flex-wrap: wrap;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #0f151d;
+  padding: 0.55rem 0.7rem;
+}
+
+.perm-what {
+  flex: 1;
+  min-width: 12rem;
+}
+
+.perm-label {
+  display: block;
+  font-size: 0.88rem;
+  font-weight: 570;
+}
+
+.perm-blurb {
+  display: block;
+  color: #5c6a7b;
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
+.perm-choices {
+  display: flex;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.perm-choices button {
+  border: 0;
+  border-right: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  padding: 0.28rem 0.65rem;
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.perm-choices button:last-child {
+  border-right: 0;
+}
+
+.perm-choices button.is-on {
+  background: var(--seam);
+  color: #17100c;
+  font-weight: 620;
+}
+
+/* ------------------------------------------------------------- .stg-modal */
+
+.stg-modal {
+  width: min(58rem, 100%);
+  height: min(38rem, 100%);
+}
+
+.stg-body {
+  display: grid;
+  grid-template-columns: 12.5rem minmax(0, 1fr);
+  padding: 0;
+  overflow: hidden;
+}
+
+.stg-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  padding: 0.7rem;
+  border-right: 1px solid var(--line);
+  overflow-y: auto;
+}
+
+.stg-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  border-radius: 8px;
+  padding: 0.5rem 0.6rem;
+  font: inherit;
+  font-size: 0.86rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.stg-nav-item.is-on {
+  background: var(--raised);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.stg-panel {
+  overflow-y: auto;
+  padding: 1rem 1.15rem 1.3rem;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+
+.stg-group {
+  margin: 0 0 0.9rem;
+}
+
+.stg-group:last-child {
+  margin-bottom: 0;
+}
+
+.stg-group-h {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  margin: 0 0 0.45rem;
+  font-size: 0.72rem;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+.stg-card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  padding: 0.85rem 0.95rem;
+}
+
+.stg-card-loose > :first-child {
+  margin-top: 0;
+}
+
+.stg-card-loose > :last-child {
+  margin-bottom: 0;
+}
+
+.stg-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+  padding: 0.5rem 0;
+  border-top: 1px solid var(--line);
+}
+
+.stg-row:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.stg-row > span:first-child {
+  color: var(--ink-dim);
+  font-size: 0.86rem;
+}
+
+.stg-sub {
+  margin-top: 1.1rem;
+  padding-top: 1.1rem;
+  border-top: 1px solid var(--line);
+}
+
+.stg-card > .stg-sub:first-child {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+
+.stg-sub-h {
+  margin: 0 0 0.6rem;
+  font-size: 0.72rem;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--faint);
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+}
+
+.stg-btn {
+  border: 1px solid var(--line);
+  background: var(--raised);
+  color: var(--ink);
+  border-radius: 8px;
+  padding: 0.35rem 0.8rem;
+  font: inherit;
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+
+.stg-btn:hover:not(:disabled) {
+  border-color: var(--line-strong);
+}
+
+.stg-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.stg-toggle {
+  flex: none;
+  width: 2.4rem;
+  height: 1.4rem;
+  border: 1px solid var(--line-strong);
+  background: var(--raised);
+  border-radius: 999px;
+  padding: 2px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+}
+
+.stg-toggle-knob {
+  width: 1.05rem;
+  height: 1.05rem;
+  border-radius: 999px;
+  background: var(--muted);
+  transition: transform var(--fast) var(--spring), background var(--fast) ease;
+}
+
+.stg-toggle.is-on {
+  background: color-mix(in srgb, var(--accent) 55%, var(--raised));
+  border-color: var(--accent);
+}
+
+.stg-toggle.is-on .stg-toggle-knob {
+  background: var(--ink);
+  transform: translateX(1rem);
+}
+
+@media (max-width: 640px) {
+  .stg-modal {
+    width: 100%;
+    height: 100%;
+  }
+
+  .stg-body {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .stg-nav {
+    flex-direction: row;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+}
+
+/* ------------------------------------------------------------- model chip */
+
+.model-chip {
+  position: relative;
+}
+
+.chip {
+  border: 1px solid var(--line);
+  background: var(--raised);
+  color: var(--ink-dim);
+  border-radius: 999px;
+  padding: 0.2rem 0.6rem;
+  font-size: 0.78rem;
+}
+
+.chip-model {
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  padding: 0.2rem 0.6rem;
+}
+
+.chip-default {
+  font-style: normal;
+  margin-left: 0.35rem;
+  color: #46525f;
+  font-size: 0.68rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+/* Closes the popover on an outside click - see this file's top doc comment
+   for why this stands in for the TS original's document mousedown
+   listener. Transparent and beneath the popover itself. */
+.chip-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 39;
+  background: transparent;
+}
+
+.effort-pop {
+  position: absolute;
+  top: calc(100% + 0.45rem);
+  /* Deviation from the ported `left: 0`: this chip sits at the far right of
+     `.pane-head` (S2-09b's own placement, not the TS original's layout), so
+     anchoring from the left pushed the popover off the right edge of the
+     viewport and clipped its reset button - confirmed in `shots/
+     s2-model-popover.png` before this fix. Anchoring from the right keeps
+     it fully on screen without changing anything else about the popover. */
+  right: 0;
+  width: 15.5rem;
+  background: var(--raised);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  padding: 0.85rem 0.9rem 0.9rem;
+  box-shadow: 0 16px 44px rgb(0 0 0 / 62%);
+  z-index: 40;
+}
+
+.effort-pop-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+}
+
+.effort-glyph {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--sel);
+  color: var(--ink-dim);
+  border: 0;
+}
+
+button.effort-glyph {
+  cursor: pointer;
+}
+
+button.effort-glyph:hover:not(:disabled) {
+  background: var(--line-strong);
+  color: var(--ink);
+}
+
+button.effort-glyph:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.effort-pop-title {
+  flex: 1;
+  min-width: 0;
+  text-align: center;
+}
+
+.effort-pop-title h3 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 640;
+  color: var(--ink);
+}
+
+.effort-pop-title p {
+  margin: 0.1rem 0 0;
+  font-size: 0.74rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.effort-slider {
+  position: relative;
+  margin: 0.9rem 0 0.35rem;
+  display: flex;
+  align-items: center;
+}
+
+.effort-slider-input {
+  width: 100%;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.effort-ticks {
+  position: absolute;
+  left: 2px;
+  right: 2px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  justify-content: space-between;
+  pointer-events: none;
+}
+
+.effort-ticks span {
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--ink-dim);
+}
+
+.effort-description {
+  margin: 0 0 0.75rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+  text-align: center;
+}
+
+.effort-error {
+  margin: 0 0 0.6rem;
+  font-size: 0.78rem;
+  color: var(--danger);
+}
