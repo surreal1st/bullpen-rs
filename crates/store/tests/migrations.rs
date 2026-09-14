@@ -52,14 +52,15 @@ fn memory_db_migrates_to_latest_version() {
 fn fixture_db_opens_unchanged() {
     let temp = copy_fixture_to_temp();
 
-    {
+    let before = {
         let raw = Connection::open(&temp).expect("open raw connection before Db::open");
         assert_eq!(
             user_version(&raw),
             16,
             "fixture should already be at version 16"
         );
-    }
+        schema_names(&raw)
+    };
 
     let db = Db::open(temp.to_str().expect("temp path is valid UTF-8"))
         .expect("Db::open the fixture copy");
@@ -72,23 +73,27 @@ fn fixture_db_opens_unchanged() {
 
     let after = schema_names(db.conn());
 
-    // Migration 18 adds new tables and indexes, so we don't expect the schemas
-    // to be identical. Instead, check that migration 18's new objects are present.
-    assert!(
-        after.contains("projects"),
-        "migration 18 should add projects table"
-    );
-    assert!(
-        after.contains("project_members"),
-        "migration 18 should add project_members table"
-    );
-    assert!(
-        after.contains("sqlite_autoindex_projects_1"),
-        "migration 18 should add projects primary key index"
-    );
-    assert!(
-        after.contains("sqlite_autoindex_project_members_1"),
-        "migration 18 should add project_members primary key index"
+    // Migration 18 adds new tables and indexes. Verify they are present and
+    // that no other schema objects were created or removed.
+    let mut expected_new: BTreeSet<String> = BTreeSet::new();
+    expected_new.insert("projects".to_string());
+    expected_new.insert("project_members".to_string());
+    expected_new.insert("sqlite_autoindex_projects_1".to_string());
+    expected_new.insert("sqlite_autoindex_project_members_1".to_string());
+
+    // After must equal before plus the new objects.
+    let expected_after = {
+        let mut result = before.clone();
+        result.extend(expected_new.clone());
+        result
+    };
+
+    for new_obj in &expected_new {
+        assert!(after.contains(new_obj), "migration 18 should add {new_obj}");
+    }
+    assert_eq!(
+        after, expected_after,
+        "schema must be the fixture's schema plus migration 18's new objects only"
     );
 
     drop(db);

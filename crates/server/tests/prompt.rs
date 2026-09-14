@@ -159,6 +159,37 @@ fn recall_holds_the_newest_within_budget_and_names_the_older_count() {
 }
 
 #[test]
+fn oversized_own_entry_clips_and_emits_search_hint() {
+    let db = Db::open(":memory:").unwrap();
+    seed_bot(&db, "t", "T", "", "You are T.");
+    let bot = store::get_bot(&db, "t").unwrap().unwrap();
+
+    // Add 4 smaller entries first, then one oversized entry as the newest.
+    // The oversized entry (6000 chars, ~1500 tokens) exceeds the 1200-token
+    // recall budget (~4800 chars), so nothing fits when it's the first to check.
+    for i in 0..4 {
+        store::remember(&db, "t", &format!("older-entry-{i}"), "bot").unwrap();
+    }
+    let oversized = "x".repeat(6000);
+    store::remember(&db, "t", &oversized, "bot").unwrap();
+
+    let messages = build_prompt(&db, &bot, &[]);
+    let system = system_text(&messages);
+
+    // The oversized entry is newest but too big to fit, so the fallback clips
+    // it and emits a "## What you know" section with the truncated entry.
+    assert!(system.contains("## What you know"));
+    assert!(system.contains("[...truncated, search_memory for the rest]"));
+
+    // The search hint must appear, reporting 4 older entries not shown.
+    let older_line = system
+        .lines()
+        .find(|l| l.starts_with("There are ") && l.contains("older notes"))
+        .expect("an 'older notes' line must appear when entries are oversized");
+    assert!(older_line.contains("4 older notes"));
+}
+
+#[test]
 fn with_room_instruction_appends_one_trailing_user_turn() {
     let db = Db::open(":memory:").unwrap();
     seed_bot(&db, "t", "T", "", "You are T.");

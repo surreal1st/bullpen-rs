@@ -310,10 +310,12 @@ pub fn build_prompt(db: &Db, bot: &Bot, history: &[HistoryTurn]) -> Vec<ModelMes
 
     let mut candidate_tiers: Vec<(String, Vec<store::LogEntry>)> = Vec::new();
     let mut available: i64 = 0;
+    let mut own_candidates: Vec<store::LogEntry> = Vec::new();
 
     match own_tier(db, &bot.id) {
         Ok((entries, total)) => {
             available += total;
+            own_candidates = entries.clone();
             candidate_tiers.push(("## What you know".to_string(), entries));
         }
         Err(err) => tracing::error!("build_prompt: own recall query failed: {err}"),
@@ -358,6 +360,9 @@ pub fn build_prompt(db: &Db, bot: &Bot, history: &[HistoryTurn]) -> Vec<ModelMes
         }
     }
 
+    // Emit recall blocks if anything fits the budget, or clip the newest own
+    // entry as a fallback when nothing does (a single entry can be bigger than
+    // the whole budget). See store::recall_for's fallback comment.
     if !kept_tiers.is_empty() {
         for (header, entries) in &kept_tiers {
             blocks.push(String::new());
@@ -367,13 +372,28 @@ pub fn build_prompt(db: &Db, bot: &Bot, history: &[HistoryTurn]) -> Vec<ModelMes
                 blocks.push(format!("- {}", entry.content));
             }
         }
-        let older = (available - kept_total).max(0);
-        if older > 0 {
-            blocks.push(String::new());
-            blocks.push(format!(
-                "There are {older} older notes not shown here. Use search_memory to look something up rather than telling Josh you do not know it."
-            ));
-        }
+    } else if !own_candidates.is_empty() && available > 0 {
+        // Fallback: nothing fits, but we have the bot's own entries. Clip the
+        // newest one as store::recall_for does.
+        let clip = (store::RECALL_TOKEN_BUDGET * 4).max(0) as usize;
+        let mut clipped = own_candidates[0].clone();
+        let truncated: String = clipped.content.chars().take(clip).collect();
+        clipped.content = format!("{truncated}\n[...truncated, search_memory for the rest]");
+
+        blocks.push(String::new());
+        blocks.push("## What you know".to_string());
+        blocks.push(String::new());
+        blocks.push(format!("- {}", clipped.content));
+        kept_total = 1;
+    }
+
+    // Emit the "older notes" line whenever entries exist beyond what was kept.
+    let older = (available - kept_total).max(0);
+    if older > 0 {
+        blocks.push(String::new());
+        blocks.push(format!(
+            "There are {older} older notes not shown here. Use search_memory to look something up rather than telling Josh you do not know it."
+        ));
     }
 
     let system = blocks.join("\n");
