@@ -83,6 +83,7 @@ pub fn BotRow(bot: Bot, section_ids: Vec<String>) -> Element {
                 section_ids,
                 busy: bot.busy,
                 avatar: bot.avatar.clone(),
+                shape: bot.shape.clone(),
             }
             span { class: "bot-main",
                 span { class: "bot-line",

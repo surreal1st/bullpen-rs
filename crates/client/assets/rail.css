@@ -1,28 +1,37 @@
-/* Ported from projects/bullpen-night/src/client/shell.css for S0-05.
-   ONLY the selectors the ticket names: .rail, .roster, .bot, .bot-*, .av,
-   .av-*, @keyframes av-*. Rule bodies are byte-close to the source.
-
-   The custom properties below are NOT ported: the ticket pointed at shell.css
-   :1-60 for the :root block, but that range holds `.left`/`.app`/`.pane`
-   rules, not a :root block - this file defines no :root anywhere (grepped,
-   zero matches for `^:root`). These are a reasonable dark-theme
-   approximation so the ported rules resolve to something, not a port of a
-   real source. See S0-05's "## Result" for the note. */
+/* Vapor. Chosen from the look study 2026-09-10.
+   Cool near-black, translucent rail, hairline separators, generous radii, and
+   the seam orange spent sparingly rather than everywhere. */
 :root {
-  --line: rgba(255, 255, 255, 0.08);
-  --line-strong: rgba(255, 255, 255, 0.16);
-  --ink: #eef1f4;
-  --ink-dim: #b7c0c9;
-  --muted: #8a97a3;
-  --faint: #5c6773;
-  --sel: rgba(255, 255, 255, 0.07);
-  --seam: #5ec8c0;
-  --accent: #5ec8c0;
-  --danger: #ff5c5c;
+  --bg: #16181d;
+  --panel: #1e2128;
+  --raised: #262a32;
+  --line: rgb(255 255 255 / 8%);
+  --line-strong: rgb(255 255 255 / 14%);
+  --ink: #e6e8ec;
+  --ink-dim: #b3b9c3;
+  --muted: #8b9099;
+  --faint: #666c76;
+  --seam: #e05d3a;
+  --accent: #5b8dd6;
+  --danger: #e0603a;
+  --ok: #4ac48a;
+  --sel: rgb(255 255 255 / 8%);
+  --radius: 12px;
   --radius-sm: 8px;
-  --fast: 140ms;
-  --slow: 260ms;
-  --spring: cubic-bezier(0.2, 0.8, 0.2, 1);
+
+  /* Theme knobs. Overwritten on :root at boot from /api/theme; these values
+     are the shipped default, so the app is never unstyled while that request
+     is in the air or if it fails entirely. */
+  --mine-tint: 20%;
+  --mine-edge: 26%;
+  --mine-ink: #fdece6;
+
+  /* One spring for the whole app. Motion that varies per component reads as
+     accidental rather than designed. */
+  --spring: cubic-bezier(0.32, 0.72, 0, 1);
+  --fast: 0.18s;
+  --slow: 0.42s;
+  color-scheme: dark;
 }
 
 .roster {

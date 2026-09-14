@@ -2,13 +2,9 @@
 //! face. An emoji override wins when set; otherwise a generated SVG face
 //! whose silhouette hue comes from the bot's section and whose eyes narrow
 //! and scan while `busy`.
-//!
-//! The shape-per-bot table (`SHAPES`/`normalizeShape` in `faces.ts`) is out
-//! of this ticket's read range, so this ports one fixed rounded silhouette
-//! rather than the real shape picker - S0-05 only needs a face that reads
-//! as a face and animates when busy.
 
 use dioxus::prelude::*;
+use shared::faces::{normalize_shape, SHAPES};
 
 /// Stable small hash: same name, same angle, every reload and every machine.
 fn spin(text: &str) -> i32 {
@@ -31,10 +27,6 @@ pub fn hue_for(section_id: Option<&str>, section_ids: &[String], name: &str) -> 
     (((base + (spin(name) % 24) - 12) % 360) + 360) % 360
 }
 
-/// One rounded silhouette (viewBox 0 0 32 32), stand-in until the shape
-/// picker lands.
-const FACE_PATH: &str = "M16 2 C24 2 30 8 30 16 C30 24 24 30 16 30 C8 30 2 24 2 16 C2 8 8 2 16 2 Z";
-
 #[component]
 pub fn Avatar(
     id: String,
@@ -44,6 +36,7 @@ pub fn Avatar(
     #[props(default = false)] busy: bool,
     #[props(default)] avatar: Option<String>,
     #[props(default = 30.0)] size: f64,
+    #[props(default)] shape: Option<String>,
 ) -> Element {
     let hue = hue_for(section_id.as_deref(), &section_ids, &name);
 
@@ -64,8 +57,22 @@ pub fn Avatar(
         };
     }
 
-    let eye_y = 32.0 * 0.55_f64;
-    let gap = 5.0_f64;
+    // Get the shape for this bot
+    let shape_name = normalize_shape(shape.as_deref(), &name);
+    let shape_info = SHAPES
+        .iter()
+        .find(|(k, _)| k == &shape_name)
+        .map(|(_, v)| v)
+        .unwrap_or_else(|| {
+            SHAPES
+                .iter()
+                .find(|(k, _)| k == &"rounded")
+                .map(|(_, v)| v)
+                .unwrap()
+        });
+
+    let eye_y = 32.0 * shape_info.eye_y;
+    let gap = shape_info.eye_gap;
     let fill_id = format!("face-{id}");
     let hue2 = (hue + 22) % 360;
     let ex1 = 16.0 - gap - 1.5;
@@ -80,12 +87,13 @@ pub fn Avatar(
       <stop offset="1" stop-color="hsl({hue2} 56% 45%)" />
     </linearGradient>
   </defs>
-  <path d="{FACE_PATH}" fill="url(#{fill_id})" />
+  <path d="{}" fill="url(#{fill_id})" />
   <g class="av-eyes" fill="#141018">
     <rect class="av-eye" x="{ex1}" y="{ey}" width="3" height="4.4" rx="1.5" />
     <rect class="av-eye" x="{ex2}" y="{ey}" width="3" height="4.4" rx="1.5" />
   </g>
-</svg>"##
+</svg>"##,
+        shape_info.path
     );
 
     let class = if busy {

@@ -60,7 +60,7 @@ const ROSTER = {
       pinned: false,
       hidden: false,
       avatar: null,
-      shape: null,
+      shape: "hexagon",
       busy: true,
       unread: 2,
       preview: "Crunching the numbers now…",
@@ -103,17 +103,19 @@ const server = createServer(async (req, res) => {
     return serveFile(res, join(PUBLIC_DIR, "index.html"));
   }
 
-  if (url.pathname.startsWith("/bullpen/")) {
-    const rel = normalize(url.pathname.slice("/bullpen/".length));
-    if (rel.startsWith("..")) {
-      res.writeHead(400).end("bad path");
-      return;
-    }
-    return serveFile(res, join(PUBLIC_DIR, rel));
+  // Serve assets and other files directly (base_path is not set, so assets are at /assets/*)
+  if (url.pathname.startsWith("/api/")) {
+    res.writeHead(404, { "Content-Type": "text/plain" });
+    res.end("not found");
+    return;
   }
 
-  res.writeHead(404, { "Content-Type": "text/plain" });
-  res.end("not found");
+  const rel = normalize(url.pathname);
+  if (rel.startsWith("..")) {
+    res.writeHead(400).end("bad path");
+    return;
+  }
+  return serveFile(res, join(PUBLIC_DIR, rel.replace(/^\//, "")));
 });
 
 server.listen(PORT, "127.0.0.1", () => {
