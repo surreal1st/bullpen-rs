@@ -124,18 +124,48 @@ async fn exec_passes_command_correctly() {
     );
 }
 
+// F7 bite: a timeout is decided ONLY by the runner's own `RunError::Timeout`
+// signal now - `DockerSandbox::exec` must never derive it by grepping
+// stderr, which both misreported ordinary failures and let a bot forge its
+// own verdict.
 #[tokio::test]
-async fn timeout_error_sets_exit_code_124() {
+async fn real_timeout_signal_sets_exit_code_124() {
     let config = SandboxConfig::default();
     let runner = Arc::new(FakeRunner::new());
     let runner_clone: Arc<dyn CommandRunner> = runner.clone();
     let sandbox = DockerSandbox::new(config, runner_clone);
 
-    runner.push_response("", "command timed out", 1);
+    runner.push_timeout();
+    runner.push_response("", "", 0); // answers the F6 cleanup `docker rm -f` call
     let result = sandbox.exec("bot1", "sleep 1000").await;
 
     assert_eq!(result.exit_code, 124);
     assert!(result.timed_out);
+
+    // F6: the timeout branch must clean up the container by name, so a
+    // second `docker rm -f` call is expected alongside the original exec.
+    let commands = runner.commands();
+    assert_eq!(commands.len(), 2, "expected the exec plus a cleanup call");
+    assert!(commands[1].iter().any(|a| a == "rm"));
+    assert!(commands[1].iter().any(|a| a == "-f"));
+}
+
+// F7 regression: stderr merely CONTAINING the word "timeout" (an ordinary
+// curl/pytest/npm/git failure) must not be reported as a timeout, and the
+// real exit code must survive - this is the exact false positive the old
+// `stderr.contains("timeout")` heuristic produced.
+#[tokio::test]
+async fn stderr_mentioning_timeout_is_not_treated_as_one() {
+    let config = SandboxConfig::default();
+    let runner = Arc::new(FakeRunner::new());
+    let runner_clone: Arc<dyn CommandRunner> = runner.clone();
+    let sandbox = DockerSandbox::new(config, runner_clone);
+
+    runner.push_response("", "curl: (28) Operation timeout after 30001 ms", 28);
+    let result = sandbox.exec("bot1", "curl https://example.invalid").await;
+
+    assert_eq!(result.exit_code, 28, "the real exit code must survive");
+    assert!(!result.timed_out, "stderr text must not fake a timeout");
 }
 
 #[tokio::test]
@@ -210,6 +240,27 @@ async fn read_file_accepts_relative_files() {
     assert_eq!(result.unwrap(), "file content");
 }
 
+// F4: `read_file`'s result must go through the same char-boundary-safe cap
+// `shell` output does - before this fix it was returned with NO cap at all.
+#[tokio::test]
+async fn read_file_result_is_capped() {
+    let runner = Arc::new(FakeRunner::new());
+    let runner_clone: Arc<dyn CommandRunner> = runner.clone();
+    let sandbox = DockerSandbox::new(
+        SandboxConfig {
+            max_output_bytes: 10,
+            ..Default::default()
+        },
+        runner_clone,
+    );
+
+    runner.push_response("x".repeat(500), "", 0);
+    let result = sandbox.read_file("bot1", "big.log").await.unwrap();
+
+    assert!(result.len() < 500, "expected the content to be capped");
+    assert!(result.contains("truncated"));
+}
+
 #[tokio::test]
 async fn read_file_uses_docker_cat() {
     let config = SandboxConfig::default();
@@ -248,13 +299,18 @@ async fn unavailable_sandbox_says_nothing_was_read() {
     assert!(err.contains("nothing was read") || err.contains("sandboxing is off"));
 }
 
-// Real Docker test - only runs if BULLPEN_TEST_DOCKER=1 and docker is available
+// Real Docker test - only runs if BULLPEN_TEST_DOCKER=1 and docker is
+// available. F13: this used to self-skip even under `--ignored` (a silent
+// PASS with nothing touched). It must now FAIL loudly instead of quietly
+// reporting green when someone runs `--ignored` without opting in.
 #[tokio::test]
 #[ignore]
 async fn real_docker_echo_roundtrip() {
-    // Skip if docker is not available or test is not enabled
     if std::env::var("BULLPEN_TEST_DOCKER").as_deref() != Ok("1") {
-        return;
+        panic!(
+            "set BULLPEN_TEST_DOCKER=1 to run this test - it drives a real docker daemon and \
+must not report a pass without touching one"
+        );
     }
 
     let config = SandboxConfig::default();
@@ -265,7 +321,7 @@ async fn real_docker_echo_roundtrip() {
 
     let result = sandbox.exec("test-bot", "echo hello").await;
 
-    assert_eq!(result.exit_code, 0);
+    assert_eq!(result.exit_code, 0, "stderr was: {}", result.stderr);
     assert!(result.stdout.contains("hello"));
 }
 
@@ -293,4 +349,133 @@ async fn docker_args_include_network_none() {
         }
     }
     assert!(found_network, "Expected --network none in command");
+}
+
+/// Pulls the value docker would have received for `--name` out of a
+/// recorded argv, so an exact-argv comparison can splice it back into the
+/// expected vector - `container_name` mints a fresh one per call, so it can
+/// never be hardcoded.
+fn container_name_from(argv: &[String]) -> String {
+    let idx = argv
+        .iter()
+        .position(|a| a == "--name")
+        .expect("--name must be present");
+    argv[idx + 1].clone()
+}
+
+fn strings(items: &[&str]) -> Vec<String> {
+    items.iter().map(|s| s.to_string()).collect()
+}
+
+// F12: the container's ENTIRE security argv, compared as a whole `Vec<String>`
+// rather than `contains`. Deleting any one flag from `isolation_args` - or
+// dropping `--user`, `--runtime`, `--tmpfs` - fails this test.
+#[tokio::test]
+async fn exec_argv_matches_the_hardened_shape_exactly() {
+    let config = SandboxConfig::default();
+    let runner = Arc::new(FakeRunner::new());
+    let runner_clone: Arc<dyn CommandRunner> = runner.clone();
+    let sandbox = DockerSandbox::new(config, runner_clone);
+
+    runner.push_response("hi\n", "", 0);
+    let _ = sandbox.exec("bot1", "echo hi").await;
+
+    let commands = runner.commands();
+    assert_eq!(commands.len(), 1);
+    let argv = &commands[0];
+    let name = container_name_from(argv);
+
+    let mut expected = strings(&["docker", "run", "--rm", "--name"]);
+    expected.push(name);
+    expected.extend(strings(&[
+        "--runtime",
+        "runc",
+        "--network",
+        "none",
+        "--memory",
+        "256m",
+        "--memory-swap",
+        "256m",
+        "--cpus",
+        "0.5",
+        "--pids-limit",
+        "128",
+        "--read-only",
+        "--tmpfs",
+        "/tmp:rw,noexec,nosuid,size=64m",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--user",
+        "1000:1000",
+        "--mount",
+        "type=volume,source=bullpen-work-bot1,target=/work",
+        "-w",
+        "/work",
+        "--label",
+        "bullpen.bot=bot1",
+        "debian:bookworm-slim",
+        "sh",
+        "-c",
+        "echo hi",
+    ]));
+
+    assert_eq!(argv, &expected, "exec's hardened argv shape changed");
+}
+
+// F12/F2: the SAME assertion for `read_file` - this is how F2 shipped
+// unhardened in the first place (only `cat` and the filename were ever
+// checked).
+#[tokio::test]
+async fn read_file_argv_matches_the_hardened_shape_exactly() {
+    let config = SandboxConfig::default();
+    let runner = Arc::new(FakeRunner::new());
+    let runner_clone: Arc<dyn CommandRunner> = runner.clone();
+    let sandbox = DockerSandbox::new(config, runner_clone);
+
+    runner.push_response("content", "", 0);
+    let _ = sandbox.read_file("bot1", "data.txt").await;
+
+    let commands = runner.commands();
+    assert_eq!(commands.len(), 1);
+    let argv = &commands[0];
+    let name = container_name_from(argv);
+
+    let mut expected = strings(&["docker", "run", "--rm", "--name"]);
+    expected.push(name);
+    expected.extend(strings(&[
+        "--runtime",
+        "runc",
+        "--network",
+        "none",
+        "--memory",
+        "256m",
+        "--memory-swap",
+        "256m",
+        "--cpus",
+        "0.5",
+        "--pids-limit",
+        "128",
+        "--read-only",
+        "--tmpfs",
+        "/tmp:rw,noexec,nosuid,size=64m",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--user",
+        "1000:1000",
+        "--mount",
+        "type=volume,source=bullpen-work-bot1,target=/work,ro",
+        "-w",
+        "/work",
+        "--label",
+        "bullpen.bot=bot1",
+        "debian:bookworm-slim",
+        "cat",
+        "data.txt",
+    ]));
+
+    assert_eq!(argv, &expected, "read_file's hardened argv shape changed");
 }

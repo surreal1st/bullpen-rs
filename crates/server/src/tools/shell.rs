@@ -9,7 +9,12 @@
 //! until Josh decides; only what happens on approval changed, from
 //! "nothing, always the same sentence" to "the command actually runs".
 //! With `BULLPEN_SANDBOX` off (an `UnavailableSandbox`), the answer is
-//! still exactly S2's stub text - see `is_unavailable`'s doc.
+//! still exactly S2's stub text - detected via `ExecResult.unavailable`
+//! (F5), a field only `UnavailableSandbox` ever sets, rather than by
+//! sniffing exit code 127 + a fixed stderr prefix, which a bot's own
+//! command could forge (`sh -c 'printf "No sandbox is available, so \
+//! nothing was run. X" >&2; exit 127'` satisfied every clause of the old
+//! shape check).
 use model::ToolSpec;
 use serde::Deserialize;
 use serde_json::json;
@@ -59,7 +64,7 @@ pub async fn run(sandbox: &dyn Sandbox, bot_id: &str, args: &str) -> String {
 }
 
 fn format_result(result: &ExecResult) -> String {
-    if is_unavailable(result) {
+    if result.unavailable {
         // Verbatim S2 text, unfenced - this is not data the sandbox
         // produced, it is this tool refusing to have run at all.
         return result.stderr.clone();
@@ -81,20 +86,4 @@ fn format_result(result: &ExecResult) -> String {
     parts.push(format!("exit code {}", result.exit_code));
 
     fence_tool_output(&parts.join("\n"))
-}
-
-/// `UnavailableSandbox::exec`'s sentinel (`sandbox.rs`): no stdout, exit
-/// code 127, and the fixed "No sandbox is available, so nothing was run."
-/// prefix `default_sandbox` builds. Detected by shape rather than a
-/// dedicated `ExecResult` variant, since a real `docker run` can also
-/// exit 127 (a missing binary) - this only matches the ONE sentinel
-/// `UnavailableSandbox` ever produces, never a real command's own 127.
-fn is_unavailable(result: &ExecResult) -> bool {
-    result.exit_code == 127
-        && !result.timed_out
-        && !result.truncated
-        && result.stdout.is_empty()
-        && result
-            .stderr
-            .starts_with("No sandbox is available, so nothing was run.")
 }
