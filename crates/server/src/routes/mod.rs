@@ -13,6 +13,7 @@ mod messages;
 mod permissions;
 mod rooms;
 mod runs;
+mod settings;
 mod spend;
 
 use crate::auth::presented_token;
@@ -41,7 +42,9 @@ pub fn router() -> Router<AppState> {
         .merge(rooms::router())
         .merge(messages::router())
         .merge(events::router())
-        .merge(runs::router());
+        .merge(runs::router())
+        .merge(spend::router())
+        .merge(settings::router());
 
     // B2: exists only so `tests/errors.rs` can prove the db mutex recovers
     // from a poison instead of panicking every request after the first -

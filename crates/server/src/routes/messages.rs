@@ -2,14 +2,14 @@
 //! turn to a room's round), and stream the run back. Port of
 //! `src/server/app.ts:1463-1656`.
 //!
-//! 🔴 Scope, named here rather than silently: no money gate (S1 has no
-//! `credits`/spend-ceiling), no interject-into-a-still-running-turn branch
-//! (`RunManager` has no `interject` - S2+), no attachments (per the
-//! ticket). All three exist in the TS source inside this same line range.
+//! 🔴 Scope, named here rather than silently: no interject-into-a-still-running-turn
+//! branch (`RunManager` has no `interject` - S2+), no attachments (per the
+//! ticket). Both exist in the TS source inside this same line range.
 
 use std::convert::Infallible;
 
 use axum::extract::{Path, State};
+use axum::http::StatusCode;
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
@@ -25,6 +25,7 @@ use crate::AppError;
 use crate::AppState;
 use crate::prompt::{self, HistoryTurn};
 use crate::runs::{RunEvent, StartOptions};
+use crate::spend;
 
 pub fn router() -> Router<AppState> {
     Router::new().route("/api/bots/{id}/messages", post(post_message))
@@ -113,8 +114,25 @@ async fn post_message(
 
     if text.is_empty() {
         return Ok((
-            axum::http::StatusCode::BAD_REQUEST,
+            StatusCode::BAD_REQUEST,
             Json(json!({"error": "text is required"})),
+        )
+            .into_response());
+    }
+
+    // S2-05: ceiling gate. Checked BEFORE the run starts and never during:
+    // stopping an answer halfway wastes what was already spent and loses the
+    // reply. The gate only refuses to START.
+    let gate_check = {
+        let db = state.db();
+        let ceiling = spend::get_ceiling(&db);
+        // For now, account_usage is None (S2-05 doesn't read OpenRouter yet)
+        spend::gate_run(&db, ceiling, None)
+    };
+    if let spend::GateResult::Denied { reason } = gate_check {
+        return Ok((
+            StatusCode::PAYMENT_REQUIRED,
+            Json(json!({"error": reason, "kind": "spend-ceiling"})),
         )
             .into_response());
     }
