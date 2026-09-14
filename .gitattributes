@@ -1,0 +1,6 @@
+# LF everywhere, on every checkout. Bash scripts with CRLF fail on meridian,
+# and a Windows autocrlf rewrite would flip every file on the first touch.
+* text=auto eol=lf
+*.png binary
+*.wasm binary
+*.db binary
