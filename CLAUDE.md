@@ -13,7 +13,12 @@ reference at `projects/bullpen-night` (LIVE product, never edit it from here).
   service down.
 - **Never touch live Bullpen** (`bullpen.service`, :4360, `rainmade.io/bullpen/`)
   until this passes the same gate and Josh has used it. bullpen-rs runs
-  BESIDE it on :4370.
+  BESIDE it on **:4380** (4370/4371 are taken on the workstation by
+  bullpen-night preview servers; never kill those).
+- **Commit with explicit paths: `git commit -m "..." -- <file> <file>`.**
+  Builders share ONE working tree, so a bare `git commit` sweeps in whatever
+  another builder has staged. This happened on S0-04/S0-05 (2026-09-14) and
+  cost a reset. Never `git add -A`, never a bare `git commit`.
 - **No secrets on command lines or in workspace files.** The OpenRouter key
   is read from `C:\Users\rain\.bullpen\openrouter.key` / `/home/bullpen/bullpen.env`.
 - **No recursive deletes under `d:\rainmade`.**
