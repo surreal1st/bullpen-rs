@@ -11,6 +11,7 @@ mod rooms;
 mod routes;
 pub mod rules;
 pub mod runs;
+pub mod sandbox;
 pub mod spend;
 mod tools;
 
@@ -54,6 +55,9 @@ pub struct AppState {
     /// ceiling gate (`routes/messages.rs`) and the spend panel
     /// (`routes/spend.rs`) both read.
     pub credits: Arc<dyn spend::CreditsPort>,
+    /// S6L-01: the sandbox for executing bot commands, chosen based on
+    /// `BULLPEN_SANDBOX` env var at startup.
+    pub sandbox: Arc<dyn sandbox::Sandbox>,
 }
 
 impl AppState {
@@ -64,6 +68,7 @@ impl AppState {
             default_port(),
             default_catalog(),
             default_credits(),
+            default_sandbox(),
         )
     }
 
@@ -74,6 +79,7 @@ impl AppState {
             default_port(),
             default_catalog(),
             default_credits(),
+            default_sandbox(),
         )
     }
 
@@ -88,6 +94,7 @@ impl AppState {
             port,
             default_catalog(),
             default_credits(),
+            default_sandbox(),
         )
     }
 
@@ -99,6 +106,7 @@ impl AppState {
             default_port(),
             catalog,
             default_credits(),
+            default_sandbox(),
         )
     }
 
@@ -112,6 +120,20 @@ impl AppState {
             default_port(),
             default_catalog(),
             credits,
+            default_sandbox(),
+        )
+    }
+
+    /// S6L-01: lets a test swap in a scripted `Sandbox` (e.g. `FakeRunner`)
+    /// while keeping the same port/catalog/credits the `new` uses.
+    pub fn with_sandbox(db: Db, sandbox: Arc<dyn sandbox::Sandbox>) -> Self {
+        Self::build(
+            db,
+            default_client_root(),
+            default_port(),
+            default_catalog(),
+            default_credits(),
+            sandbox,
         )
     }
 
@@ -124,7 +146,14 @@ impl AppState {
         port: Arc<dyn model::ModelPort>,
         credits: Arc<dyn spend::CreditsPort>,
     ) -> Self {
-        Self::build(db, default_client_root(), port, default_catalog(), credits)
+        Self::build(
+            db,
+            default_client_root(),
+            port,
+            default_catalog(),
+            credits,
+            default_sandbox(),
+        )
     }
 
     fn build(
@@ -133,6 +162,7 @@ impl AppState {
         port: Arc<dyn model::ModelPort>,
         catalog: Arc<dyn Catalog>,
         credits: Arc<dyn spend::CreditsPort>,
+        sandbox: Arc<dyn sandbox::Sandbox>,
     ) -> Self {
         // F1: `routing_log` is self-creating (same convention as
         // `rules::ensure_table`), but nothing in production ever called it -
@@ -154,6 +184,7 @@ impl AppState {
             login_throttle: Arc::new(auth::LoginThrottle::new()),
             catalog,
             credits,
+            sandbox,
         }
     }
 
@@ -198,6 +229,23 @@ fn default_catalog() -> Arc<dyn Catalog> {
 /// already treat as "unreadable" rather than a panic.
 fn default_credits() -> Arc<dyn spend::CreditsPort> {
     Arc::new(spend::OpenRouterCredits::new(model::KeySource::Env))
+}
+
+/// S6L-01: the sandbox for executing bot commands. Reads `BULLPEN_SANDBOX`
+/// to decide whether to create a real `DockerSandbox` or an `UnavailableSandbox`.
+/// A startup probe (`docker version`) failing under `on` logs once and falls
+/// back to Unavailable.
+fn default_sandbox() -> Arc<dyn sandbox::Sandbox> {
+    let sandbox_mode = std::env::var("BULLPEN_SANDBOX").unwrap_or_default();
+    if sandbox_mode == "on" {
+        let config = sandbox::SandboxConfig::default();
+        let runner = std::sync::Arc::new(sandbox::TokioRunner::new(config.docker_host.clone()));
+        Arc::new(sandbox::DockerSandbox::new(config, runner))
+    } else {
+        Arc::new(sandbox::UnavailableSandbox::new(
+            "Sandboxing is off here. Set BULLPEN_SANDBOX=on where it is wanted.",
+        ))
+    }
 }
 
 /// Fallback for anything the API router didn't match: `/api/*` gets a plain
