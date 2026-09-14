@@ -3,7 +3,11 @@ name = "bullpen"
 
 [web.app]
 title = "Bullpen"
-base_path = "bullpen"
+# No base_path. Live Bullpen sits behind an nginx location that STRIPS the
+# `/bullpen` prefix, so the app is served at `/` and never sees the prefix.
+# With `base_path = "bullpen"` the bundle asked for `/bullpen/assets/*`, the
+# server answered 404, and the page rendered blank while every test stayed
+# green (2026-09-14, S0-06).
 
 [web.resource]
 dev = []

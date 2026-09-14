@@ -18,8 +18,10 @@ dx build --platform web --package client --release
 
 echo "Copying web client to dist/client/..."
 mkdir -p dist/client
-# The web output is under target/dx/client/release/web/public
-rm -rf dist/client/*
+# The web output is under target/dx/client/release/web/public.
+# 🔴 No `rm -rf` here, ever: this workspace is not backed up and Git Bash
+# deletes skip the Recycle Bin. Stale hashed assets are harmless - index.html
+# only references the current ones - so we copy over the top.
 cp -r target/dx/client/release/web/public/* dist/client/
 
 echo "Build complete. Server binary: target/release/bullpen"
