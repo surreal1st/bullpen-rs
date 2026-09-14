@@ -13,14 +13,14 @@ pub mod roster;
 pub use auth::{is_configured, session_valid};
 pub use bots::{get_bot, list_bots, list_sections};
 pub use conversations::{
-    create_thread, get_conversation, get_or_create_conversation, list_threads,
-    title_from_first_message, touch_thread, validate_members,
+    archive_thread, create_thread, get_conversation, get_or_create_conversation, list_threads,
+    rename_thread, title_from_first_message, touch_thread, validate_members,
 };
 pub use memory::{
     LogEntry, RECALL_TOKEN_BUDGET, Recall, get_core, recall_for, remember, search_log, set_core,
 };
 pub use messages::{NewMessage, Usage, append_message, delete_message, list_messages};
-pub use rooms::{create_room, get_room, list_rooms, update_room};
+pub use rooms::{create_room, get_room, list_rooms, mark_room_seen, mark_room_unread, update_room};
 pub use roster::list_roster;
 
 use rusqlite::{Connection, OptionalExtension, params};

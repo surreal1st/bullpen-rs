@@ -11,11 +11,13 @@
 //! ad hoc `ModelPort` object with its own turn counter, not the shared
 //! fake-port helper.
 
-use std::collections::VecDeque;
+mod common;
+
 use std::sync::{Arc, Mutex};
 
+use common::{GatedPort, ScriptedPort, as_port};
 use model::ladder::Trigger;
-use model::{EventStream, ModelEvent, ModelMessage, ModelPort, ModelRequest, ToolCall};
+use model::{ModelEvent, ModelMessage, ToolCall};
 use server::changes::ChangeKind;
 use server::runs::{RunEvent, RunManager, StartOptions};
 use store::Db;
@@ -73,71 +75,6 @@ async fn drain(mut rx: tokio::sync::mpsc::UnboundedReceiver<RunEvent>) -> Vec<Ru
         }
     }
     seen
-}
-
-/// Replays one scripted event list per call to `stream`, in order; the last
-/// script repeats if `stream` is called more times than there are scripts.
-struct ScriptedPort {
-    scripts: Mutex<VecDeque<Vec<ModelEvent>>>,
-    last: Vec<ModelEvent>,
-}
-
-impl ScriptedPort {
-    fn new(scripts: Vec<Vec<ModelEvent>>) -> Self {
-        let last = scripts.last().cloned().unwrap_or_default();
-        Self {
-            scripts: Mutex::new(scripts.into()),
-            last,
-        }
-    }
-}
-
-impl ModelPort for ScriptedPort {
-    fn stream(&self, _request: ModelRequest) -> EventStream {
-        let mut scripts = self.scripts.lock().expect("scripts mutex poisoned");
-        let events = scripts.pop_front().unwrap_or_else(|| self.last.clone());
-        Box::pin(futures::stream::iter(events))
-    }
-}
-
-/// Turn 1 waits on `gate`, then asks for `list_tasks`. Turn 2 waits on
-/// `held`, then answers. Ports `heldPort`/the gated `port` from
-/// `working.test.ts`, so a test can observe the run mid-tool-call.
-struct GatedPort {
-    turn: Mutex<usize>,
-    gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
-    held: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
-}
-
-impl ModelPort for GatedPort {
-    fn stream(&self, _request: ModelRequest) -> EventStream {
-        let mut turn = self.turn.lock().expect("turn mutex poisoned");
-        *turn += 1;
-        let n = *turn;
-        drop(turn);
-
-        if n == 1 {
-            let rx = self.gate.lock().expect("gate mutex poisoned").take();
-            Box::pin(async_stream::stream! {
-                if let Some(rx) = rx { let _ = rx.await; }
-                yield ModelEvent::ToolCalls {
-                    calls: vec![ToolCall { id: "c1".to_string(), name: "list_tasks".to_string(), arguments: "{}".to_string() }],
-                    usage: None,
-                };
-            })
-        } else {
-            let rx = self.held.lock().expect("held mutex poisoned").take();
-            Box::pin(async_stream::stream! {
-                if let Some(rx) = rx { let _ = rx.await; }
-                yield ModelEvent::Delta { text: "Nothing on it.".to_string() };
-                yield ModelEvent::Done { model: "test/model".to_string(), usage: None, finish_reason: None };
-            })
-        }
-    }
-}
-
-fn as_port(port: impl ModelPort + 'static) -> Arc<dyn ModelPort> {
-    Arc::new(port)
 }
 
 // 1. A text reply: run row goes running -> done, assistant message appended

@@ -226,6 +226,30 @@ pub fn touch_thread(db: &Db, id: &str) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// Renames a conversation - thread or room alike, both are just
+/// `conversations` rows. Capped at 120 characters. Mirrors the TS
+/// `renameThread`. `false` when nothing matched `id`.
+pub fn rename_thread(db: &Db, id: &str, title: &str) -> rusqlite::Result<bool> {
+    let trimmed: String = title.chars().take(120).collect();
+    let changed = db.conn().execute(
+        "UPDATE conversations SET title = ?1 WHERE id = ?2",
+        params![trimmed, id],
+    )?;
+    Ok(changed > 0)
+}
+
+/// Archives a conversation - thread or room - rather than destroying it.
+/// Mirrors the TS `archiveThread`, reused by both `/api/threads/:id` and
+/// `/api/rooms/:id`'s DELETE routes, same as the TS original. `false` when
+/// `id` does not exist or was already archived.
+pub fn archive_thread(db: &Db, id: &str) -> rusqlite::Result<bool> {
+    let changed = db.conn().execute(
+        "UPDATE conversations SET archived_at = ?1 WHERE id = ?2 AND archived_at IS NULL",
+        params![now_iso(), id],
+    )?;
+    Ok(changed > 0)
+}
+
 /// Names a thread from its first message, so a list of conversations reads
 /// as subjects rather than a column of identical dates. Mirrors the TS
 /// `titleFromFirstMessage`; a no-op once the thread already has a title.

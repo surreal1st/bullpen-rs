@@ -24,6 +24,19 @@ pub enum ChangeKind {
     Working,
 }
 
+impl ChangeKind {
+    /// The wire value `GET /api/events` puts in a `{"type":"change","kind":…}`
+    /// frame. Lowercase, matching the TS union's own string literals.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ChangeKind::Roster => "roster",
+            ChangeKind::Approvals => "approvals",
+            ChangeKind::Questions => "questions",
+            ChangeKind::Working => "working",
+        }
+    }
+}
+
 type Listener = Box<dyn Fn(ChangeKind) + Send + Sync>;
 
 /// A change bus. Cheap to clone - clones share the same listener list.

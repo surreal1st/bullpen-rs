@@ -6,7 +6,7 @@ use crate::Db;
 use crate::bots::get_bot;
 use crate::conversations::{MAX_ROOM_MEMBERS, get_conversation, now_iso, parse_members};
 use crate::roster::first_line;
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use shared::RoomSummary;
 use uuid::Uuid;
 
@@ -179,4 +179,60 @@ pub fn update_room(
     get_room(db, id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "no such group chat".to_string())
+}
+
+/// Marks a room read as of now. Same mechanism a bot's own `markSeen` uses,
+/// scoped to one room. Mirrors the TS `markRoomSeen`. `false` when `id` is
+/// not a room.
+pub fn mark_room_seen(db: &Db, id: &str) -> rusqlite::Result<bool> {
+    let changed = db.conn().execute(
+        "UPDATE conversations SET seen_at = ?1 WHERE id = ?2 AND kind = 'room'",
+        params![now_iso(), id],
+    )?;
+    Ok(changed > 0)
+}
+
+/// The menu's "Mark as Unread": backdates `seen_at` to one millisecond
+/// before the room's last assistant message, so it reads unread again
+/// without touching any bot's own clock. Mirrors the TS `markRoomUnread`.
+/// `false` when `id` is not a room, or the room has no assistant message yet.
+pub fn mark_room_unread(db: &Db, id: &str) -> rusqlite::Result<bool> {
+    let is_room: Option<String> = db
+        .conn()
+        .query_row(
+            "SELECT id FROM conversations WHERE id = ?1 AND kind = 'room'",
+            params![id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if is_room.is_none() {
+        return Ok(false);
+    }
+
+    let last_at: Option<String> = db
+        .conn()
+        .query_row(
+            "SELECT created_at FROM messages
+              WHERE conversation_id = ?1 AND role = 'assistant'
+              ORDER BY created_at DESC, seq DESC LIMIT 1",
+            params![id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(last_at) = last_at else {
+        return Ok(false);
+    };
+
+    let before = chrono::DateTime::parse_from_rfc3339(&last_at)
+        .map(|dt| {
+            (dt.to_utc() - chrono::Duration::milliseconds(1))
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        })
+        .unwrap_or(last_at);
+
+    db.conn().execute(
+        "UPDATE conversations SET seen_at = ?1 WHERE id = ?2",
+        params![before, id],
+    )?;
+    Ok(true)
 }

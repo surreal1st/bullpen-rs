@@ -1,6 +1,16 @@
 //! S0-04's first four routes: health, version, auth/status + auth/check,
 //! roster. Same JSON shapes as the TS server where the ticket says so; see
 //! `projects/bullpen-night/src/server/app.ts:1074-1112,2306-2312,3205-3240`.
+//!
+//! S1-06 adds the message/conversation/room routes, the round engine's HTTP
+//! surface, and the two SSE streams - one submodule per route family, same
+//! split as `tools/`.
+
+mod conversations;
+mod events;
+mod messages;
+mod rooms;
+mod runs;
 
 use crate::AppState;
 use crate::auth::presented_token;
@@ -19,6 +29,11 @@ pub fn router() -> Router<AppState> {
         .route("/api/auth/status", get(auth_status))
         .route("/api/auth/check", get(auth_check))
         .route("/api/roster", get(roster))
+        .merge(conversations::router())
+        .merge(rooms::router())
+        .merge(messages::router())
+        .merge(events::router())
+        .merge(runs::router())
 }
 
 /// Build metadata baked at compile time. Not wired to the real git commit

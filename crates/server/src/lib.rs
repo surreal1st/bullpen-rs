@@ -4,6 +4,7 @@
 mod auth;
 pub mod changes;
 pub mod prompt;
+mod rooms;
 mod routes;
 pub mod runs;
 mod tools;
@@ -18,32 +19,63 @@ use tower::Service;
 use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 
-/// Shared state handed to every route: one guarded connection to `bullpen.db`.
-/// A `Mutex` (not a pool) because rusqlite's `Connection` is `Send` but not
-/// `Sync` - one query runs at a time, same as the TS server's single
+/// Shared state handed to every route: one guarded connection to `bullpen.db`,
+/// plus the run manager and room engine every run-touching route drives.
+/// A `Mutex` on the db (not a pool) because rusqlite's `Connection` is `Send`
+/// but not `Sync` - one query runs at a time, same as the TS server's single
 /// `better-sqlite3` handle.
 #[derive(Clone)]
 pub struct AppState {
     db: Arc<Mutex<Db>>,
     client_root: Arc<String>,
+    /// S1-06: every route that starts, subscribes to, or stops a run reaches
+    /// it through here - the same manager a room round chains through.
+    runs: Arc<runs::RunManager>,
+    /// S1-06: installed onto `runs`'s two room hooks at construction
+    /// (`rooms::RoomEngine::install`), so a route only ever needs to
+    /// REGISTER a round's first leg - the chain from there runs itself.
+    room_engine: Arc<rooms::RoomEngine>,
 }
 
 impl AppState {
     pub fn new(db: Db) -> Self {
-        let client_root =
-            std::env::var("BULLPEN_CLIENT_ROOT").unwrap_or_else(|_| "./dist/client".to_string());
-        AppState {
-            db: Arc::new(Mutex::new(db)),
-            client_root: Arc::new(client_root),
-        }
+        Self::build(db, default_client_root(), default_port())
     }
 
     pub fn with_client_root(db: Db, client_root: String) -> Self {
+        Self::build(db, client_root, default_port())
+    }
+
+    /// S1-06: lets a test swap in a scripted `ModelPort` (`model::fake`, or
+    /// a bespoke ad hoc one) while keeping the same `client_root`
+    /// resolution `new` uses - the seam route tests need to drive real runs
+    /// without an OpenRouter key.
+    pub fn with_port(db: Db, port: Arc<dyn model::ModelPort>) -> Self {
+        Self::build(db, default_client_root(), port)
+    }
+
+    fn build(db: Db, client_root: String, port: Arc<dyn model::ModelPort>) -> Self {
+        let db = Arc::new(Mutex::new(db));
+        let runs = Arc::new(runs::RunManager::new(Arc::clone(&db), port));
+        let room_engine = rooms::RoomEngine::install(Arc::clone(&db), Arc::clone(&runs));
         AppState {
-            db: Arc::new(Mutex::new(db)),
+            db,
             client_root: Arc::new(client_root),
+            runs,
+            room_engine,
         }
     }
+}
+
+fn default_client_root() -> String {
+    std::env::var("BULLPEN_CLIENT_ROOT").unwrap_or_else(|_| "./dist/client".to_string())
+}
+
+/// The live OpenRouter port, reading its key the standard way
+/// (`BULLPEN_OPENROUTER_KEY_FILE` then `BULLPEN_OPENROUTER_KEY`). What
+/// `new`/`with_client_root` build with - production never calls `with_port`.
+fn default_port() -> Arc<dyn model::ModelPort> {
+    Arc::new(model::OpenRouterPort::new(model::KeySource::Env))
 }
 
 /// Fallback for anything the API router didn't match: `/api/*` gets a plain
