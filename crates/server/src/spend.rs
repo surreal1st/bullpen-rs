@@ -20,17 +20,13 @@ pub fn get_ceiling(db: &Db) -> f64 {
         .optional()
         .unwrap_or(None);
 
-    match row {
-        Some(value) => {
-            if let Ok(parsed) = value.parse::<f64>() {
-                if parsed.is_finite() && parsed >= 0.0 {
-                    return parsed;
-                }
-            }
-            DEFAULT_CEILING
-        }
-        None => DEFAULT_CEILING,
-    }
+    row.and_then(|value| {
+        value
+            .parse::<f64>()
+            .ok()
+            .filter(|v| v.is_finite() && *v >= 0.0)
+    })
+    .unwrap_or(DEFAULT_CEILING)
 }
 
 /// Set the platform-wide ceiling, dollars. Returns the cleaned value (max 0).

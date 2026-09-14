@@ -282,6 +282,13 @@ fn run_event_json(event: &RunEvent) -> serde_json::Value {
             }
             value
         }
+        RunEvent::ApprovalNeeded {
+            approval_id,
+            name,
+            args,
+        } => {
+            json!({"type": "approval_needed", "approvalId": approval_id, "name": name, "args": args})
+        }
     }
 }
 

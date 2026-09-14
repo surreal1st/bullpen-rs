@@ -33,7 +33,7 @@ fn app_for(db: Db) -> Router {
 
 // Helpers for making requests
 async fn get_permissions_route(app: &Router, bot_id: &str, session: &str) -> (u16, Value) {
-    let request = Request::get(&format!("/api/bots/{}/permissions", bot_id))
+    let request = Request::get(format!("/api/bots/{}/permissions", bot_id))
         .header("cookie", session)
         .body(Body::empty())
         .unwrap();
@@ -56,7 +56,7 @@ async fn put_permissions_route(
     let body_json = json!({ "permissions": permissions });
     let body_bytes = serde_json::to_vec(&body_json).unwrap();
 
-    let request = Request::put(&format!("/api/bots/{}/permissions", bot_id))
+    let request = Request::put(format!("/api/bots/{}/permissions", bot_id))
         .header("cookie", session)
         .header("content-type", "application/json")
         .body(Body::from(body_bytes))

@@ -36,7 +36,7 @@ impl Decision {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse_decision(s: &str) -> Option<Self> {
         match s {
             "allow" => Some(Decision::Allow),
             "ask" => Some(Decision::Ask),
@@ -487,16 +487,15 @@ pub fn get_permissions(db: &store::Db, bot_id: &str) -> Result<Permissions, rusq
     let mut stored: Permissions = HashMap::new();
     match row {
         Ok(json_str) => {
-            if !json_str.is_empty() {
-                if let Ok(parsed) = serde_json::from_str::<Value>(&json_str) {
-                    if let Some(obj) = parsed.as_object() {
-                        for (k, v) in obj.iter() {
-                            if let Some(s) = v.as_str() {
-                                if let Some(dec) = Decision::from_str(s) {
-                                    stored.insert(k.clone(), dec);
-                                }
-                            }
-                        }
+            if !json_str.is_empty()
+                && let Ok(parsed) = serde_json::from_str::<Value>(&json_str)
+                && let Some(obj) = parsed.as_object()
+            {
+                for (k, v) in obj.iter() {
+                    if let Some(s) = v.as_str()
+                        && let Some(dec) = Decision::parse_decision(s)
+                    {
+                        stored.insert(k.clone(), dec);
                     }
                 }
             }

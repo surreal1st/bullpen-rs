@@ -168,10 +168,7 @@ async fn put_rules(
     let db = state.db();
     let parsed: RulesBody = parse_body(&body)?;
 
-    let rules = match parsed.rules {
-        Some(r) => r,
-        None => String::new(),
-    };
+    let rules = parsed.rules.unwrap_or_default();
 
     let saved = set_house_rules(&db, &rules);
     Ok(Json(json!({ "rules": saved })).into_response())
