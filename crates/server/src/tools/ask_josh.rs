@@ -1,14 +1,12 @@
 //! `ask_josh`: post a question (with optional multiple-choice options) into
 //! your own 1:1 thread. Port of `src/server/conversing.ts`'s `askAsync` -
-//! the non-waiting form only. S1 has no `questions` table and no approval
-//! queue (S2+), so this does not park the run or write a row anywhere else;
-//! it posts the question as a message, same as `say`, and returns.
+//! the non-waiting form. S2: writes a `questions` row and posts the message.
 
 use std::sync::{Arc, Mutex};
 
 use model::ToolSpec;
-use serde::Deserialize;
 use serde_json::json;
+use shared::ask_josh::{MAX_QUESTION_CHARS, parse_ask_josh};
 use store::{Db, NewMessage};
 
 pub fn spec() -> ToolSpec {
@@ -26,6 +24,10 @@ need his answer to continue."
                     "type": "array",
                     "items": { "type": "string" },
                     "description": "optional multiple-choice options"
+                },
+                "wait": {
+                    "type": "boolean",
+                    "description": "if true, park the run and wait for Josh to answer"
                 }
             },
             "required": ["question"]
@@ -33,23 +35,19 @@ need his answer to continue."
     }
 }
 
-#[derive(Deserialize)]
-struct Args {
-    question: String,
-    #[serde(default)]
-    options: Vec<String>,
-}
-
 pub fn run(db: &Arc<Mutex<Db>>, bot_id: &str, args: &str) -> String {
-    let Ok(parsed) = serde_json::from_str::<Args>(args) else {
-        return "Could not read `question`.".to_string();
-    };
+    let parsed = parse_ask_josh(args);
     let question = parsed.question.trim();
     if question.is_empty() {
         return "Nothing was asked: the question was empty.".to_string();
     }
 
-    let mut lines = vec![question.to_string()];
+    let mut lines = vec![
+        question
+            .chars()
+            .take(MAX_QUESTION_CHARS)
+            .collect::<String>(),
+    ];
     if !parsed.options.is_empty() {
         lines.push(String::new());
         for option in &parsed.options {
@@ -61,7 +59,8 @@ pub fn run(db: &Arc<Mutex<Db>>, bot_id: &str, args: &str) -> String {
     let db = db.lock().expect("db mutex poisoned");
     let conversation_id =
         store::get_or_create_conversation(&db, bot_id).expect("get_or_create_conversation");
-    store::append_message(
+
+    let message = store::append_message(
         &db,
         &conversation_id,
         "assistant",
@@ -73,5 +72,19 @@ pub fn run(db: &Arc<Mutex<Db>>, bot_id: &str, args: &str) -> String {
     )
     .expect("append ask_josh message");
 
-    "Asked. Carry on with other work if you have it; Josh will answer when he can.".to_string()
+    // Write the questions row (S2-08).
+    if let Err(e) = store::insert_question(
+        &db,
+        bot_id,
+        &conversation_id,
+        Some(&message.id),
+        question,
+        &parsed.options,
+    ) {
+        eprintln!("Failed to insert question row: {e}");
+    }
+
+    "Asked. Josh has the question and has NOT answered it yet. Do not wait and do not guess the answer. \
+Carry on with everything that does not depend on it, and say plainly which part is waiting on his answer."
+        .to_string()
 }

@@ -7,6 +7,7 @@ pub mod conversations;
 pub mod memory;
 pub mod messages;
 mod migrations;
+pub mod questions;
 pub mod rooms;
 pub mod roster;
 
@@ -23,6 +24,7 @@ pub use memory::{
     LogEntry, RECALL_TOKEN_BUDGET, Recall, get_core, recall_for, remember, search_log, set_core,
 };
 pub use messages::{NewMessage, Usage, append_message, delete_message, list_messages};
+pub use questions::{OpenQuestion, answer_question, insert_question, list_all_open, list_open};
 pub use rooms::{create_room, get_room, list_rooms, mark_room_seen, mark_room_unread, update_room};
 pub use roster::{first_line, list_roster};
 
@@ -121,6 +123,8 @@ impl Db {
             "is_template",
             "ALTER TABLE bots ADD COLUMN is_template INTEGER NOT NULL DEFAULT 0",
         )?;
+
+        questions::ensure_table(&db)?;
 
         Ok(db)
     }
