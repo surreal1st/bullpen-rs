@@ -27,7 +27,7 @@ async fn parse_chunked(text: &str, model: &str, size: usize) -> Vec<ModelEvent> 
         .map(|c| Ok::<Vec<u8>, String>(c.to_vec()))
         .collect();
     let body = stream::iter(chunks);
-    parse_sse_stream(body, model.to_string(), None)
+    parse_sse_stream(body, model.to_string(), None, None)
         .collect()
         .await
 }
@@ -226,6 +226,33 @@ fn an_error_built_from_a_body_containing_the_key_does_not_contain_it() {
     assert!(!message.contains(key));
 }
 
-// 4. No network I/O: every event stream above is built from an in-memory
+// 4. Idle timeout
+
+#[tokio::test]
+async fn stream_that_never_yields_emits_idle_error() {
+    use std::time::Instant;
+    // A stream that never yields - futures::stream::pending() never produces a value
+    let body = futures::stream::pending::<Result<Vec<u8>, String>>();
+    let start = Instant::now();
+    let events = parse_sse_stream(body, "test/model".to_string(), None, Some(std::time::Duration::from_millis(200)))
+        .collect::<Vec<_>>()
+        .await;
+    let elapsed = start.elapsed();
+
+    // Should have exactly one error event about provider going silent
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ModelEvent::Error { message, status } => {
+            assert_eq!(message, "provider went silent");
+            assert_eq!(*status, None);
+        }
+        other => panic!("expected an Error event, got {other:?}"),
+    }
+
+    // Should have finished within a reasonable time (200ms + some overhead)
+    assert!(elapsed < std::time::Duration::from_millis(500));
+}
+
+// 5. No network I/O: every event stream above is built from an in-memory
 // byte fixture via `futures::stream::iter`, never a live web request - see
 // the ticket's Result section for the grep that confirms it.

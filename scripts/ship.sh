@@ -25,7 +25,7 @@ if ! rustup target list --installed | grep -q x86_64-unknown-linux-musl; then
 fi
 
 echo "Building Linux binary with zigbuild (release)..."
-if cargo zigbuild --release --manifest-path /d/rainmade/projects/bullpen-rs/Cargo.toml -p server --target x86_64-unknown-linux-musl; then
+if cargo zigbuild --release -p server --target x86_64-unknown-linux-musl; then
   echo "✓ zigbuild succeeded"
 else
   echo "✗ zigbuild failed"

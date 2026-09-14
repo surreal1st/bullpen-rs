@@ -36,8 +36,8 @@ reference at `projects/bullpen-night` (LIVE product, never edit it from here).
 - `crates/server` axum app builder (`build_app(state) -> Router`, the seam
   every test drives), run manager, tools, prompt, permissions, scheduler.
 - `crates/client` Dioxus app (web + desktop + mobile).
-- `tests/` integration tests drive the HTTP API through `build_app`, never
-  internals.
+- `crates/server/tests/` integration tests drive the HTTP API through `build_app`,
+  never internals.
 
 ## Gate
 

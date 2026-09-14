@@ -266,7 +266,11 @@ pub struct OpenRouterPort {
 impl OpenRouterPort {
     pub fn new(key_source: KeySource) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(120))
+                .build()
+                .expect("Client builder failed"),
             key_source,
         }
     }
@@ -350,7 +354,7 @@ impl ModelPort for OpenRouterPort {
                 let byte_stream = res
                     .bytes_stream()
                     .map(move |r| r.map(|b| b.to_vec()).map_err(|e| redact(&e.to_string(), Some(&key_for_stream))));
-                let mut inner = parse_sse_stream(byte_stream, model, Some(key));
+                let mut inner = parse_sse_stream(byte_stream, model, Some(key), None);
                 while let Some(event) = inner.next().await {
                     yield event;
                 }
@@ -427,10 +431,12 @@ struct PartialCall {
 /// before decoding and acting on a line. Shared by the live port and the
 /// captured-response tests, so a test that used a different parser would not
 /// be testing what actually runs in production.
+/// `idle_timeout` overrides the default 60-second deadline (used in tests only).
 pub fn parse_sse_stream(
     body: impl Stream<Item = Result<Vec<u8>, String>> + Send + 'static,
     model: String,
     key: Option<String>,
+    idle_timeout: Option<Duration>,
 ) -> EventStream {
     Box::pin(async_stream::stream! {
         let mut body = Box::pin(body);
@@ -444,6 +450,7 @@ pub fn parse_sse_stream(
         let mut partial: BTreeMap<u32, PartialCall> = BTreeMap::new();
         let mut saw_tool_finish = false;
         let mut finish_reason: Option<String> = None;
+        let timeout_duration = idle_timeout.unwrap_or(Duration::from_secs(60));
 
         macro_rules! final_event {
             () => {{
@@ -459,7 +466,14 @@ pub fn parse_sse_stream(
             }};
         }
 
-        while let Some(chunk) = body.next().await {
+        while let Some(chunk) = match tokio::time::timeout(timeout_duration, body.next()).await {
+            Ok(Some(c)) => Some(c),
+            Ok(None) => None,
+            Err(_) => {
+                yield ModelEvent::Error { message: "provider went silent".to_string(), status: None };
+                return;
+            }
+        } {
             let chunk = match chunk {
                 Ok(c) => c,
                 Err(e) => {
