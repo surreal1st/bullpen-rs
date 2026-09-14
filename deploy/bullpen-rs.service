@@ -11,7 +11,8 @@ Group=bullpen
 WorkingDirectory=/home/bullpen/bullpen-rs
 ExecStart=/home/bullpen/bullpen-rs/bullpen
 Environment=BULLPEN_PORT=4380
-Environment=BULLPEN_HOST=127.0.0.1
+# 0.0.0.0 like live: the desktop app reaches it over LAN/tailnet, not nginx.
+Environment=BULLPEN_HOST=0.0.0.0
 Environment=BULLPEN_DATA_DIR=/home/bullpen/bullpen-rs
 Environment=BULLPEN_CLIENT_ROOT=/home/bullpen/bullpen-rs/client
 # The sandbox daemon is bullpen's OWN rootless Docker, never the host one.
@@ -24,7 +25,10 @@ Environment=BULLPEN_SSH_KEY=/home/bullpen/.ssh/id_ed25519
 Environment=BULLPEN_SANDBOX=on
 # Secrets live here, mode 600, owned by bullpen. Never in the repo, never in a
 # unit file, never on a command line.
-EnvironmentFile=/home/bullpen/bullpen.env
+# 🔴 Its OWN file, never live's bullpen.env: an EnvironmentFile overrides Environment=
+# lines, and live's sets BULLPEN_DATA_DIR=/home/bullpen/data, which would point this
+# service at the LIVE database. bullpen-rs.env holds only BULLPEN_OPENROUTER_KEY_FILE.
+EnvironmentFile=/home/bullpen/bullpen-rs.env
 Restart=on-failure
 RestartSec=2
 
