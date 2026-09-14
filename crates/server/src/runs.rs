@@ -1,8 +1,9 @@
 //! Runs, as rows. Port of `src/server/runs.ts` and `src/server/run.ts`,
-//! narrowed to what S1 needs: build the prompt (the caller's job, via
-//! `crate::prompt`), stream the model, execute tool calls in a loop, persist
-//! the row, emit events for subscribers, settle. NOT approvals, escalation,
-//! routing, snapshots, interjections or jobs - those are S2+.
+//! narrowed to what S1+S2-03 need: build the prompt (the caller's job, via
+//! `crate::prompt`), stream the model, execute tool calls in a loop (asking
+//! `crate::permissions` first, and parking on the ones that need Josh -
+//! S2-03), persist the row, emit events for subscribers, settle. NOT
+//! escalation, routing, snapshots, interjections or jobs - those are S2-04+.
 //!
 //! A run outlives its HTTP request: `start` returns an id immediately and
 //! drives the run on a spawned task, so a client that closes the tab (or a
@@ -18,10 +19,13 @@ use model::{
     FunctionCall, MessageContent, MessageToolCall, ModelEvent, ModelMessage, ModelPort,
     ModelRequest, ModelUsage, ToolCall,
 };
+use rusqlite::OptionalExtension;
 use store::Db;
 use uuid::Uuid;
 
+use crate::approvals;
 use crate::changes::{ChangeBus, ChangeKind};
+use crate::permissions::{self, Decision};
 use crate::tools::{self, RoomHook, ToolBox};
 
 /// How many tool steps a single run may take before it is stopped rather
@@ -33,8 +37,7 @@ const MAX_STEPS: i64 = 12;
 /// entry a late `subscribe` recreated in the meantime (S1-F-04: B3, B5).
 const BACKLOG_TTL: Duration = Duration::from_secs(60);
 
-/// One event a run's subscribers see. Port of the TS `RunEvent`, minus
-/// `approval_needed` - there are no approvals to need one in S1.
+/// One event a run's subscribers see. Port of the TS `RunEvent`.
 #[derive(Debug, Clone)]
 pub enum RunEvent {
     Delta {
@@ -55,6 +58,13 @@ pub enum RunEvent {
     Error {
         message: String,
         status: Option<u16>,
+    },
+    /// S2-03: the run just parked on a tool call that needs Josh's decision.
+    /// Port of the TS `approval_needed` (`runs.ts:1718-1723`).
+    ApprovalNeeded {
+        approval_id: String,
+        name: String,
+        args: String,
     },
 }
 
@@ -106,6 +116,16 @@ enum Outcome {
         /// anything that is not itself an upstream error: a stop, the step
         /// ceiling.
         status: Option<u16>,
+    },
+    /// S2-03: a tool call in this step needs Josh's decision. Port of the TS
+    /// `{ status: "paused" }` (`run.ts:57-64`). `pending` is the call
+    /// waiting on him; `deferred` is whatever the model asked for AFTER it
+    /// in the same step - dropped rather than run unsupervised, same as the
+    /// TS `park` doc explains.
+    Paused {
+        state: RunState,
+        pending: ToolCall,
+        deferred: Vec<ToolCall>,
     },
 }
 
@@ -343,6 +363,14 @@ impl RunManager {
             .collect::<Result<_, _>>()?
         };
 
+        // S2-03: run id -> the tool it is parked on, for a `waiting` run's
+        // "Waiting for you to approve X" line - port of the TS `working()`'s
+        // own `waitingOn` map (`runs.ts:916-919`).
+        let waiting_on = {
+            let db = self.db();
+            approvals::waiting_on(&db)?
+        };
+
         let activity = self.activity.lock().expect("activity mutex poisoned");
         // A bot can hold two runs in one thread (a room member asked twice).
         // One face each - two identical avatars reads as a rendering bug.
@@ -361,7 +389,7 @@ impl RunManager {
                 shape,
                 waiting: status == "waiting",
                 activity: shared::working::activity_line(
-                    None,
+                    waiting_on.get(&run_id).map(String::as_str),
                     state.tool.as_deref(),
                     state.wrote_text,
                 ),
@@ -413,25 +441,59 @@ impl RunManager {
     ) {
         let (trigger, room) = floor;
         let toolbox = self.toolbox_for(&bot_id, trigger, room);
-        let outcome = self.run_turn(&run_id, model, messages, &toolbox).await;
+        let outcome = self
+            .run_turn(
+                &run_id,
+                &bot_id,
+                trigger,
+                model,
+                messages,
+                &toolbox,
+                0,
+                String::new(),
+                None,
+            )
+            .await;
         self.settle(&run_id, &bot_id, &conversation_id, outcome);
     }
 
     /// One turn: call the model, run any tools it asks for, call it again,
-    /// until it answers or hits the step limit. Port of the TS `runTurn`,
-    /// without the pause-for-approval branch (S1 has no approvals - every
-    /// tool call just runs).
+    /// until it answers, needs Josh's decision on a tool call, or hits the
+    /// step limit. Port of the TS `runTurn` (`run.ts`). `starting_steps`/
+    /// `starting_text`/`starting_usage` are `0`/`""`/`None` for a fresh run
+    /// and the paused state's own for a resume (`decide_approval`) - TS
+    /// threads the same three through `drive`'s own `startingStep`/
+    /// `startingText`/`startingUsage` so a step ceiling and the final
+    /// transcript both span the WHOLE run, not just what happened after
+    /// Josh answered.
+    #[allow(clippy::too_many_arguments)]
     async fn run_turn(
         &self,
         run_id: &str,
+        bot_id: &str,
+        trigger: Trigger,
         model: String,
         mut messages: Vec<ModelMessage>,
         toolbox: &ToolBox,
+        starting_steps: i64,
+        starting_text: String,
+        starting_usage: Option<ModelUsage>,
     ) -> Outcome {
-        let mut text = String::new();
+        let mut text = starting_text;
         let mut resolved_model = model.clone();
-        let mut usage: Option<ModelUsage> = None;
-        let mut steps: i64 = 0;
+        let mut usage: Option<ModelUsage> = starting_usage;
+        let mut steps: i64 = starting_steps;
+
+        // S2-02/S2-03: what each tool call in this run may do - the bot's
+        // stored map, tightened for the trigger that started it. Resolved
+        // ONCE per turn (not per call) so two calls in the same step answer
+        // the same question about the same tool consistently, same
+        // reasoning `permissions_for_run`'s own doc gives for resolving it
+        // from one map rather than per-trigger special-casing.
+        let perms = {
+            let db = self.db();
+            permissions::permissions_for_run(&db, bot_id, trigger).unwrap_or_default()
+        };
 
         while steps < MAX_STEPS {
             if self.take_stop(run_id) {
@@ -541,36 +603,94 @@ impl RunManager {
                 tool_call_id: None,
             });
 
-            for call in &calls {
-                self.note(run_id, Some(call.name.clone()), false);
-                self.emit(
-                    run_id,
-                    RunEvent::ToolCall {
-                        name: call.name.clone(),
-                        args: call.arguments.clone(),
-                    },
-                );
-                let (result, delegated_usage) = toolbox.run(&call.name, &call.arguments).await;
-                // F3: a `message_bot` call that reached a colleague's model
-                // spent real money nobody watching THIS run would otherwise
-                // see charged to it - folded into the same accumulator
-                // `settle` already writes to `cost_usd`/the token columns
-                // (TS `runs.ts:1186-1204`, "Delegated cost lands here").
-                usage = add_usage(usage, delegated_usage);
-                let clipped: String = result.chars().take(4000).collect();
-                self.emit(
-                    run_id,
-                    RunEvent::ToolResult {
-                        name: call.name.clone(),
-                        result: clipped,
-                    },
-                );
-                messages.push(ModelMessage {
-                    role: "tool".to_string(),
-                    content: MessageContent::Text(result),
-                    tool_calls: None,
-                    tool_call_id: Some(call.id.clone()),
-                });
+            // S2-03: tools a model asked for together are DECIDED together,
+            // in order, and the first one that needs Josh stops the line -
+            // port of the TS `gate`/`askAt` split (`run.ts:334-374`).
+            // Everything before the ask runs; the ask itself and anything
+            // queued behind it are handed to `Outcome::Paused` rather than
+            // run without a decision of its own.
+            for (idx, call) in calls.iter().enumerate() {
+                // 🔴 A tool name absent from the permission map entirely -
+                // today only `create_room`/`add_to_room`, the two Grok gaps
+                // this Rust port added ahead of TS's own gated roster (see
+                // `tools/mod.rs`'s doc) - is not one of S2-02's gated tools.
+                // Falling to `Decision::Ask` for an unknown name (as
+                // `permissions::decide` does for a single lookup) would park
+                // every run that ever made a room, over a tool nobody has
+                // ever asked Josh to gate; this documented narrowing runs it
+                // free instead, same as before S2-03 existed.
+                let decision = match perms.get(call.name.as_str()).copied() {
+                    Some(base) => permissions::decide_call(base, &call.name, &call.arguments),
+                    None => Decision::Allow,
+                };
+
+                match decision {
+                    Decision::Ask => {
+                        return Outcome::Paused {
+                            state: RunState {
+                                messages,
+                                text,
+                                model: resolved_model,
+                                usage,
+                                steps,
+                            },
+                            pending: call.clone(),
+                            deferred: calls[idx + 1..].to_vec(),
+                        };
+                    }
+                    Decision::Deny => {
+                        let result = format!(
+                            "Not allowed: {} is switched off for you. Carry on without it.",
+                            call.name
+                        );
+                        self.emit(
+                            run_id,
+                            RunEvent::ToolResult {
+                                name: call.name.clone(),
+                                result: result.clone(),
+                            },
+                        );
+                        messages.push(ModelMessage {
+                            role: "tool".to_string(),
+                            content: MessageContent::Text(result),
+                            tool_calls: None,
+                            tool_call_id: Some(call.id.clone()),
+                        });
+                    }
+                    Decision::Allow => {
+                        self.note(run_id, Some(call.name.clone()), false);
+                        self.emit(
+                            run_id,
+                            RunEvent::ToolCall {
+                                name: call.name.clone(),
+                                args: call.arguments.clone(),
+                            },
+                        );
+                        let (result, delegated_usage) =
+                            toolbox.run(&call.name, &call.arguments).await;
+                        // F3: a `message_bot` call that reached a colleague's
+                        // model spent real money nobody watching THIS run
+                        // would otherwise see charged to it - folded into
+                        // the same accumulator `settle` already writes to
+                        // `cost_usd`/the token columns (TS `runs.ts:1186-
+                        // 1204`, "Delegated cost lands here").
+                        usage = add_usage(usage, delegated_usage);
+                        let clipped: String = result.chars().take(4000).collect();
+                        self.emit(
+                            run_id,
+                            RunEvent::ToolResult {
+                                name: call.name.clone(),
+                                result: clipped,
+                            },
+                        );
+                        messages.push(ModelMessage {
+                            role: "tool".to_string(),
+                            content: MessageContent::Text(result),
+                            tool_calls: None,
+                            tool_call_id: Some(call.id.clone()),
+                        });
+                    }
+                }
             }
         }
 
@@ -606,6 +726,14 @@ impl RunManager {
                 failure,
                 status,
             } => ("failed", Some(failure), state, status),
+            Outcome::Paused {
+                state,
+                pending,
+                deferred,
+            } => {
+                self.park(run_id, bot_id, state, pending, deferred);
+                return;
+            }
         };
         let usage = state.usage.clone().unwrap_or(ModelUsage {
             cost_usd: 0.0,
@@ -763,6 +891,356 @@ impl RunManager {
         self.finish(run_id);
     }
 
+    /// S2-03: a tool call needing Josh's decision stops the run and queues
+    /// it, instead of running it. Port of the TS `park` (`runs.ts:1645-
+    /// 1739`). Deliberately NOT terminal: `bus`/`backlog`/`stopping` are
+    /// left alone (a subscriber watching this run's stream is still
+    /// watching it - `decide_approval` picks the SAME run id back up), and
+    /// `on_run_done` never fires (a room round chains on an answer or a
+    /// failure, never on a run that is still, in effect, in progress).
+    fn park(
+        self: &Arc<Self>,
+        run_id: &str,
+        bot_id: &str,
+        state: RunState,
+        pending: ToolCall,
+        deferred: Vec<ToolCall>,
+    ) {
+        // 🔴 Anything the model asked for AFTER the gated call is dropped
+        // rather than silently run later without a decision of its own. A
+        // run holds ONE pending approval; the pending call itself gets no
+        // synthetic result here at all - it is genuinely undecided, and
+        // gets a real one from `decide_approval` once Josh answers.
+        let mut messages = state.messages;
+        for call in &deferred {
+            messages.push(ModelMessage {
+                role: "tool".to_string(),
+                content: MessageContent::Text(
+                    "Not run: the turn stopped for Josh's approval before reaching this call. \
+Nothing is wrong with it - ask for it again on your next turn, once he has decided the one he \
+is looking at."
+                        .to_string(),
+                ),
+                tool_calls: None,
+                tool_call_id: Some(call.id.clone()),
+            });
+        }
+
+        let usage = state.usage.unwrap_or(ModelUsage {
+            cost_usd: 0.0,
+            input_tokens: 0,
+            output_tokens: 0,
+            cached_tokens: 0,
+        });
+        let messages_json = serde_json::to_string(&messages).unwrap_or_else(|err| {
+            tracing::error!("run {run_id}: failed to serialize paused run messages: {err}");
+            "[]".to_string()
+        });
+
+        let updated = {
+            let db = self.db();
+            db.conn().execute(
+                "UPDATE runs SET status = 'waiting', messages = ?1, text = ?2, model = ?3, steps = ?4,
+                        cost_usd = ?5, input_tokens = ?6, output_tokens = ?7, cached_tokens = ?8,
+                        updated_at = ?9
+                   WHERE id = ?10",
+                rusqlite::params![
+                    messages_json,
+                    state.text,
+                    state.model,
+                    state.steps,
+                    usage.cost_usd,
+                    usage.input_tokens,
+                    usage.output_tokens,
+                    usage.cached_tokens,
+                    now_iso(),
+                    run_id,
+                ],
+            )
+        };
+        // B12: same posture as `settle`'s own save failure - nothing here
+        // has an HTTP response to fail, so a store error is reported to
+        // subscribers as the run's own error rather than panicking the task.
+        if let Err(err) = updated {
+            tracing::error!("run {run_id}: failed to update run row while parking: {err}");
+            self.emit(
+                run_id,
+                RunEvent::Error {
+                    message: "internal error saving run result".to_string(),
+                    status: None,
+                },
+            );
+            self.finish(run_id);
+            return;
+        }
+
+        let approval_id = {
+            let db = self.db();
+            match approvals::insert_pending(
+                &db,
+                run_id,
+                bot_id,
+                &pending.name,
+                &pending.arguments,
+                &pending.id,
+            ) {
+                Ok(id) => id,
+                Err(err) => {
+                    tracing::error!("run {run_id}: failed to insert approval row: {err}");
+                    self.emit(
+                        run_id,
+                        RunEvent::Error {
+                            message: "internal error saving run result".to_string(),
+                            status: None,
+                        },
+                    );
+                    self.finish(run_id);
+                    return;
+                }
+            }
+        };
+
+        self.changes.touch(ChangeKind::Approvals);
+        // The rail's busy flag comes off the run row same as any other
+        // status change.
+        self.changes.touch(ChangeKind::Roster);
+        // The line changes from whatever it was to "Waiting for you to
+        // approve X", which is the one state that sits there until Josh
+        // acts - so it is the single most worth-saying thing this
+        // indicator ever says.
+        self.changes.touch(ChangeKind::Working);
+
+        self.emit(
+            run_id,
+            RunEvent::ApprovalNeeded {
+                approval_id,
+                name: pending.name,
+                args: pending.arguments,
+            },
+        );
+    }
+
+    /// S2-03: Josh's decision on a waiting run's one pending tool call. Port
+    /// of the TS `decideApproval` (`runs.ts:699-772`), minus the
+    /// client-fulfilled-tool `fulfilment` parameter - S2 has no tool whose
+    /// result the desktop app computes instead of the server (that is
+    /// `read_file`, out of scope here) - and minus the empty-abnormal-answer
+    /// retry `drive` itself does on a fresh start, which a resume does not
+    /// repeat.
+    ///
+    /// Returns `false` for an approval id that names no PENDING row -
+    /// already decided, or never existed - which `routes/approvals.rs`
+    /// turns into a 404, same as the TS route answering nothing for a stale
+    /// id. Only the ONE pending call is awaited here; the run's further
+    /// steps, if any, continue on a spawned task exactly like `start`'s own
+    /// first step - so approving a `message_bot` call that itself takes a
+    /// few seconds does not hold the HTTP response open for it.
+    pub async fn decide_approval(self: &Arc<Self>, approval_id: &str, approved: bool) -> bool {
+        let pending = {
+            let db = self.db();
+            match approvals::take_pending(&db, approval_id, approved) {
+                Ok(row) => row,
+                Err(err) => {
+                    tracing::error!("approval {approval_id}: failed to decide row: {err}");
+                    None
+                }
+            }
+        };
+        let Some(pending) = pending else {
+            return false;
+        };
+        // Silently: this is Josh answering something he just asked himself
+        // to decide, not news that needs a second alert.
+        self.changes.touch(ChangeKind::Approvals);
+
+        #[allow(clippy::type_complexity)]
+        type RunRow = (
+            String,
+            String,
+            String,
+            String,
+            String,
+            i64,
+            f64,
+            i64,
+            i64,
+            i64,
+            String,
+        );
+        let run: Option<RunRow> = {
+            let db = self.db();
+            db.conn()
+                .query_row(
+                    "SELECT status, conversation_id, model, messages, text, steps,
+                            cost_usd, input_tokens, output_tokens, cached_tokens, trigger
+                       FROM runs WHERE id = ?1",
+                    rusqlite::params![pending.run_id],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                            row.get(6)?,
+                            row.get(7)?,
+                            row.get(8)?,
+                            row.get(9)?,
+                            row.get(10)?,
+                        ))
+                    },
+                )
+                .optional()
+                .unwrap_or_else(|err| {
+                    tracing::error!("run {}: failed to load run row: {err}", pending.run_id);
+                    None
+                })
+        };
+        let Some((
+            status,
+            conversation_id,
+            model,
+            messages_json,
+            text,
+            steps,
+            cost_usd,
+            input_tokens,
+            output_tokens,
+            cached_tokens,
+            trigger_str,
+        )) = run
+        else {
+            return true;
+        };
+        // Approved or not, the decision is recorded above - a run that is
+        // no longer `waiting` (raced, or its own row failed to save when it
+        // parked) has nothing left here to resume.
+        if status != "waiting" {
+            return true;
+        }
+
+        let mut messages: Vec<ModelMessage> =
+            serde_json::from_str(&messages_json).unwrap_or_else(|err| {
+                tracing::error!(
+                    "run {}: failed to parse stored messages: {err}",
+                    pending.run_id
+                );
+                Vec::new()
+            });
+        let trigger = parse_trigger(&trigger_str);
+        let call = ToolCall {
+            id: pending.call_id.clone(),
+            name: pending.tool_name.clone(),
+            arguments: pending.tool_args.clone(),
+        };
+
+        // F2/room: a resumed call has no live ROOM bit on the run row - S2-
+        // 03's scope names this: a room round replaying an approval on
+        // resume is out of scope, and every case this ticket's tests
+        // exercise is an ordinary chat turn, which `room: false` floors
+        // exactly the same as `start` would have.
+        let toolbox = self.toolbox_for(&pending.bot_id, trigger, false);
+
+        let resolved_usage = if approved {
+            self.note(&pending.run_id, Some(call.name.clone()), false);
+            self.emit(
+                &pending.run_id,
+                RunEvent::ToolCall {
+                    name: call.name.clone(),
+                    args: call.arguments.clone(),
+                },
+            );
+            let (result, delegated_usage) = toolbox.run(&call.name, &call.arguments).await;
+            let clipped: String = result.chars().take(4000).collect();
+            self.emit(
+                &pending.run_id,
+                RunEvent::ToolResult {
+                    name: call.name.clone(),
+                    result: clipped,
+                },
+            );
+            messages.push(ModelMessage {
+                role: "tool".to_string(),
+                content: MessageContent::Text(result),
+                tool_calls: None,
+                tool_call_id: Some(call.id.clone()),
+            });
+            delegated_usage
+        } else {
+            // Port of the TS `resolveTool`'s refusal text (`run.ts:404-
+            // 407`) verbatim - the model is told WHY nothing ran, not
+            // handed an empty result indistinguishable from a tool that
+            // genuinely found nothing.
+            let refusal = format!(
+                "Refused: Josh did not approve {}. Do not try it again this turn; say what you would have done.",
+                call.name
+            );
+            self.emit(
+                &pending.run_id,
+                RunEvent::ToolResult {
+                    name: call.name.clone(),
+                    result: refusal.clone(),
+                },
+            );
+            messages.push(ModelMessage {
+                role: "tool".to_string(),
+                content: MessageContent::Text(refusal),
+                tool_calls: None,
+                tool_call_id: Some(call.id.clone()),
+            });
+            None
+        };
+
+        {
+            let db = self.db();
+            if let Err(err) = db.conn().execute(
+                "UPDATE runs SET status = 'running', updated_at = ?1 WHERE id = ?2",
+                rusqlite::params![now_iso(), pending.run_id],
+            ) {
+                tracing::error!(
+                    "run {}: failed to mark running on resume: {err}",
+                    pending.run_id
+                );
+            }
+        }
+        self.changes.touch(ChangeKind::Roster);
+        self.changes.touch(ChangeKind::Working);
+
+        let starting_usage = add_usage(
+            Some(ModelUsage {
+                cost_usd,
+                input_tokens: input_tokens as u32,
+                output_tokens: output_tokens as u32,
+                cached_tokens: cached_tokens as u32,
+            }),
+            resolved_usage,
+        );
+
+        let manager = Arc::clone(self);
+        let run_id = pending.run_id.clone();
+        let bot_id = pending.bot_id.clone();
+        tokio::spawn(async move {
+            let toolbox = manager.toolbox_for(&bot_id, trigger, false);
+            let outcome = manager
+                .run_turn(
+                    &run_id,
+                    &bot_id,
+                    trigger,
+                    model,
+                    messages,
+                    &toolbox,
+                    steps,
+                    text,
+                    starting_usage,
+                )
+                .await;
+            manager.settle(&run_id, &bot_id, &conversation_id, outcome);
+        });
+
+        true
+    }
+
     /// S1-F-04 (B3, B5, B13): once a run has emitted its terminal event,
     /// nothing will ever `emit` into it again, so `bus`'s senders and
     /// `stopping`'s entry can go immediately - the latter closes B13's race
@@ -854,6 +1332,20 @@ fn trigger_str(trigger: Trigger) -> &'static str {
         Trigger::Routine => "routine",
         Trigger::Webhook => "webhook",
         Trigger::Goal => "goal",
+    }
+}
+
+/// The inverse of `trigger_str` - what `decide_approval` reads a resumed
+/// run's stored `trigger` column back into. Falls back to `Chat` on
+/// anything unrecognised (a hand-seeded test row, say) rather than failing
+/// the resume outright: `Chat` is the least-tightened reading, and TS has
+/// no such column to lose in the first place.
+fn parse_trigger(s: &str) -> Trigger {
+    match s {
+        "routine" => Trigger::Routine,
+        "webhook" => Trigger::Webhook,
+        "goal" => Trigger::Goal,
+        _ => Trigger::Chat,
     }
 }
 

@@ -1,9 +1,11 @@
 //! The tools a run's model may call. S1's first six: `say`, `ask_josh`,
 //! `remember`, `message_bot`, and the two Grok gaps, `create_room` and
-//! `add_to_room`. Port of the relevant slices of `src/server/bot-tools.ts`,
-//! `conversing.ts`, `delegate.ts` and `app.ts`'s `message_bot`-into-a-room
-//! branch. Every one of these six is `allow` for S1 - no approvals, no
-//! gating - so there is no `gate`/`Decision` seam here yet; that is S2.
+//! `add_to_room` - all `allow` by default. S2-03 adds `shell`, `ask` by
+//! default (S2-02's `default_decisions`), the one tool this toolbox holds
+//! that actually needs the approval plumbing `crate::runs`'s tool loop now
+//! gates every call through. Port of the relevant slices of
+//! `src/server/bot-tools.ts`, `conversing.ts`, `delegate.ts` and `app.ts`'s
+//! `message_bot`-into-a-room branch.
 
 mod add_to_room;
 mod ask_josh;
@@ -11,6 +13,7 @@ mod create_room;
 mod message_bot;
 mod remember;
 mod say;
+mod shell;
 
 use std::future::Future;
 use std::pin::Pin;
@@ -67,6 +70,7 @@ pub fn build(
         message_bot::spec(),
         create_room::spec(),
         add_to_room::spec(),
+        shell::spec(),
     ];
 
     let handler: Arc<dyn Fn(String, String) -> ToolFuture + Send + Sync> =
@@ -82,6 +86,7 @@ pub fn build(
                     "remember" => (remember::run(&db, &bot_id, &args), None),
                     "create_room" => (create_room::run(&db, &bot_id, &args), None),
                     "add_to_room" => (add_to_room::run(&db, &args), None),
+                    "shell" => (shell::run(&args), None),
                     "message_bot" => {
                         message_bot::run(&db, &port, &bot_id, &room_hook, trigger, room, &args)
                             .await

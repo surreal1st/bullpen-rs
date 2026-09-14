@@ -1,6 +1,7 @@
 //! The axum app. `build_app` returns a `Router` without binding a port; every
 //! test drives it through `tower::ServiceExt::oneshot`.
 
+pub mod approvals;
 mod auth;
 pub mod changes;
 mod error;

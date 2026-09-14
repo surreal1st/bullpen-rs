@@ -1,5 +1,6 @@
 //! Types both halves of Bullpen use. Port of `src/shared` in the TS original.
 
+pub mod approval_groups;
 pub mod ask_josh;
 pub mod faces;
 pub mod mentions;
