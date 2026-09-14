@@ -414,4 +414,8 @@ pub const MIGRATIONS: &[&str] = &[
     PRIMARY KEY (project_id, bot_id)
   );
   "#,
+    // 19. S3-F-01b (F5): prevent duplicate project names (case-insensitive).
+    r#"
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_name ON projects(lower(name));
+  "#,
 ];

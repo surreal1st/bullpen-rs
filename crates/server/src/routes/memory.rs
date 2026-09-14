@@ -7,6 +7,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, post, put};
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
@@ -105,6 +106,9 @@ async fn get_bot_memory(
     }
 
     let query = params.get("q").map(|s| s.as_str()).unwrap_or("");
+
+    // Sweep expired notes before returning memory (F3)
+    store::memory::sweep_expired(&db)?;
 
     let log: Vec<LogEntryResponse> = if query.is_empty() {
         store::memory::recent_log(&db, &id, 50)?
@@ -273,7 +277,18 @@ async fn post_bot_memory_note(
             .into_response());
     }
 
-    let ttl = req.ttl_seconds.unwrap_or(0);
+    // Default to 86400 (1 day), reject 0 or negative (F2)
+    let ttl = match req.ttl_seconds {
+        None => 86400,
+        Some(0) => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                axum::Json(json!({ "error": "ttlSeconds must be greater than 0" })),
+            )
+                .into_response());
+        }
+        Some(t) => t,
+    };
     let entry = store::memory::note(&db, &id, &content, ttl)?;
     state.runs.changes.touch(crate::changes::ChangeKind::Memory);
 
@@ -396,6 +411,24 @@ async fn post_project(
             .into_response());
     }
 
+    // Check for duplicate name (case-insensitive) (F5)
+    let exists = db
+        .conn()
+        .query_row(
+            "SELECT 1 FROM projects WHERE lower(name) = lower(?1)",
+            rusqlite::params![&name],
+            |_| Ok(()),
+        )
+        .optional()?;
+
+    if exists.is_some() {
+        return Ok((
+            StatusCode::CONFLICT,
+            axum::Json(json!({ "error": "a project with that name already exists" })),
+        )
+            .into_response());
+    }
+
     let project = store::memory::create_project(&db, &name)?;
     state.runs.changes.touch(crate::changes::ChangeKind::Memory);
 
@@ -432,6 +465,33 @@ async fn post_project_member(
         return Ok((
             StatusCode::BAD_REQUEST,
             axum::Json(json!({ "error": "botId is required" })),
+        )
+            .into_response());
+    }
+
+    // Validate project exists (F6)
+    if db
+        .conn()
+        .query_row(
+            "SELECT 1 FROM projects WHERE id = ?1",
+            rusqlite::params![&id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_none()
+    {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            axum::Json(json!({ "error": "no such project" })),
+        )
+            .into_response());
+    }
+
+    // Validate bot exists (F6)
+    if store::get_bot(&db, &bot_id)?.is_none() {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            axum::Json(json!({ "error": "no such bot" })),
         )
             .into_response());
     }
@@ -493,7 +553,19 @@ async fn post_shared_memory(
             .into_response());
     }
 
+    // Validate bot exists if an explicit botId was provided (F-00)
+    if let Some(ref bot_id_ref) = req.bot_id
+        && store::get_bot(&db, bot_id_ref)?.is_none()
+    {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            axum::Json(json!({ "error": "no such bot" })),
+        )
+            .into_response());
+    }
+
     let bot_id = req.bot_id.unwrap_or_else(|| "josh".to_string());
+
     let entry = store::memory::remember_scoped_with_source(
         &db,
         &bot_id,
@@ -516,6 +588,7 @@ async fn post_shared_memory(
                 "expiresAt": entry.expires_at,
                 "scope": entry.scope,
                 "projectId": entry.project_id,
+                "botId": bot_id,
             }
         })),
     )

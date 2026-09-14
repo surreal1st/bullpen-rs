@@ -246,15 +246,17 @@ pub fn projects_for(db: &Db, bot_id: &str) -> rusqlite::Result<Vec<Project>> {
     Ok(projects)
 }
 
-/// The most recent `limit` entries for a bot, newest first. Mirrors the TS
-/// `recentLog`.
+/// The most recent `limit` entries for a bot's own scope, newest first,
+/// excluding expired notes. Mirrors the TS `recentLog`. (F3)
 pub fn recent_log(db: &Db, bot_id: &str, limit: i64) -> rusqlite::Result<Vec<LogEntry>> {
+    let now = now_iso();
     let mut stmt = db.conn().prepare(
         "SELECT id, content, source, created_at, kind, expires_at, scope, project_id FROM memory_log
-          WHERE bot_id = ?1 ORDER BY created_at DESC, rowid DESC LIMIT ?2",
+          WHERE bot_id = ?1 AND scope = 'own' AND (expires_at IS NULL OR expires_at > ?2)
+          ORDER BY created_at DESC, rowid DESC LIMIT ?3",
     )?;
     let rows = stmt
-        .query_map(params![bot_id, limit], |row| {
+        .query_map(params![bot_id, now, limit], |row| {
             Ok(LogEntry {
                 id: row.get(0)?,
                 content: row.get(1)?,
