@@ -7,9 +7,9 @@
 //! (`fake`) every later slice's tests replay against. Routing, the ladder,
 //! and the run loop are later tickets.
 
+pub mod ladder;
 pub mod port;
 pub mod secrets;
-pub mod ladder;
 
 #[cfg(any(test, feature = "fake"))]
 pub mod fake;

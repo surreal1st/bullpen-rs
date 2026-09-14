@@ -2,8 +2,8 @@
 //! tier. Port of `src/server/escalation.ts`.
 
 use crate::CHEAP_DEFAULT_MODEL;
-use store::Db;
 use serde::{Deserialize, Serialize};
+use store::Db;
 
 /// Reaching a better model when a cheap one is stuck.
 ///
@@ -238,11 +238,7 @@ pub fn tier_of(db: &Db, model: &str) -> u8 {
     // Only after every configured rung has been checked. "opus" is in the name
     // markers AND is the configured tier 2, so reading names first would call it
     // the top rung and make Fable unreachable from it.
-    if looks_premium(model) {
-        3
-    } else {
-        0
-    }
+    if looks_premium(model) { 3 } else { 0 }
 }
 
 #[cfg(test)]

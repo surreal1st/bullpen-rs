@@ -4,7 +4,7 @@
 //! and scan while `busy`.
 
 use dioxus::prelude::*;
-use shared::faces::{normalize_shape, SHAPES};
+use shared::faces::{SHAPES, normalize_shape};
 
 /// Stable small hash: same name, same angle, every reload and every machine.
 fn spin(text: &str) -> i32 {
