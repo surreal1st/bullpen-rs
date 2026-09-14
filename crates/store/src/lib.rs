@@ -1,10 +1,12 @@
 //! SQLite schema and queries. Same file format as the TS Bullpen's `bullpen.db`:
 //! migrations 1..16 are equivalent, every self-creating table/column is here.
 
+pub mod auth;
 pub mod bots;
 mod migrations;
 pub mod roster;
 
+pub use auth::{is_configured, session_valid};
 pub use bots::{get_bot, list_bots, list_sections};
 pub use roster::list_roster;
 

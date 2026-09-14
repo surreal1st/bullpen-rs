@@ -29,3 +29,10 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+# S0-04: driving `build_app` in tests via `tower::ServiceExt::oneshot`, and
+# seeding a session row directly for the auth tests.
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+rusqlite = { workspace = true }
