@@ -52,16 +52,27 @@ cp -r target/dx/client/release/web/public/* dist/client/
 BINARY="target/x86_64-unknown-linux-musl/release/bullpen"
 CLIENT_DIR="dist/client"
 
-# Calculate checksums
+# Calculate checksums for all artifacts (F8, F14)
 echo ""
 echo "Calculating checksums..."
 BINARY_SHA=$(sha256sum "$BINARY" | awk '{print $1}')
 echo "Binary SHA256: $BINARY_SHA"
 
-# We'll verify the client as a directory tree
-echo "Client files ready: $CLIENT_DIR"
+# Verify client files as a tree (F14)
+CLIENT_SHA=$(find "$CLIENT_DIR" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')
+echo "Client tree SHA256: $CLIENT_SHA"
 
-# Create incoming directory on meridian and transfer
+# Create a checksums file that install.sh will verify (F15)
+CHECKSUMS_FILE="$(mktemp)"
+cat > "$CHECKSUMS_FILE" << 'EOF'
+EOF
+echo "$BINARY_SHA  bullpen" >> "$CHECKSUMS_FILE"
+echo "$CLIENT_SHA  client" >> "$CHECKSUMS_FILE"
+
+# Also create per-file checksums for client
+find "$CLIENT_DIR" -type f -print0 | sort -z | xargs -0 sha256sum | sed "s|$CLIENT_DIR/||" >> "$CHECKSUMS_FILE"
+
+# Create incoming directory on meridian and transfer (F8)
 echo ""
 echo "Preparing transfer to $MERIDIAN_HOST:$INCOMING..."
 ssh "$MERIDIAN_HOST" "mkdir -p $INCOMING"
@@ -71,6 +82,15 @@ scp -q "$BINARY" "$MERIDIAN_HOST:$INCOMING/bullpen"
 
 echo "Transferring client files..."
 scp -rq "$CLIENT_DIR" "$MERIDIAN_HOST:$INCOMING/client"
+
+echo "Transferring deploy files (F8)..."
+scp -q "deploy/install.sh" "$MERIDIAN_HOST:$INCOMING/install.sh"
+scp -q "deploy/bullpen-rs.service" "$MERIDIAN_HOST:$INCOMING/bullpen-rs.service"
+
+echo "Transferring checksums (F14, F15)..."
+scp -q "$CHECKSUMS_FILE" "$MERIDIAN_HOST:$INCOMING/CHECKSUMS"
+
+rm "$CHECKSUMS_FILE"
 
 # Verify checksums on meridian
 echo ""
@@ -85,12 +105,24 @@ else
   exit 1
 fi
 
+# Verify client tree checksum on meridian (F14)
+echo "Verifying client tree checksum..."
+REMOTE_CLIENT_SHA=$(ssh "$MERIDIAN_HOST" "find $INCOMING/client -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum" | awk '{print $1}')
+if [[ "$CLIENT_SHA" == "$REMOTE_CLIENT_SHA" ]]; then
+  echo "✓ Client checksum verified: $CLIENT_SHA"
+else
+  echo "✗ Client checksum mismatch!"
+  echo "  Local:  $CLIENT_SHA"
+  echo "  Remote: $REMOTE_CLIENT_SHA"
+  exit 1
+fi
+
 echo ""
 echo "✓ All artifacts transferred and verified"
 echo ""
 echo "To complete the installation, run on $MERIDIAN_HOST as root:"
 echo ""
-echo "  sudo bash $BULLPEN_RS_HOME/deploy/install.sh"
+echo "  sudo bash $INCOMING/install.sh"
 echo ""
 echo "This will:"
 echo "  - Install the binary to $BULLPEN_RS_HOME/bullpen"

@@ -6,9 +6,12 @@
 
 set -euo pipefail
 
+# Resolve paths relative to this script's directory (F8)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 BULLPEN_HOME="/home/bullpen"
 BULLPEN_RS_HOME="$BULLPEN_HOME/bullpen-rs"
-INCOMING="$BULLPEN_RS_HOME/incoming"
+INCOMING="$SCRIPT_DIR"
 
 # Verify we're root
 if [[ $EUID -ne 0 ]]; then
@@ -31,6 +34,21 @@ if [[ ! -d "$INCOMING/client" ]]; then
   echo "Error: $INCOMING/client not found"
   exit 1
 fi
+if [[ ! -f "$INCOMING/bullpen-rs.service" ]]; then
+  echo "Error: $INCOMING/bullpen-rs.service not found"
+  exit 1
+fi
+if [[ ! -f "$INCOMING/CHECKSUMS" ]]; then
+  echo "Error: $INCOMING/CHECKSUMS not found"
+  exit 1
+fi
+
+# Verify checksums before copying (F15)
+echo "Verifying checksums..."
+(cd "$INCOMING" && sha256sum -c CHECKSUMS) || {
+  echo "Checksum verification failed"
+  exit 1
+}
 
 # Copy binary (make it executable)
 echo "Installing binary..."
@@ -41,9 +59,9 @@ echo "Installing client..."
 cp -r "$INCOMING/client/"* "$BULLPEN_RS_HOME/client/"
 chown -R bullpen:bullpen "$BULLPEN_RS_HOME/client"
 
-# Install systemd unit
+# Install systemd unit (F8: use path relative to script directory)
 echo "Installing systemd unit..."
-install -o root -g root -m 644 "deploy/bullpen-rs.service" /etc/systemd/system/bullpen-rs.service
+install -o root -g root -m 644 "$INCOMING/bullpen-rs.service" /etc/systemd/system/bullpen-rs.service
 
 # Reload systemd daemon
 echo "Reloading systemd daemon..."

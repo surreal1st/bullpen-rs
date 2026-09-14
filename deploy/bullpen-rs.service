@@ -11,7 +11,7 @@ Group=bullpen
 WorkingDirectory=/home/bullpen/bullpen-rs
 ExecStart=/home/bullpen/bullpen-rs/bullpen
 Environment=BULLPEN_PORT=4380
-Environment=BULLPEN_HOST=0.0.0.0
+Environment=BULLPEN_HOST=127.0.0.1
 Environment=BULLPEN_DATA_DIR=/home/bullpen/bullpen-rs
 Environment=BULLPEN_CLIENT_ROOT=/home/bullpen/bullpen-rs/client
 # The sandbox daemon is bullpen's OWN rootless Docker, never the host one.

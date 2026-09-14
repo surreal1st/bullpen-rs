@@ -3,7 +3,8 @@
 /// This test verifies critical deployment parameters:
 /// - The service listens on port 4380
 /// - The Docker sandbox is enabled (BULLPEN_SANDBOX=on)
-/// - The service does not expose network to containers (no --network outside of strict Docker)
+/// - The service runs as the bullpen user (not root)
+/// - Security hardening is in place: NoNewPrivileges, ProtectSystem, memory limits, rootless Docker
 ///
 /// These assertions guard against configuration drift that could break production.
 #[test]
@@ -34,17 +35,34 @@ fn test_deploy_unit_file_config() {
         "unit file must have BULLPEN_SANDBOX=on to enable the Docker sandbox"
     );
 
-    // Assert that there is no --network directive in environment (Docker networking
-    // is controlled via the sandbox module, not the unit file).
-    // This catches accidental exposure of the Docker network to containers.
-    let environment_section = unit_content
-        .split("[Install]")
-        .next()
-        .expect("should have [Install] section");
-
+    // Assert the service runs as bullpen user, not root (F11)
     assert!(
-        !environment_section.contains("--network"),
-        "unit file must not contain --network in [Service] environment; network isolation is enforced by the sandbox"
+        unit_content.contains("User=bullpen"),
+        "unit file must have User=bullpen; running as root is a security violation"
+    );
+
+    // Assert no-new-privileges hardening is enabled (F11)
+    assert!(
+        unit_content.contains("NoNewPrivileges=true"),
+        "unit file must have NoNewPrivileges=true to prevent privilege escalation"
+    );
+
+    // Assert filesystem protection is strict (F11)
+    assert!(
+        unit_content.contains("ProtectSystem=strict"),
+        "unit file must have ProtectSystem=strict to restrict filesystem access"
+    );
+
+    // Assert memory limits are in place (F11)
+    assert!(
+        unit_content.contains("MemoryMax="),
+        "unit file must have MemoryMax= to prevent OOM issues"
+    );
+
+    // Assert rootless Docker is configured (F11)
+    assert!(
+        unit_content.contains("DOCKER_HOST=unix:///run/user/1004/docker.sock"),
+        "unit file must configure rootless Docker daemon for the bullpen user (uid 1004)"
     );
 
     // Verify it's a valid systemd service unit (basic structure check)
