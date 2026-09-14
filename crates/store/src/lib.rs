@@ -21,7 +21,9 @@ pub use conversations::{
     rename_thread, title_from_first_message, touch_thread, validate_members,
 };
 pub use memory::{
-    LogEntry, RECALL_TOKEN_BUDGET, Recall, get_core, recall_for, remember, search_log, set_core,
+    LogEntry, Project, RECALL_TOKEN_BUDGET, Recall, Scope, add_project_member, create_project,
+    get_core, note, projects_for, recall_for, remember, remember_scoped, search_log, set_core,
+    sweep_expired,
 };
 pub use messages::{NewMessage, Usage, append_message, delete_message, list_messages};
 pub use questions::{OpenQuestion, answer_question, insert_question, list_all_open, list_open};

@@ -393,4 +393,25 @@ pub const MIGRATIONS: &[&str] = &[
 
   CREATE INDEX idx_approvals_pending ON approvals(status, created_at DESC);
   "#,
+    // 18. S3-01: memory tiers, TTL, scope, projects. Adds columns to
+    //     memory_log (kind, expires_at, scope, project_id) and creates
+    //     projects and project_members tables for scoped memory.
+    r#"
+  ALTER TABLE memory_log ADD COLUMN kind TEXT NOT NULL DEFAULT 'log';
+  ALTER TABLE memory_log ADD COLUMN expires_at TEXT;
+  ALTER TABLE memory_log ADD COLUMN scope TEXT NOT NULL DEFAULT 'own';
+  ALTER TABLE memory_log ADD COLUMN project_id TEXT;
+
+  CREATE TABLE projects (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+
+  CREATE TABLE project_members (
+    project_id TEXT NOT NULL REFERENCES projects(id),
+    bot_id     TEXT NOT NULL REFERENCES bots(id),
+    PRIMARY KEY (project_id, bot_id)
+  );
+  "#,
 ];

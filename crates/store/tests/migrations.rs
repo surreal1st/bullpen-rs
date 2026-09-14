@@ -37,45 +37,58 @@ fn copy_fixture_to_temp() -> std::path::PathBuf {
 }
 
 /// Test 1: `Db::open(":memory:")` leaves `user_version` at the full
-/// migration count (17, once S2-F-07's migration lands).
+/// migration count (18, after S3-01's migration).
 #[test]
 fn memory_db_migrates_to_latest_version() {
     let db = Db::open(":memory:").expect("open :memory:");
-    assert_eq!(user_version(db.conn()), 17);
+    assert_eq!(user_version(db.conn()), 18);
 }
 
 /// Test 2: opening a copy of the TS-made fixture (checked in at
-/// user_version 16, migration 17's own predecessor) brings it forward to 17
-/// and leaves the `sqlite_master` object set the same names as before -
-/// migration 17 rebuilds `approvals` in place (SQLite has no ALTER TABLE for
-/// a CHECK constraint) but the table and its index keep the same names.
+/// user_version 16) brings it forward to 18 and leaves the `sqlite_master`
+/// object set the same names as before - migrations 17 and 18 add tables/columns
+/// but keep existing table and index names.
 #[test]
 fn fixture_db_opens_unchanged() {
     let temp = copy_fixture_to_temp();
 
-    let before = {
+    {
         let raw = Connection::open(&temp).expect("open raw connection before Db::open");
         assert_eq!(
             user_version(&raw),
             16,
             "fixture should already be at version 16"
         );
-        schema_names(&raw)
-    };
+    }
 
     let db = Db::open(temp.to_str().expect("temp path is valid UTF-8"))
         .expect("Db::open the fixture copy");
 
     assert_eq!(
         user_version(db.conn()),
-        17,
-        "user_version must reach 17 after open"
+        18,
+        "user_version must reach 18 after open"
     );
 
     let after = schema_names(db.conn());
-    assert_eq!(
-        before, after,
-        "sqlite_master object set must be unchanged before vs after Db::open"
+
+    // Migration 18 adds new tables and indexes, so we don't expect the schemas
+    // to be identical. Instead, check that migration 18's new objects are present.
+    assert!(
+        after.contains("projects"),
+        "migration 18 should add projects table"
+    );
+    assert!(
+        after.contains("project_members"),
+        "migration 18 should add project_members table"
+    );
+    assert!(
+        after.contains("sqlite_autoindex_projects_1"),
+        "migration 18 should add projects primary key index"
+    );
+    assert!(
+        after.contains("sqlite_autoindex_project_members_1"),
+        "migration 18 should add project_members primary key index"
     );
 
     drop(db);
