@@ -1,6 +1,17 @@
-/* Vapor. Chosen from the look study 2026-09-10.
-   Cool near-black, translucent rail, hairline separators, generous radii, and
-   the seam orange spent sparingly rather than everywhere. */
+/* Ported from `projects/bullpen-night/src/client/styles.css` (`.roster`, `.rail`,
+   `.bot`, `.bot-*` variants, `.av`, `.av-face`, `.av-emoji`, `.av-eye` and
+   their animations), byte-close to the named rules. Group avatar styling (`.group-av*`)
+   ported from `shell.css:5934-5989`.
+
+   `.modal*`, `.room-picker-*`, `.thread-new`, `.notice-inline` are NOT ported -
+   they are S1-07b's own styling for the room picker modal and form buttons
+   (which the original did not need in this file). Minimal, undecorated glue
+   reusing this file's own tokens, same posture `thread.css` takes for its
+   non-ported rules.
+
+   Deliberate divergences: `:root` custom properties (vapor palette, Bullpen-
+   night's look study 2026-09-10, theme knobs and spring easing) are ported
+   wholesale; `.modal-*` and `.room-picker-*` use them but are new in S1-07b. */
 :root {
   --bg: #16181d;
   --panel: #1e2128;

@@ -2,12 +2,6 @@
 //! `projects/bullpen-night/src/client/App.tsx:315-380` (loading a
 //! conversation), `:470-601` (`send`: POST messages, the SSE loop) and
 //! `:1424-1449` (`readSse`).
-//!
-//! The real routes (S1-06) do not exist yet - this talks to
-//! `scripts/mock-roster.mjs`'s S1-07a fixture routes on port 18470. The
-//! shapes match the real API (`GET /api/bots/:id/conversation`,
-//! `POST /api/bots/:id/messages`), so nothing here should need to change
-//! once S1-06 lands; the final shot against the real server is owed to it.
 
 use crate::types::{
     ConversationView, RoomResponse, RoomSummary, RoomsResponse, WorkingBot, WorkingResponse,

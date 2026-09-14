@@ -6,6 +6,21 @@
 use dioxus::prelude::*;
 use shared::faces::{SHAPES, normalize_shape};
 
+/// Sanitise a bot id for use in SVG attribute ids. Keeps only [A-Za-z0-9_-],
+/// replacing others with _. This prevents breaking out of the id="" attribute
+/// with quotes or markup injection.
+fn sanitise_id(id: &str) -> String {
+    id.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 /// Stable small hash: same name, same angle, every reload and every machine.
 fn spin(text: &str) -> i32 {
     let mut h: i64 = 0;
@@ -73,7 +88,7 @@ pub fn Avatar(
 
     let eye_y = 32.0 * shape_info.eye_y;
     let gap = shape_info.eye_gap;
-    let fill_id = format!("face-{id}");
+    let fill_id = format!("face-{}", sanitise_id(&id));
     let hue2 = (hue + 22) % 360;
     let ex1 = 16.0 - gap - 1.5;
     let ex2 = 16.0 + gap - 1.5;
@@ -110,5 +125,49 @@ pub fn Avatar(
             "aria-hidden": "true",
             dangerous_inner_html: "{svg}",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sanitise_id_removes_script_tags() {
+        // A bot id that attempts to inject a script tag should be sanitised
+        let malicious_id = r#"x"><script>"#;
+        let sanitised = sanitise_id(malicious_id);
+
+        // The result should not contain unescaped quotes or angle brackets
+        assert!(!sanitised.contains('>'));
+        assert!(!sanitised.contains('<'));
+        assert!(!sanitised.contains('"'));
+        assert!(!sanitised.contains('\''));
+
+        // Only alphanumeric, underscore, and hyphen should remain
+        for c in sanitised.chars() {
+            assert!(c.is_ascii_alphanumeric() || c == '_' || c == '-',
+                    "Unexpected character in sanitised id: {}", c);
+        }
+    }
+
+    #[test]
+    fn test_sanitise_id_preserves_valid_chars() {
+        // Valid bot id characters should be preserved
+        let valid_id = "bot_id-123";
+        let sanitised = sanitise_id(valid_id);
+        assert_eq!(sanitised, valid_id);
+    }
+
+    #[test]
+    fn test_sanitise_id_replaces_invalid_chars() {
+        // Invalid characters should be replaced with underscore
+        let id_with_spaces = "bot id";
+        let sanitised = sanitise_id(id_with_spaces);
+        assert_eq!(sanitised, "bot_id");
+
+        let id_with_dots = "bot.id";
+        let sanitised = sanitise_id(id_with_dots);
+        assert_eq!(sanitised, "bot_id");
     }
 }
