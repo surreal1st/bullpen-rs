@@ -5,9 +5,11 @@
 
 use crate::types::{
     ApprovalsResponse, AuthStatus, Bot, BotPatchResponse, BotToolsField, ConversationView,
-    MadeTool, ModelError, ModelField, ModelsResponse, OpenQuestion, PendingApproval,
-    PermissionsField, QuestionsResponse, RoomResponse, RoomSummary, RoomsResponse, RoutingState,
-    RulesField, Tier1Models, Tier1Response, WorkingBot, WorkingResponse,
+    CoreStatus, MadeTool, MemoryEntry, MemoryEntryField, MemoryView, ModelError, ModelField,
+    ModelsResponse, OpenQuestion, PendingApproval, PermissionsField, ProjectField, ProjectSummary,
+    ProjectsField, QuestionsResponse, RoomResponse, RoomSummary, RoomsResponse, RoutingState,
+    RulesField, SharedCoreField, SharedLogField, Tier1Models, Tier1Response, WorkingBot,
+    WorkingResponse,
 };
 use gloo_net::http::{Request, Response};
 use serde::{Deserialize, Serialize};
@@ -711,6 +713,202 @@ pub async fn patch_bot(bot_id: &str, body: serde_json::Value) -> Result<Bot, Str
         Ok(err) => Err(err.error),
         Err(_) => Err(format!("{url} -> {}", resp.status())),
     }
+}
+
+/* --------------------------------------------------------------- S3-05: memory */
+
+/// `GET /api/bots/:id/memory` - core, its token budget, and the recent log.
+pub async fn fetch_bot_memory(bot_id: &str) -> Result<MemoryView, String> {
+    let url = format!("/api/bots/{bot_id}/memory");
+    let resp = Request::get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("{url} -> {}", resp.status()));
+    }
+    resp.json::<MemoryView>().await.map_err(|e| e.to_string())
+}
+
+/// `PUT /api/bots/:id/memory/core`.
+pub async fn put_bot_memory_core(bot_id: &str, core: &str) -> Result<CoreStatus, String> {
+    #[derive(Serialize)]
+    struct Req<'a> {
+        core: &'a str,
+    }
+    let url = format!("/api/bots/{bot_id}/memory/core");
+    let resp = Request::put(&url)
+        .json(&Req { core })
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("{url} -> {}", resp.status()));
+    }
+    resp.json::<CoreStatus>().await.map_err(|e| e.to_string())
+}
+
+/// `POST /api/bots/:id/memory/notes` - a temporary entry with a TTL, in
+/// seconds.
+pub async fn post_bot_memory_note(
+    bot_id: &str,
+    content: &str,
+    ttl_seconds: u64,
+) -> Result<MemoryEntry, String> {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Req<'a> {
+        content: &'a str,
+        ttl_seconds: u64,
+    }
+    let url = format!("/api/bots/{bot_id}/memory/notes");
+    let resp = Request::post(&url)
+        .json(&Req {
+            content,
+            ttl_seconds,
+        })
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("{url} -> {}", resp.status()));
+    }
+    resp.json::<MemoryEntryField>()
+        .await
+        .map(|b| b.entry)
+        .map_err(|e| e.to_string())
+}
+
+/// `DELETE /api/bots/:id/memory/:entryId`.
+pub async fn delete_bot_memory_entry(bot_id: &str, entry_id: &str) -> Result<(), String> {
+    let url = format!("/api/bots/{bot_id}/memory/{entry_id}");
+    let resp = Request::delete(&url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("{url} -> {}", resp.status()));
+    }
+    Ok(())
+}
+
+/// `GET /api/shared-core`.
+pub async fn fetch_shared_core() -> Result<String, String> {
+    let resp = Request::get("/api/shared-core")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("/api/shared-core -> {}", resp.status()));
+    }
+    resp.json::<SharedCoreField>()
+        .await
+        .map(|b| b.core)
+        .map_err(|e| e.to_string())
+}
+
+/// `PUT /api/shared-core`.
+pub async fn put_shared_core(core: &str) -> Result<String, String> {
+    #[derive(Serialize)]
+    struct Req<'a> {
+        core: &'a str,
+    }
+    let resp = Request::put("/api/shared-core")
+        .json(&Req { core })
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("/api/shared-core -> {}", resp.status()));
+    }
+    resp.json::<SharedCoreField>()
+        .await
+        .map(|b| b.core)
+        .map_err(|e| e.to_string())
+}
+
+/// `GET /api/projects`.
+pub async fn fetch_projects() -> Result<Vec<ProjectSummary>, String> {
+    let resp = Request::get("/api/projects")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("/api/projects -> {}", resp.status()));
+    }
+    resp.json::<ProjectsField>()
+        .await
+        .map(|b| b.projects)
+        .map_err(|e| e.to_string())
+}
+
+/// `POST /api/projects`.
+pub async fn create_project(name: &str) -> Result<ProjectSummary, String> {
+    #[derive(Serialize)]
+    struct Req<'a> {
+        name: &'a str,
+    }
+    let resp = Request::post("/api/projects")
+        .json(&Req { name })
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("/api/projects -> {}", resp.status()));
+    }
+    resp.json::<ProjectField>()
+        .await
+        .map(|b| b.project)
+        .map_err(|e| e.to_string())
+}
+
+/// `POST /api/projects/:id/members`.
+pub async fn add_project_member(project_id: &str, bot_id: &str) -> Result<(), String> {
+    #[derive(Serialize)]
+    struct Req<'a> {
+        #[serde(rename = "botId")]
+        bot_id: &'a str,
+    }
+    let url = format!("/api/projects/{project_id}/members");
+    let resp = Request::post(&url)
+        .json(&Req { bot_id })
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("{url} -> {}", resp.status()));
+    }
+    Ok(())
+}
+
+/// `GET /api/memory/shared`.
+pub async fn fetch_shared_memory() -> Result<Vec<MemoryEntry>, String> {
+    let resp = Request::get("/api/memory/shared")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("/api/memory/shared -> {}", resp.status()));
+    }
+    resp.json::<SharedLogField>()
+        .await
+        .map(|b| b.log)
+        .map_err(|e| e.to_string())
+}
+
+/// `DELETE /api/memory/shared/:entryId`.
+pub async fn delete_shared_memory_entry(entry_id: &str) -> Result<(), String> {
+    let url = format!("/api/memory/shared/{entry_id}");
+    let resp = Request::delete(&url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("{url} -> {}", resp.status()));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -362,3 +362,99 @@ pub struct BotToolsField {
 pub struct BotPatchResponse {
     pub bot: Bot,
 }
+
+/* ------------------------------------------------------------- S3-05: memory */
+
+/// One entry in a bot's own memory log or the shared log. `GET
+/// /api/bots/:id/memory` and `GET /api/memory/shared` share this row shape
+/// (`crates/server/src/routes/memory.rs`'s `LogEntryResponse`).
+///
+/// 🔴 `kind`/`expires_at` are NOT sent by the server today - the route's
+/// `LogEntryResponse` carries only `id`/`content`/`source`/`createdAt`, and
+/// `store::memory::recent_log`/`search_log` do not even select the
+/// `kind`/`expires_at` columns from `memory_log` (they exist in the schema -
+/// see `store::memory::note`'s INSERT - just never read back out). Kept
+/// `Option` here, `#[serde(default)]`, so the kind badge and "expires in…"
+/// text in `memory_editor.rs` light up the moment a server ticket adds
+/// them, with no second client change. Until then every entry renders with
+/// no badge and no TTL text - see this ticket's `## Result` note for the
+/// exact server change needed.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryEntry {
+    pub id: String,
+    pub content: String,
+    pub source: String,
+    pub created_at: String,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub expires_at: Option<String>,
+}
+
+/// `GET /api/bots/:id/memory`'s response shape.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryView {
+    pub core: String,
+    pub tokens: i64,
+    pub budget: i64,
+    pub over_budget: bool,
+    pub entries: i64,
+    #[serde(default)]
+    pub log: Vec<MemoryEntry>,
+}
+
+/// `PUT /api/bots/:id/memory/core`'s response shape.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoreStatus {
+    pub core: String,
+    pub tokens: i64,
+    pub budget: i64,
+    pub over_budget: bool,
+    pub entries: i64,
+}
+
+/// `POST /api/bots/:id/memory` and `POST /api/bots/:id/memory/notes`'s
+/// success shape.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MemoryEntryField {
+    pub entry: MemoryEntry,
+}
+
+/// `GET`/`PUT /api/shared-core`'s response shape.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SharedCoreField {
+    pub core: String,
+}
+
+/// One project bots can be added to for scoped memory. `GET`/`POST
+/// /api/projects`'s row shape.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectSummary {
+    pub id: String,
+    pub name: String,
+    pub created_at: String,
+}
+
+/// `GET /api/projects`'s response shape.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ProjectsField {
+    #[serde(default)]
+    pub projects: Vec<ProjectSummary>,
+}
+
+/// `POST /api/projects`'s success shape.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProjectField {
+    pub project: ProjectSummary,
+}
+
+/// `GET /api/memory/shared`'s response shape.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct SharedLogField {
+    #[serde(default)]
+    pub log: Vec<MemoryEntry>,
+}

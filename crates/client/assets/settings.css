@@ -864,3 +864,161 @@ button.effort-glyph:disabled {
   font-size: 0.78rem;
   color: var(--danger);
 }
+
+/* ------------------------------------------------------------- S3-05: .mem */
+/* The memory pane (`memory_editor.rs`'s `MemoryModal`/`MemoryEditor`) -
+   opens over the thread from `thread.rs`'s "Memory" button, next to
+   "Permissions" (`.pane-perms-btn`, reused as-is - see this ticket's
+   `## Result` note on why there is no separate `.pane-mem-btn`). Reuses
+   `.stg-sub`/`.stg-sub-h`/`.set-note`/`.rules-box`/`.rules-foot`/`.stg-btn`/
+   `.muted`/`.composer-error` from the settings/rules/approvals cards already
+   ported above - only the log rows, badges, and the add-note/add-project
+   forms are new here. */
+
+.mem-modal {
+  width: min(40rem, calc(100vw - 2rem));
+  max-height: min(34rem, calc(100vh - 4rem));
+  overflow-y: auto;
+}
+
+.mem {
+  display: flex;
+  flex-direction: column;
+  gap: 1.1rem;
+}
+
+.mem-core-box {
+  margin-top: 0.6rem;
+}
+
+.mem-log {
+  list-style: none;
+  margin: 0.6rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.mem-entry {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #0f151d;
+  padding: 0.5rem 0.65rem;
+}
+
+.mem-entry-top {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.mem-entry-content {
+  margin: 0.35rem 0 0;
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+.mem-badge {
+  border-radius: 999px;
+  padding: 0.1rem 0.55rem;
+  font-size: 0.72rem;
+  font-weight: 620;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  background: rgb(255 255 255 / 8%);
+  color: var(--muted);
+}
+
+.mem-badge-note {
+  background: var(--seam);
+  color: #17100c;
+}
+
+.mem-badge-shared {
+  background: rgb(255 255 255 / 8%);
+  color: var(--ink);
+}
+
+.mem-ttl {
+  color: #5c6a7b;
+  font-size: 0.75rem;
+}
+
+.mem-del {
+  margin-left: auto;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.mem-del:hover {
+  color: var(--danger);
+}
+
+.mem-add-note {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.7rem;
+}
+
+.mem-add-note input {
+  flex: 1;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--ink);
+  padding: 0.4rem 0.6rem;
+  font: inherit;
+  font-size: 0.85rem;
+}
+
+.mem-ttl-select {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--ink);
+  padding: 0.35rem 0.4rem;
+  font: inherit;
+  font-size: 0.8rem;
+}
+
+.mem-projects {
+  list-style: none;
+  margin: 0.6rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.mem-project-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #0f151d;
+  padding: 0.4rem 0.65rem;
+  font-size: 0.85rem;
+}
+
+.mem-add-bot {
+  border: 1px solid var(--line-strong);
+  background: transparent;
+  color: var(--ink-dim);
+  border-radius: 999px;
+  padding: 0.15rem 0.6rem;
+  font: inherit;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.mem-add-bot:hover {
+  background: rgb(255 255 255 / 6%);
+  color: var(--ink);
+}

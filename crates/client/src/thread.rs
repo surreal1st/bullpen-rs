@@ -11,6 +11,7 @@ use crate::api;
 use crate::approvals::Approvals;
 use crate::bubble::Bubble;
 use crate::composer::Composer;
+use crate::memory_editor::MemoryModal;
 use crate::message_time::{day_key, format_day, format_time, now_iso};
 use crate::model_chip::ModelChip;
 use crate::permissions_editor::PermissionsModal;
@@ -193,6 +194,9 @@ pub fn ChatPane(
     // every bot. It now opens over the thread instead, behind this button -
     // see `permissions_editor.rs`'s `PermissionsModal`.
     let mut perms_open = use_signal(|| false);
+    // S3-05: the memory pane, same placement as "Permissions" beside it in
+    // `pane-head-meta` - see `memory_editor.rs`'s `MemoryModal`.
+    let mut mem_open = use_signal(|| false);
 
     rsx! {
         div { class: "pane",
@@ -207,6 +211,11 @@ pub fn ChatPane(
                             onclick: move |_| perms_open.set(true),
                             "Permissions"
                         }
+                        button {
+                            class: "pane-perms-btn",
+                            onclick: move |_| mem_open.set(true),
+                            "Memory"
+                        }
                         ModelChip {
                             bot: current,
                             on_saved: move |updated: Bot| local_bot.set(Some(updated)),
@@ -219,6 +228,13 @@ pub fn ChatPane(
                     bot_id: bot_id.clone(),
                     bot_name: bot_name.clone(),
                     on_close: move |_| perms_open.set(false),
+                }
+            }
+            if *mem_open.read() {
+                MemoryModal {
+                    bot_id: bot_id.clone(),
+                    bot_name: bot_name.clone(),
+                    on_close: move |_| mem_open.set(false),
                 }
             }
             if let Some(err) = load_error.read().clone() {

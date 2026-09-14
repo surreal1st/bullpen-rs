@@ -62,6 +62,12 @@ fn GeneralSettings() -> Element {
                 RoutingSection {}
             }
         }
+        section { class: "stg-group",
+            h3 { class: "stg-group-h", "Memory" }
+            div { class: "stg-card stg-card-loose",
+                SharedMemorySection {}
+            }
+        }
     }
 }
 
@@ -445,6 +451,66 @@ fn RulesSection() -> Element {
                     if is_busy { "Saving…" } else if is_dirty { "Save rules" } else { "Saved" }
                 }
                 span { class: "rules-warn", "A rule asks; it does not enforce. What actually withholds an invented answer runs on the server." }
+            }
+        }
+    }
+}
+
+/* ---------------------------------------------------------- S3-05: shared memory */
+
+/// The shared-core textarea card (`GET`/`PUT /api/shared-core`) - rides in
+/// every bot's prompt the same way a bot's own core does
+/// (`memory_editor.rs`'s "Core" section), just not scoped to one bot. Same
+/// dirty-tracking save button shape as `RulesSection` above.
+#[component]
+fn SharedMemorySection() -> Element {
+    let mut core = use_signal(String::new);
+    let mut saved = use_signal(String::new);
+    let mut busy = use_signal(|| false);
+
+    use_effect(move || {
+        spawn(async move {
+            if let Ok(c) = api::fetch_shared_core().await {
+                core.set(c.clone());
+                saved.set(c);
+            }
+        });
+    });
+
+    let save = move |_| {
+        busy.set(true);
+        spawn(async move {
+            let text = core.read().clone();
+            if let Ok(c) = api::put_shared_core(&text).await {
+                core.set(c.clone());
+                saved.set(c);
+            }
+            busy.set(false);
+        });
+    };
+
+    let is_busy = *busy.read();
+    let is_dirty = *core.read() != *saved.read();
+
+    rsx! {
+        div { class: "stg-sub",
+            h4 { class: "stg-sub-h", "Shared memory" }
+            p { class: "set-note", "Rides in every bot's prompt, on every run - not one bot's own core." }
+            textarea {
+                class: "rules-box",
+                spellcheck: "false",
+                rows: "6",
+                "aria-label": "Shared memory core",
+                value: "{core}",
+                oninput: move |evt| core.set(evt.value()),
+            }
+            div { class: "rules-foot",
+                button {
+                    class: "stg-btn",
+                    disabled: is_busy || !is_dirty,
+                    onclick: save,
+                    if is_busy { "Saving…" } else if is_dirty { "Save" } else { "Saved" }
+                }
             }
         }
     }

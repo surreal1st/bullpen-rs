@@ -38,6 +38,10 @@ pub enum ChangeKind {
     Approvals,
     Questions,
     Working,
+    // S3-05: server's `ChangeKind::Memory` (`crates/server/src/changes.rs`),
+    // wire string "memory" - core/log/project/shared-log writes all touch
+    // this so `memory_editor.rs`'s modal can refetch instead of polling.
+    Memory,
 }
 
 impl ChangeKind {
@@ -47,6 +51,7 @@ impl ChangeKind {
             "approvals" => Some(Self::Approvals),
             "questions" => Some(Self::Questions),
             "working" => Some(Self::Working),
+            "memory" => Some(Self::Memory),
             _ => None,
         }
     }
@@ -157,6 +162,10 @@ mod tests {
         assert_eq!(
             parse_change(r#"{"type":"change","kind":"working"}"#),
             Some(ChangeKind::Working)
+        );
+        assert_eq!(
+            parse_change(r#"{"type":"change","kind":"memory"}"#),
+            Some(ChangeKind::Memory)
         );
     }
 

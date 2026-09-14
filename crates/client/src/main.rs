@@ -7,6 +7,7 @@ mod bubble;
 mod composer;
 mod events;
 mod markdown;
+mod memory_editor;
 mod message_time;
 mod model_chip;
 mod permissions_editor;
