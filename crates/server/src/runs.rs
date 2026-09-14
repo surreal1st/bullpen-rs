@@ -10,6 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use futures::StreamExt;
 use model::ladder::{Trigger, model_for_run};
@@ -26,6 +27,11 @@ use crate::tools::{self, RoomHook, ToolBox};
 /// How many tool steps a single run may take before it is stopped rather
 /// than left to loop. TS's `MAX_STEPS` is 24; the ticket sets S1's at 12.
 const MAX_STEPS: i64 = 12;
+
+/// How long a settled run's event backlog survives for a late subscriber
+/// before `finish`'s delayed cleanup drops it, together with any `bus`
+/// entry a late `subscribe` recreated in the meantime (S1-F-04: B3, B5).
+const BACKLOG_TTL: Duration = Duration::from_secs(60);
 
 /// One event a run's subscribers see. Port of the TS `RunEvent`, minus
 /// `approval_needed` - there are no approvals to need one in S1.
@@ -121,10 +127,26 @@ pub struct RunManager {
     /// What `message_bot` calls when it posts into a room. `None` until
     /// S1-06 sets it.
     start_room_turn: RoomHook,
+    /// How long a settled run's backlog survives before `finish`'s delayed
+    /// cleanup drops it - the real product value from `new`; shrunk by
+    /// `with_backlog_ttl` so a test proving the bound (S1-F-04) does not
+    /// have to sleep out a full minute.
+    backlog_ttl: Duration,
 }
 
 impl RunManager {
     pub fn new(db: Arc<Mutex<Db>>, port: Arc<dyn ModelPort>) -> Self {
+        Self::with_backlog_ttl(db, port, BACKLOG_TTL)
+    }
+
+    /// Same as `new`, but with an explicit backlog grace period instead of
+    /// the real 60s - S1-F-04's bite check would otherwise cost a minute of
+    /// wall clock per run it proves.
+    pub fn with_backlog_ttl(
+        db: Arc<Mutex<Db>>,
+        port: Arc<dyn ModelPort>,
+        backlog_ttl: Duration,
+    ) -> Self {
         Self {
             db,
             port,
@@ -135,6 +157,7 @@ impl RunManager {
             stopping: Mutex::new(HashSet::new()),
             on_run_done: Mutex::new(None),
             start_room_turn: Arc::new(Mutex::new(None)),
+            backlog_ttl,
         }
     }
 
@@ -336,6 +359,20 @@ impl RunManager {
         Ok(out)
     }
 
+    /// Snapshot of what the per-run bookkeeping holds right now - `bus`
+    /// (live event subscribers), `backlog` (replayable event history) and
+    /// `stopping` (pending stop requests). S1-F-04 (B3, B5, B13): none of
+    /// these should grow without bound across many runs, only with the
+    /// runs still live plus `backlog_ttl`'s grace window - not wired to any
+    /// route, this exists for a test to hold that bound to account.
+    pub fn bookkeeping_sizes(&self) -> (usize, usize, usize) {
+        (
+            self.bus.lock().expect("bus mutex poisoned").len(),
+            self.backlog.lock().expect("backlog mutex poisoned").len(),
+            self.stopping.lock().expect("stopping mutex poisoned").len(),
+        )
+    }
+
     fn toolbox_for(self: &Arc<Self>, bot_id: &str) -> ToolBox {
         tools::build(
             Arc::clone(&self.db),
@@ -524,7 +561,13 @@ impl RunManager {
     /// TS `drive`, minus the unverified-claim guards, second opinion,
     /// notify/badge and routine-health bookkeeping - none of that exists in
     /// S1's scope.
-    fn settle(&self, run_id: &str, bot_id: &str, conversation_id: &str, outcome: Outcome) {
+    fn settle(
+        self: &Arc<Self>,
+        run_id: &str,
+        bot_id: &str,
+        conversation_id: &str,
+        outcome: Outcome,
+    ) {
         let (status, failure, state) = match outcome {
             Outcome::Answered(state) => ("done", None, state),
             Outcome::Failed { state, failure } => ("failed", Some(failure), state),
@@ -594,6 +637,7 @@ impl RunManager {
             {
                 hook(run_id, bot_id, conversation_id);
             }
+            self.finish(run_id);
             return;
         }
 
@@ -669,6 +713,44 @@ impl RunManager {
         {
             hook(run_id, bot_id, conversation_id);
         }
+        self.finish(run_id);
+    }
+
+    /// S1-F-04 (B3, B5, B13): once a run has emitted its terminal event,
+    /// nothing will ever `emit` into it again, so `bus`'s senders and
+    /// `stopping`'s entry can go immediately - the latter closes B13's race
+    /// even when a stop lands after this run's one and only `take_stop`
+    /// check already passed (the run finished in "the same instant"; see
+    /// the finding). `backlog` stays around for `backlog_ttl` so a
+    /// subscriber that calls `subscribe` a moment after settle still gets
+    /// the replay; the spawned task below drops it once that grace period
+    /// passes, together with any `bus` entry a late `subscribe` recreated
+    /// in the meantime - otherwise that recreated entry would itself be
+    /// exactly B5's "grows by one entry per run for the life of the
+    /// process", just delayed rather than fixed.
+    fn finish(self: &Arc<Self>, run_id: &str) {
+        self.stopping
+            .lock()
+            .expect("stopping mutex poisoned")
+            .remove(run_id);
+        self.bus.lock().expect("bus mutex poisoned").remove(run_id);
+
+        let manager = Arc::clone(self);
+        let run_id = run_id.to_string();
+        let ttl = self.backlog_ttl;
+        tokio::spawn(async move {
+            tokio::time::sleep(ttl).await;
+            manager
+                .backlog
+                .lock()
+                .expect("backlog mutex poisoned")
+                .remove(&run_id);
+            manager
+                .bus
+                .lock()
+                .expect("bus mutex poisoned")
+                .remove(&run_id);
+        });
     }
 
     fn take_stop(&self, run_id: &str) -> bool {

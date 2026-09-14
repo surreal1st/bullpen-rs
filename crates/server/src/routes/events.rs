@@ -31,7 +31,13 @@ async fn events(
     State(state): State<AppState>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let (tx, mut change_rx) = tokio::sync::mpsc::unbounded_channel::<ChangeKind>();
-    state.runs.changes.subscribe(move |kind| {
+    // B4: a guarded subscription rather than the permanent `subscribe` -
+    // every reload / reconnect (the client retries every 3s) hits this
+    // handler again, so an unguarded listener here would add one closure
+    // per connection for the life of the process. `_subscription` is held
+    // by the stream below and unregisters on `Drop`, when the connection
+    // ends.
+    let subscription = state.runs.changes.subscribe_scoped(move |kind| {
         // A write can lose the race against the client disconnecting - a
         // closed receiver just means nobody catches this touch, never a
         // panic.
@@ -39,6 +45,7 @@ async fn events(
     });
 
     let stream = async_stream::stream! {
+        let _subscription = subscription;
         yield Ok(Event::default().data(json!({"type": "hello"}).to_string()));
 
         let mut pending: HashMap<ChangeKind, Instant> = HashMap::new();
