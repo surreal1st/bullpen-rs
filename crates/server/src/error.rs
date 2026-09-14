@@ -39,6 +39,24 @@ impl IntoResponse for AppError {
 /// Every store call on a request path lands here via `?`. The rusqlite
 /// error (which can quote a file path or a column name) is logged
 /// server-side only; the client gets a flat, generic 500.
+impl From<String> for AppError {
+    fn from(e: String) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: e,
+        }
+    }
+}
+
+impl From<serde_json::Error> for AppError {
+    fn from(e: serde_json::Error) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: e.to_string(),
+        }
+    }
+}
+
 impl From<rusqlite::Error> for AppError {
     fn from(err: rusqlite::Error) -> Self {
         tracing::error!("store error: {err}");

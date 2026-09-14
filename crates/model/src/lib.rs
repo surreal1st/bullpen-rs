@@ -7,6 +7,7 @@
 //! (`fake`) every later slice's tests replay against. Routing, the ladder,
 //! and the run loop are later tickets.
 
+pub mod catalog;
 pub mod ladder;
 pub mod port;
 pub mod routing;
@@ -15,6 +16,7 @@ pub mod secrets;
 #[cfg(any(test, feature = "fake"))]
 pub mod fake;
 
+pub use catalog::{Catalog, CatalogModel, FixtureCatalog, PinVerdict, judge_pin};
 pub use port::{
     CHEAP_DEFAULT_MODEL, CHEAP_FALLBACK_MODELS, ContentPart, EventStream, FunctionCall, ImageUrl,
     MAX_OUTPUT_TOKENS, MessageContent, MessageToolCall, ModelEvent, ModelMessage, ModelPort,

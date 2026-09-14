@@ -17,6 +17,7 @@ pub use error::{ApiResult, AppError};
 use axum::extract::{Request, State};
 use axum::response::{IntoResponse, Response};
 use axum::{Router, http::StatusCode};
+use model::Catalog;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use store::Db;
@@ -45,15 +46,17 @@ pub struct AppState {
     /// `AppState` so `cargo test`'s many parallel instances never share a
     /// counter (see `auth::LoginThrottle`'s doc).
     login_throttle: Arc<auth::LoginThrottle>,
+    /// S2-06: the model catalog for searching available models.
+    pub catalog: Arc<dyn Catalog>,
 }
 
 impl AppState {
     pub fn new(db: Db) -> Self {
-        Self::build(db, default_client_root(), default_port())
+        Self::build(db, default_client_root(), default_port(), default_catalog())
     }
 
     pub fn with_client_root(db: Db, client_root: String) -> Self {
-        Self::build(db, client_root, default_port())
+        Self::build(db, client_root, default_port(), default_catalog())
     }
 
     /// S1-06: lets a test swap in a scripted `ModelPort` (`model::fake`, or
@@ -61,10 +64,15 @@ impl AppState {
     /// resolution `new` uses - the seam route tests need to drive real runs
     /// without an OpenRouter key.
     pub fn with_port(db: Db, port: Arc<dyn model::ModelPort>) -> Self {
-        Self::build(db, default_client_root(), port)
+        Self::build(db, default_client_root(), port, default_catalog())
     }
 
-    fn build(db: Db, client_root: String, port: Arc<dyn model::ModelPort>) -> Self {
+    fn build(
+        db: Db,
+        client_root: String,
+        port: Arc<dyn model::ModelPort>,
+        catalog: Arc<dyn Catalog>,
+    ) -> Self {
         let db = Arc::new(Mutex::new(db));
         let runs = Arc::new(runs::RunManager::new(Arc::clone(&db), port));
         let room_engine = rooms::RoomEngine::install(Arc::clone(&db), Arc::clone(&runs));
@@ -74,6 +82,7 @@ impl AppState {
             runs,
             room_engine,
             login_throttle: Arc::new(auth::LoginThrottle::new()),
+            catalog,
         }
     }
 
@@ -96,6 +105,12 @@ fn default_client_root() -> String {
 /// `new`/`with_client_root` build with - production never calls `with_port`.
 fn default_port() -> Arc<dyn model::ModelPort> {
     Arc::new(model::OpenRouterPort::new(model::KeySource::Env))
+}
+
+/// S2-06: empty fixture catalog for production (real catalog would come from env).
+/// Tests override this with their own fixture.
+fn default_catalog() -> Arc<dyn Catalog> {
+    Arc::new(model::FixtureCatalog::from_json("[]").unwrap())
 }
 
 /// Fallback for anything the API router didn't match: `/api/*` gets a plain

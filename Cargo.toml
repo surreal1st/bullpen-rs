@@ -12,6 +12,7 @@ shared = { path = "crates/shared" }
 store = { path = "crates/store" }
 model = { path = "crates/model" }
 
+async-trait = "0.1"
 axum = { version = "0.8", features = ["macros"] }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"

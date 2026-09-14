@@ -1,0 +1,62 @@
+[
+  {
+    "id": "anthropic/claude-sonnet-5",
+    "name": "Claude Sonnet 5",
+    "inPerM": 3.0,
+    "outPerM": 15.0,
+    "contextLength": 200000,
+    "supportsTools": true,
+    "supportsImages": true,
+    "supportsReasoning": false,
+    "providerCount": 2,
+    "supportsCaching": true
+  },
+  {
+    "id": "anthropic/claude-fable-5.1",
+    "name": "Claude Fable 5.1",
+    "inPerM": 1.5,
+    "outPerM": 6.0,
+    "contextLength": 100000,
+    "supportsTools": true,
+    "supportsImages": true,
+    "supportsReasoning": false,
+    "providerCount": 2,
+    "supportsCaching": true
+  },
+  {
+    "id": "google/gemini-2.5-flash-lite",
+    "name": "Gemini 2.5 Flash Lite",
+    "inPerM": 0.075,
+    "outPerM": 0.3,
+    "contextLength": 1000000,
+    "supportsTools": true,
+    "supportsImages": true,
+    "supportsReasoning": true,
+    "providerCount": 1,
+    "supportsCaching": true
+  },
+  {
+    "id": "openai/gpt-4o",
+    "name": "GPT-4o",
+    "inPerM": 5.0,
+    "outPerM": 15.0,
+    "contextLength": 128000,
+    "supportsTools": true,
+    "supportsImages": true,
+    "supportsReasoning": false,
+    "providerCount": 1,
+    "supportsCaching": false
+  },
+  {
+    "id": "x-ai/grok-build-0.1",
+    "name": "Grok Build 0.1",
+    "inPerM": 2.0,
+    "outPerM": 8.0,
+    "contextLength": 131072,
+    "supportsTools": true,
+    "supportsImages": false,
+    "supportsReasoning": false,
+    "providerCount": 1,
+    "supportsCaching": false
+  }
+]

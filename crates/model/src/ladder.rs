@@ -53,6 +53,14 @@ pub const DEFAULT_TIER1: Tier1Models = Tier1Models {
     vision: "google/gemini-3.8-flash",
 };
 
+/// The specialist models for each escalation kind, as owned strings (for HTTP responses).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Tier1ModelsResponse {
+    pub code: String,
+    pub reason: String,
+    pub vision: String,
+}
+
 /// What started the run: a user chat, a scheduled timer, a webhook, or a goal.
 /// Determines model floor and whether escalation is allowed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -239,4 +247,29 @@ pub fn tier_of(db: &Db, model: &str) -> u8 {
     // markers AND is the configured tier 2, so reading names first would call it
     // the top rung and make Fable unreachable from it.
     if looks_premium(model) { 3 } else { 0 }
+}
+
+/// Getter functions using TS naming convention (for routes).
+///
+/// These mirror the TS `getDefaultModel`, `getMidModel`, etc. from app.ts.
+
+pub fn get_default_model(db: &Db) -> String {
+    default_model(db)
+}
+
+pub fn get_mid_model(db: &Db) -> String {
+    mid_model(db)
+}
+
+pub fn get_premium_model(db: &Db) -> String {
+    premium_model(db)
+}
+
+/// All tier1 models in one call, for GET /api/tier1-models.
+pub fn tier1_models(db: &Db) -> Tier1ModelsResponse {
+    Tier1ModelsResponse {
+        code: tier1_model(db, EscalationKind::Code),
+        reason: tier1_model(db, EscalationKind::Reason),
+        vision: tier1_model(db, EscalationKind::Vision),
+    }
 }
