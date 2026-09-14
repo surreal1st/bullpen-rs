@@ -282,6 +282,15 @@
   color: var(--faint);
 }
 
+/* S2-F-08 (D2): holds "New group chat" and the settings gear (`.rail-
+   settings`, styled in `settings.css` beside the modal it opens) together
+   at the end of the row - see `rail.rs`'s doc comment on `on_settings`. */
+.rail-group-acts {
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+}
+
 .rail-new-room {
   border: 0;
   background: transparent;

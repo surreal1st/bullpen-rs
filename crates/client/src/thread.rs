@@ -13,7 +13,7 @@ use crate::bubble::Bubble;
 use crate::composer::Composer;
 use crate::message_time::{day_key, format_day, format_time, now_iso};
 use crate::model_chip::ModelChip;
-use crate::permissions_editor::PermissionsEditor;
+use crate::permissions_editor::PermissionsModal;
 use crate::questions::Questions;
 use crate::types::{Bot, Message, Role};
 use crate::working_bar::WorkingBar;
@@ -188,6 +188,12 @@ pub fn ChatPane(
         local_bot.set(bot.clone());
     });
 
+    // S2-F-08 (D1): the permissions grid used to sit inline under the
+    // header (`section.pane-perms`), eating the top half of the pane on
+    // every bot. It now opens over the thread instead, behind this button -
+    // see `permissions_editor.rs`'s `PermissionsModal`.
+    let mut perms_open = use_signal(|| false);
+
     rsx! {
         div { class: "pane",
             if let Some(current) = local_bot.read().clone() {
@@ -196,15 +202,23 @@ pub fn ChatPane(
                         b { "{bot_name}" }
                     }
                     div { class: "pane-head-meta",
+                        button {
+                            class: "pane-perms-btn",
+                            onclick: move |_| perms_open.set(true),
+                            "Permissions"
+                        }
                         ModelChip {
                             bot: current,
                             on_saved: move |updated: Bot| local_bot.set(Some(updated)),
                         }
                     }
                 }
-                section { class: "pane-perms",
-                    h4 { class: "stg-sub-h", "Permissions" }
-                    PermissionsEditor { bot_id: bot_id.clone() }
+            }
+            if *perms_open.read() {
+                PermissionsModal {
+                    bot_id: bot_id.clone(),
+                    bot_name: bot_name.clone(),
+                    on_close: move |_| perms_open.set(false),
                 }
             }
             if let Some(err) = load_error.read().clone() {

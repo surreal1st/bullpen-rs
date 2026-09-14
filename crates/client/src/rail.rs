@@ -20,6 +20,11 @@ pub fn Rail(
     on_select_room: EventHandler<RoomSummary>,
     on_new_room: EventHandler<()>,
     on_edit_room: EventHandler<RoomSummary>,
+    // S2-F-08 (D2): `app.rs`'s settings gear used to float as a
+    // `position: fixed` button over the composer's Send button (`shots/
+    // s2-settings.png` before this fix). It lives here now, beside "New
+    // group chat", so it never overlaps the thread.
+    on_settings: EventHandler<()>,
 ) -> Element {
     let section_ids: Vec<String> = sections.iter().map(|s| s.id.clone()).collect();
 
@@ -87,12 +92,21 @@ pub fn Rail(
             div { class: "roster",
                 div { class: "rail-group-head",
                     span { class: "rail-group-title", "Group chats" }
-                    button {
-                        class: "rail-new-room",
-                        title: "New group chat",
-                        "aria-label": "New group chat",
-                        onclick: move |_| on_new_room.call(()),
-                        "+"
+                    div { class: "rail-group-acts",
+                        button {
+                            class: "rail-new-room",
+                            title: "New group chat",
+                            "aria-label": "New group chat",
+                            onclick: move |_| on_new_room.call(()),
+                            "+"
+                        }
+                        button {
+                            class: "rail-settings",
+                            title: "Settings",
+                            "aria-label": "Settings",
+                            onclick: move |_| on_settings.call(()),
+                            "⚙"
+                        }
                     }
                 }
                 for (room , is_selected) in rooms {

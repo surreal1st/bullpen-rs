@@ -45,29 +45,52 @@
   gap: 0.6rem;
 }
 
-.pane-perms {
-  padding: 0.7rem 1.15rem;
-  border-bottom: 1px solid var(--line);
-}
-
-.settings-fab {
-  position: fixed;
-  right: 1rem;
-  bottom: 1rem;
-  width: 2.4rem;
-  height: 2.4rem;
-  border-radius: 999px;
+/* S2-F-08 (D1): the grid's own button in `.pane-head-meta`, beside the
+   model chip. Ghost-styled like `.picker-toggle`/`.stg-btn` rather than the
+   seam accent - opening the grid is not the urgent action in this header,
+   sending a message is. */
+.pane-perms-btn {
   border: 1px solid var(--line-strong);
-  background: var(--raised);
-  color: var(--ink);
-  font-size: 1.1rem;
+  background: transparent;
+  color: var(--ink-dim);
+  border-radius: 999px;
+  padding: 0.2rem 0.7rem;
+  font: inherit;
+  font-size: 0.78rem;
   cursor: pointer;
-  z-index: 30;
-  box-shadow: 0 8px 24px rgb(0 0 0 / 40%);
 }
 
-.settings-fab:hover {
+.pane-perms-btn:hover {
+  background: rgb(255 255 255 / 6%);
+  color: var(--ink);
+}
+
+/* The default `.modal` (420px, `rail.css`) is too narrow for a `perm-row`'s
+   label + three-way choice group to sit on one line. */
+.perms-modal {
+  width: min(40rem, calc(100vw - 2rem));
+}
+
+/* S2-F-08 (D2): was `.settings-fab`, `position: fixed; right/bottom: 1rem`
+   - that sat directly over the composer's Send button (`shots/
+   s2-settings.png` before this fix). Now a plain icon button inside
+   `rail.rs`'s `.rail-group-head`, beside "New group chat", so it never
+   overlaps the thread at all. */
+.rail-settings {
+  border: 0;
+  background: transparent;
+  color: var(--faint);
+  border-radius: var(--radius-sm);
+  width: 20px;
+  height: 20px;
+  line-height: 1;
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+
+.rail-settings:hover {
   background: var(--sel);
+  color: var(--ink);
 }
 
 /* --------------------------------------------------------------- .field */

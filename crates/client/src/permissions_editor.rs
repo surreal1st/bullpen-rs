@@ -2,9 +2,15 @@
 //! per tool, `GET`/`PUT /api/bots/:id/permissions`
 //! (`crates/server/src/routes/permissions.rs`, already built). In the TS
 //! original this lives inside `BotEditor.tsx`, which nothing in bullpen-rs
-//! has built yet - S2-09b mounts it directly under the thread header
-//! instead (see `thread.rs`'s doc comment on `PermissionsPanel` for why),
-//! a scoped placement decision rather than a port of BotEditor's own shell.
+//! has built yet.
+//!
+//! S2-09b mounted this directly under the thread header, which ate the top
+//! half of the pane on every bot (S2-F-08, finding D1 - `shots/
+//! s2-permissions.png` before this fix). `PermissionsModal` below is this
+//! ticket's placement instead: a "Permissions" button in `thread.rs`'s
+//! `pane-head` opens the grid in a modal over the thread, same `.modal*`
+//! shell `settings.rs`'s `SettingsModal` uses, so the thread itself is
+//! fully visible by default.
 
 use crate::api;
 use crate::types::MadeTool;
@@ -78,6 +84,43 @@ fn set_decision(
     spawn(async move {
         let _ = api::put_permissions(&bot_id, &next).await;
     });
+}
+
+/// The modal shell around `PermissionsEditor` - `thread.rs`'s "Permissions"
+/// button opens this over the thread rather than the grid sitting inline
+/// (S2-F-08's D1). Reuses `.modal-scrim`/`.modal`/`.modal-head`/`.modal-x`
+/// from `rail.css` (the same tokens `settings.rs`'s `SettingsModal` and
+/// `room_picker.rs` already share) plus a `.perms-modal` width override
+/// below, since the default `.modal` (420px) is too narrow for a
+/// `perm-row`'s label + three-way choice group to sit on one line.
+#[component]
+pub fn PermissionsModal(bot_id: String, bot_name: String, on_close: EventHandler<()>) -> Element {
+    rsx! {
+        div {
+            class: "modal-scrim",
+            role: "presentation",
+            onclick: move |_| on_close.call(()),
+            div {
+                class: "modal perms-modal",
+                onclick: move |evt| evt.stop_propagation(),
+                role: "dialog",
+                "aria-modal": "true",
+                "aria-label": "{bot_name} permissions",
+                div { class: "modal-head",
+                    h2 { "{bot_name} · Permissions" }
+                    button {
+                        class: "modal-x",
+                        "aria-label": "Close",
+                        onclick: move |_| on_close.call(()),
+                        "×"
+                    }
+                }
+                div { class: "modal-body",
+                    PermissionsEditor { bot_id: bot_id.clone() }
+                }
+            }
+        }
+    }
 }
 
 #[component]

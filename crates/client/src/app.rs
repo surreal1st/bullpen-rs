@@ -176,10 +176,11 @@ fn AppShell() -> Element {
     let mut rooms = use_signal(Vec::<RoomSummary>::new);
     let mut selected = use_signal::<Option<Selection>>(|| None);
     let mut picker = use_signal::<Option<PickerMode>>(|| None);
-    // S2-09b: the settings modal has no natural place in the roster/rail
-    // shape yet (no gear slot in `rail.rs`), so it floats as its own button
-    // rather than waiting on that placement decision - see `settings.rs`'s
-    // own doc comment for what it renders.
+    // S2-09b opened this from a floating `position: fixed` button, which sat
+    // directly over the composer's Send button (S2-F-08, D2). The trigger
+    // now lives in `rail.rs`'s `.rail-group-head` (`on_settings` below);
+    // this signal still just tracks whether the modal itself is open - see
+    // `settings.rs`'s own doc comment for what it renders.
     let mut settings_open = use_signal(|| false);
     // Bumped whenever a "roster" change lands while a ROOM is open, to
     // force that `ChatPane` to remount and re-fetch - ported from
@@ -272,6 +273,7 @@ fn AppShell() -> Element {
                         on_select_room: move |room: RoomSummary| selected.set(Some(Selection::Room(room))),
                         on_new_room: move |_| picker.set(Some(PickerMode::Create)),
                         on_edit_room: move |room: RoomSummary| picker.set(Some(PickerMode::Edit(room))),
+                        on_settings: move |_| settings_open.set(true),
                     }
                     if let Some(room) = selected_room {
                         ChatPane {
@@ -347,13 +349,6 @@ fn AppShell() -> Element {
     // ever reached through its gate) - see that component's own rsx!.
     rsx! {
         {body}
-        button {
-            class: "settings-fab",
-            title: "Settings",
-            "aria-label": "Settings",
-            onclick: move |_| settings_open.set(true),
-            "⚙"
-        }
         if *settings_open.read() {
             SettingsModal { on_close: move |_| settings_open.set(false) }
         }

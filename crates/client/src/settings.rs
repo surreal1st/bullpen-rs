@@ -13,6 +13,8 @@ use crate::model_chip::short_model;
 use crate::types::{CatalogEntry, RoutingState};
 use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
+use std::cell::Cell;
+use std::rc::Rc;
 
 #[component]
 pub fn SettingsModal(on_close: EventHandler<()>) -> Element {
@@ -250,7 +252,14 @@ fn ModelPickerField(value: String, on_change: EventHandler<String>) -> Element {
     let mut mainstream_total = use_signal(|| 0usize);
     let mut loading = use_signal(|| true);
     let mut load_error = use_signal(|| None::<String>);
-    let mut generation = use_signal(|| 0u32);
+    // B-F10 (`S2-R-standards.md`): a `Signal<u32>` here made this effect
+    // read `generation` and then write it in the same body, so writing it
+    // re-triggered the very effect doing the writing (a debounced keystroke
+    // fired every 180ms forever instead of once). A plain `Rc<Cell<u32>>`
+    // via `use_hook` holds the same "which fetch is still wanted" counter
+    // without being a reactive dependency at all - bumping it does not
+    // schedule a re-run, only `open`/`query`/`show_all` do.
+    let generation = use_hook(|| Rc::new(Cell::new(0u32)));
 
     use_effect(move || {
         if !*open.read() {
@@ -258,18 +267,19 @@ fn ModelPickerField(value: String, on_change: EventHandler<String>) -> Element {
         }
         let q = query.read().clone();
         let all = *show_all.read();
-        let my_gen = *generation.read() + 1;
+        let my_gen = generation.get() + 1;
         generation.set(my_gen);
         loading.set(true);
         load_error.set(None);
+        let generation = generation.clone();
         spawn(async move {
             TimeoutFuture::new(180).await;
-            if *generation.read() != my_gen {
+            if generation.get() != my_gen {
                 return;
             }
             match api::fetch_models(&q, all).await {
                 Ok(body) => {
-                    if *generation.read() != my_gen {
+                    if generation.get() != my_gen {
                         return;
                     }
                     models.set(body.models);
@@ -278,7 +288,7 @@ fn ModelPickerField(value: String, on_change: EventHandler<String>) -> Element {
                     loading.set(false);
                 }
                 Err(err) => {
-                    if *generation.read() != my_gen {
+                    if generation.get() != my_gen {
                         return;
                     }
                     load_error.set(Some(err));
