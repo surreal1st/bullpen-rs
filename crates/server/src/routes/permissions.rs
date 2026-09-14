@@ -10,22 +10,17 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::parse_body;
-use crate::{permissions::Permissions, AppState};
+use crate::{AppState, permissions::Permissions};
 
 pub fn router() -> Router<AppState> {
-    Router::new()
-        .route(
-            "/api/bots/{id}/permissions",
-            get(get_permissions).put(set_permissions),
-        )
+    Router::new().route(
+        "/api/bots/{id}/permissions",
+        get(get_permissions).put(set_permissions),
+    )
 }
 
 fn no_such_bot() -> Response {
-    (
-        StatusCode::NOT_FOUND,
-        Json(json!({"error": "no such bot"})),
-    )
-        .into_response()
+    (StatusCode::NOT_FOUND, Json(json!({"error": "no such bot"}))).into_response()
 }
 
 async fn get_permissions(

@@ -158,15 +158,24 @@ fn test_first_line_strips_paired_emphasis_and_preserves_bare_underscores() {
     assert_eq!(first_line("*italic* text"), "italic text");
 
     // Test: bare underscore in repo_read should be preserved
-    assert_eq!(first_line("Ran repo_read on the checkout"), "Ran repo_read on the checkout");
+    assert_eq!(
+        first_line("Ran repo_read on the checkout"),
+        "Ran repo_read on the checkout"
+    );
 
     // Test: # with space should be stripped but #1 without space should be kept
     assert_eq!(first_line("# Heading text"), "Heading text");
     assert_eq!(first_line("#1 on the list"), "#1 on the list");
 
     // Test: complex case with mixed emphasis and bare underscores
-    assert_eq!(first_line("Fixed **task_name** in *module_code*"), "Fixed task_name in module_code");
+    assert_eq!(
+        first_line("Fixed **task_name** in *module_code*"),
+        "Fixed task_name in module_code"
+    );
 
     // Test: multiple paired emphasis
-    assert_eq!(first_line("This is **bold** and *italic* text"), "This is bold and italic text");
+    assert_eq!(
+        first_line("This is **bold** and *italic* text"),
+        "This is bold and italic text"
+    );
 }

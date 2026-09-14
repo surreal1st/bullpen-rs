@@ -1,9 +1,8 @@
-use model::ladder::{
-    EscalationKind, Trigger, looks_premium, may_escalate, mid_model,
-    model_for_run, premium_model, safe_fallback, set_default_model, set_mid_model,
-    set_premium_model, tier1_model, tier_of,
-};
 use model::CHEAP_DEFAULT_MODEL;
+use model::ladder::{
+    EscalationKind, Trigger, looks_premium, may_escalate, mid_model, model_for_run, premium_model,
+    safe_fallback, set_default_model, set_mid_model, set_premium_model, tier_of, tier1_model,
+};
 use store::Db;
 
 fn open_db() -> Db {

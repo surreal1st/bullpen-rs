@@ -79,7 +79,9 @@ fn memory_log_facts(db: &Arc<Mutex<Db>>, bot_id: &str) -> Vec<String> {
     let db = db.lock().expect("db mutex poisoned");
     let mut stmt = db
         .conn()
-        .prepare("SELECT content FROM memory_log WHERE bot_id = ?1 ORDER BY created_at ASC, rowid ASC")
+        .prepare(
+            "SELECT content FROM memory_log WHERE bot_id = ?1 ORDER BY created_at ASC, rowid ASC",
+        )
         .expect("prepare memory_log query");
     stmt.query_map(rusqlite::params![bot_id], |row| row.get(0))
         .expect("query memory_log")

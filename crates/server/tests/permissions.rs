@@ -2,13 +2,13 @@
 //! `projects/bullpen-night/test/permissions-by-trigger.test.ts` plus
 //! HTTP route round-trip tests.
 
+use axum::Router;
 use axum::body::Body;
 use axum::http::Request;
-use axum::Router;
+use serde_json::{Value, json};
 use server::AppState;
-use serde_json::{json, Value};
-use tower::ServiceExt;
 use store::Db;
+use tower::ServiceExt;
 
 mod common;
 use common::seed_session;
@@ -32,11 +32,7 @@ fn app_for(db: Db) -> Router {
 }
 
 // Helpers for making requests
-async fn get_permissions_route(
-    app: &Router,
-    bot_id: &str,
-    session: &str,
-) -> (u16, Value) {
+async fn get_permissions_route(app: &Router, bot_id: &str, session: &str) -> (u16, Value) {
     let request = Request::get(&format!("/api/bots/{}/permissions", bot_id))
         .header("cookie", session)
         .body(Body::empty())
@@ -121,7 +117,8 @@ async fn put_then_get_round_trips() {
         "remember": "deny",
     });
 
-    let (_status, _body) = put_permissions_route(&app, "test-bot", &session, overrides.clone()).await;
+    let (_status, _body) =
+        put_permissions_route(&app, "test-bot", &session, overrides.clone()).await;
 
     // Get should return the overrides
     let (_status, body) = get_permissions_route(&app, "test-bot", &session).await;
@@ -129,10 +126,7 @@ async fn put_then_get_round_trips() {
 
     assert_eq!(perms.get("click").and_then(|v| v.as_str()), Some("ask"));
     assert_eq!(perms.get("shell").and_then(|v| v.as_str()), Some("allow"));
-    assert_eq!(
-        perms.get("remember").and_then(|v| v.as_str()),
-        Some("deny")
-    );
+    assert_eq!(perms.get("remember").and_then(|v| v.as_str()), Some("deny"));
 }
 
 #[test]
@@ -149,8 +143,14 @@ fn stored_override_beats_default() {
 
     // Direct check via the function
     let perms = server::permissions::get_permissions(&db, "test-bot").unwrap();
-    assert_eq!(perms.get("click").copied(), Some(server::permissions::Decision::Ask));
-    assert_eq!(perms.get("shell").copied(), Some(server::permissions::Decision::Ask)); // default
+    assert_eq!(
+        perms.get("click").copied(),
+        Some(server::permissions::Decision::Ask)
+    );
+    assert_eq!(
+        perms.get("shell").copied(),
+        Some(server::permissions::Decision::Ask)
+    ); // default
 }
 
 #[tokio::test]
@@ -161,13 +161,17 @@ async fn routine_tightens_click_to_ask_when_stored_allow() {
     // Override click to "allow" (it defaults to "allow" anyway)
     let perms = server::permissions::Permissions::from_iter(vec![
         ("click".to_string(), server::permissions::Decision::Allow),
-        ("fetch_url".to_string(), server::permissions::Decision::Allow),
+        (
+            "fetch_url".to_string(),
+            server::permissions::Decision::Allow,
+        ),
     ]);
     server::permissions::set_permissions(&db, "test-bot", &perms).unwrap();
 
     // Chat trigger should keep click as "allow"
     let chat_perms =
-        server::permissions::permissions_for_run(&db, "test-bot", model::ladder::Trigger::Chat).unwrap();
+        server::permissions::permissions_for_run(&db, "test-bot", model::ladder::Trigger::Chat)
+            .unwrap();
     assert_eq!(
         chat_perms.get("click").copied(),
         Some(server::permissions::Decision::Allow)
@@ -203,7 +207,8 @@ async fn goal_trigger_tightens_like_routine() {
 
     // Goal trigger should tighten, same as routine
     let goal_perms =
-        server::permissions::permissions_for_run(&db, "test-bot", model::ladder::Trigger::Goal).unwrap();
+        server::permissions::permissions_for_run(&db, "test-bot", model::ladder::Trigger::Goal)
+            .unwrap();
     assert_eq!(
         goal_perms.get("click").copied(),
         Some(server::permissions::Decision::Ask)
@@ -222,12 +227,9 @@ async fn webhook_trigger_tightens() {
     server::permissions::set_permissions(&db, "test-bot", &perms).unwrap();
 
     // Webhook trigger should tighten
-    let webhook_perms = server::permissions::permissions_for_run(
-        &db,
-        "test-bot",
-        model::ladder::Trigger::Webhook,
-    )
-    .unwrap();
+    let webhook_perms =
+        server::permissions::permissions_for_run(&db, "test-bot", model::ladder::Trigger::Webhook)
+            .unwrap();
     assert_eq!(
         webhook_perms.get("click").copied(),
         Some(server::permissions::Decision::Ask)
@@ -271,7 +273,10 @@ async fn harmless_tools_stay_allowed_on_routine() {
 
     // Set some harmless tools to allow
     let perms = server::permissions::Permissions::from_iter(vec![
-        ("fetch_url".to_string(), server::permissions::Decision::Allow),
+        (
+            "fetch_url".to_string(),
+            server::permissions::Decision::Allow,
+        ),
         ("remember".to_string(), server::permissions::Decision::Allow),
         ("add_task".to_string(), server::permissions::Decision::Allow),
     ]);
@@ -306,11 +311,8 @@ fn propose_tool_always_ask_even_if_allow() {
     assert_eq!(decision, server::permissions::Decision::Ask);
 
     // But deny stays deny
-    let decision = server::permissions::decide_call(
-        server::permissions::Decision::Deny,
-        "propose_tool",
-        "{}",
-    );
+    let decision =
+        server::permissions::decide_call(server::permissions::Decision::Deny, "propose_tool", "{}");
     assert_eq!(decision, server::permissions::Decision::Deny);
 }
 
@@ -345,18 +347,12 @@ fn ask_josh_without_wait_returns_allow() {
     );
     assert_eq!(decision, server::permissions::Decision::Allow);
 
-    let decision = server::permissions::decide_call(
-        server::permissions::Decision::Allow,
-        "ask_josh",
-        "{}",
-    );
+    let decision =
+        server::permissions::decide_call(server::permissions::Decision::Allow, "ask_josh", "{}");
     assert_eq!(decision, server::permissions::Decision::Allow);
 
-    let decision = server::permissions::decide_call(
-        server::permissions::Decision::Allow,
-        "ask_josh",
-        "",
-    );
+    let decision =
+        server::permissions::decide_call(server::permissions::Decision::Allow, "ask_josh", "");
     assert_eq!(decision, server::permissions::Decision::Allow);
 }
 

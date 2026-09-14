@@ -234,9 +234,14 @@ async fn stream_that_never_yields_emits_idle_error() {
     // A stream that never yields - futures::stream::pending() never produces a value
     let body = futures::stream::pending::<Result<Vec<u8>, String>>();
     let start = Instant::now();
-    let events = parse_sse_stream(body, "test/model".to_string(), None, Some(std::time::Duration::from_millis(200)))
-        .collect::<Vec<_>>()
-        .await;
+    let events = parse_sse_stream(
+        body,
+        "test/model".to_string(),
+        None,
+        Some(std::time::Duration::from_millis(200)),
+    )
+    .collect::<Vec<_>>()
+    .await;
     let elapsed = start.elapsed();
 
     // Should have exactly one error event about provider going silent

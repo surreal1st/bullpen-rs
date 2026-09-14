@@ -719,7 +719,7 @@ async fn message_bot_by_title_posts_under_the_callers_name_and_wakes_the_round()
             usage: None,
         }], // arthur's own run: asks the Growth room by title
         text_script("ok"), // arthur's own final answer, then riley's and
-                            // jason's room legs - all the same reply text.
+                           // jason's room legs - all the same reply text.
     ]));
     let app = app_for(db, Arc::clone(&port) as Arc<dyn ModelPort>);
 
@@ -740,7 +740,10 @@ async fn message_bot_by_title_posts_under_the_callers_name_and_wakes_the_round()
     let mut posted_bot_id: Option<Value> = None;
     for _ in 0..300 {
         let messages = conversation_messages(&app, "riley", &room_id, &cookie).await;
-        if let Some(m) = messages.iter().find(|m| m["content"] == "check the numbers") {
+        if let Some(m) = messages
+            .iter()
+            .find(|m| m["content"] == "check the numbers")
+        {
             posted_bot_id = Some(m["botId"].clone());
             break;
         }
@@ -785,8 +788,8 @@ async fn message_bot_floors_the_delegated_call_during_a_room_round() {
             usage: None,
         }], // arthur's room leg, step 1: asks Jason (a NON-member)
         text_script("Looks fine."), // the delegated call to Jason, arthur's
-                                     // own final answer, and riley's own
-                                     // room leg all reuse this same reply.
+                                    // own final answer, and riley's own
+                                    // room leg all reuse this same reply.
     ]));
     let app = app_for(db, Arc::clone(&port) as Arc<dyn ModelPort>);
 

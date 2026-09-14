@@ -561,11 +561,7 @@ pub fn decide(db: &store::Db, bot_id: &str, tool_name: &str) -> Result<Decision,
 /// that needed a decision would be unable to ask for one and would go back to
 /// guessing - which is the entire failure this closes. Being asked a question is
 /// not a privilege that needs revoking.
-pub fn decide_call(
-    base: Decision,
-    tool_name: &str,
-    args: &str,
-) -> Decision {
+pub fn decide_call(base: Decision, tool_name: &str, args: &str) -> Decision {
     // 🔴 W5: `propose_tool` can be turned OFF and cannot be turned to "always".
     //
     // The approval IS the mechanism - approving the call is what moves the source

@@ -47,8 +47,10 @@ fn test_default_shape_for_uses_utf16_hash_like_ts() {
 
     // Verify it's one of the valid shapes
     assert!(
-        ["circle", "square", "diamond", "hexagon", "star", "triangle", "leaf", "chip"]
-            .contains(&shape1),
+        [
+            "circle", "square", "diamond", "hexagon", "star", "triangle", "leaf", "chip"
+        ]
+        .contains(&shape1),
         "emoji bot should hash to a valid shape, got: {}",
         shape1
     );
