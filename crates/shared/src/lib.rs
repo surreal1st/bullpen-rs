@@ -2,6 +2,7 @@
 
 pub mod faces;
 pub mod nothing_new;
+pub mod working;
 
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;

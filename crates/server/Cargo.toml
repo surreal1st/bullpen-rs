@@ -14,6 +14,9 @@ path = "src/main.rs"
 shared = { workspace = true }
 store = { workspace = true }
 model = { workspace = true }
+# S1-05: `runs.rs` writes the `runs` row with raw SQL against `Db::conn()`,
+# same as `store` itself does - no query API for that table exists yet.
+rusqlite = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
@@ -35,5 +38,9 @@ tracing-subscriber = { workspace = true }
 # seeding a session row directly for the auth tests.
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
-rusqlite = { workspace = true }
 tempfile = "3"
+# S1-05: `model::fake::FakePort` for the run-manager tests. `fake` is behind
+# a feature because it is only `cfg(test)` inside the `model` crate itself;
+# an integration test in `tests/` compiles `model` as an ordinary
+# dependency, so this crate has to ask for the feature explicitly.
+model = { workspace = true, features = ["fake"] }

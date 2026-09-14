@@ -2,8 +2,11 @@
 //! test drives it through `tower::ServiceExt::oneshot`.
 
 mod auth;
+pub mod changes;
 pub mod prompt;
 mod routes;
+pub mod runs;
+mod tools;
 
 use axum::extract::{Request, State};
 use axum::response::{IntoResponse, Response};
