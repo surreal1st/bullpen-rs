@@ -27,6 +27,8 @@ pub struct Approval {
     pub tool_args: String,
     pub created_at: String,
     pub trigger: Option<String>,
+    pub judge_verdict: Option<String>,
+    pub judge_reason: Option<String>,
 }
 
 impl Groupable for Approval {
@@ -56,6 +58,7 @@ pub struct PendingCall {
 
 /// Inserts a pending approval for one gated tool call. Returns the new
 /// row's id.
+#[allow(clippy::too_many_arguments)]
 pub fn insert_pending(
     db: &Db,
     run_id: &str,
@@ -63,12 +66,14 @@ pub fn insert_pending(
     tool_name: &str,
     tool_args: &str,
     call_id: &str,
+    judge_verdict: Option<&str>,
+    judge_reason: Option<&str>,
 ) -> Result<String, rusqlite::Error> {
     let id = uuid::Uuid::new_v4().to_string();
     db.conn().execute(
-        "INSERT INTO approvals (id, run_id, bot_id, tool_name, tool_args, call_id, status, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7)",
-        rusqlite::params![id, run_id, bot_id, tool_name, tool_args, call_id, now_iso()],
+        "INSERT INTO approvals (id, run_id, bot_id, tool_name, tool_args, call_id, status, judge_verdict, judge_reason, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7, ?8, ?9)",
+        rusqlite::params![id, run_id, bot_id, tool_name, tool_args, call_id, judge_verdict, judge_reason, now_iso()],
     )?;
     Ok(id)
 }
@@ -77,7 +82,7 @@ pub fn insert_pending(
 /// (`runs.ts:829-843`), minus the multi-user `scope` filter - S2 has none.
 pub fn list_pending(db: &Db) -> Result<Vec<Approval>, rusqlite::Error> {
     let mut stmt = db.conn().prepare(
-        "SELECT a.id, a.run_id, a.bot_id, b.name, a.tool_name, a.tool_args, a.created_at, r.trigger
+        "SELECT a.id, a.run_id, a.bot_id, b.name, a.tool_name, a.tool_args, a.created_at, r.trigger, a.judge_verdict, a.judge_reason
            FROM approvals a
            JOIN bots b ON b.id = a.bot_id
            LEFT JOIN runs r ON r.id = a.run_id
@@ -94,6 +99,8 @@ pub fn list_pending(db: &Db) -> Result<Vec<Approval>, rusqlite::Error> {
             tool_args: row.get(5)?,
             created_at: row.get(6)?,
             trigger: row.get(7)?,
+            judge_verdict: row.get(8)?,
+            judge_reason: row.get(9)?,
         })
     })?;
     rows.collect()

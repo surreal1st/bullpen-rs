@@ -418,4 +418,21 @@ pub const MIGRATIONS: &[&str] = &[
     r#"
   CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_name ON projects(lower(name));
   "#,
+    // 20. S4-01: auto_review_log + judge columns on approvals
+    r#"
+  CREATE TABLE auto_review_log (
+    id          TEXT PRIMARY KEY,
+    bot_id      TEXT NOT NULL,
+    run_id      TEXT NOT NULL,
+    tool_name   TEXT NOT NULL,
+    description TEXT NOT NULL,
+    verdict     TEXT NOT NULL,
+    reason      TEXT NOT NULL,
+    decision    TEXT NOT NULL,
+    created_at  TEXT NOT NULL
+  );
+
+  ALTER TABLE approvals ADD COLUMN judge_verdict TEXT;
+  ALTER TABLE approvals ADD COLUMN judge_reason TEXT;
+  "#,
 ];

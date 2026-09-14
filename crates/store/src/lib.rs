@@ -2,6 +2,7 @@
 //! migrations 1..16 are equivalent, every self-creating table/column is here.
 
 pub mod auth;
+pub mod auto_review;
 pub mod bots;
 pub mod conversations;
 pub mod memory;

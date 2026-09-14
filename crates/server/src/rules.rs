@@ -365,8 +365,8 @@ fn describe_call_uncapped(tool_name: &str, args: &str) -> String {
 /// tool arguments verbatim. Open and close are distinct strings so a
 /// description that happens to contain the open marker cannot look like a
 /// close.
-const PENDING_ACTION_OPEN: &str = "<<<PENDING_ACTION_DATA>>>";
-const PENDING_ACTION_CLOSE: &str = "<<<END_PENDING_ACTION_DATA>>>";
+pub(crate) const PENDING_ACTION_OPEN: &str = "<<<PENDING_ACTION_DATA>>>";
+pub(crate) const PENDING_ACTION_CLOSE: &str = "<<<END_PENDING_ACTION_DATA>>>";
 
 /// Asks the cheap default model which of a bot's rules describe the
 /// pending call. A UTILITY call - `model`'s own words - so it goes through
