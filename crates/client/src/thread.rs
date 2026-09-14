@@ -8,9 +8,11 @@
 //! composer that triggers it.
 
 use crate::api;
+use crate::approvals::Approvals;
 use crate::bubble::Bubble;
 use crate::composer::Composer;
 use crate::message_time::{day_key, format_day, format_time, now_iso};
+use crate::questions::Questions;
 use crate::types::{Message, Role};
 use crate::working_bar::WorkingBar;
 use dioxus::prelude::*;
@@ -175,6 +177,14 @@ pub fn ChatPane(
                 conversation_id,
                 section_ids: section_ids.clone(),
             }
+            // A paused run is the most urgent thing on screen - never folded
+            // into a popover, and just above the composer, same placement
+            // `App.tsx:1278-1300` gives it ("that is where every editor puts
+            // the thing asking for a decision"). Approvals before questions:
+            // "the blocking thing goes first" - an approval is a run frozen
+            // waiting for Josh, a question is not.
+            Approvals {}
+            Questions { bot_id: bot_id.clone(), bot_name: bot_name.clone() }
             Composer { bot_name: bot_name.clone(), disabled: *sending.read(), on_send }
         }
     }

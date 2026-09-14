@@ -445,3 +445,245 @@
   overflow-wrap: anywhere;
   color: #f0b3a0;
 }
+
+/* S2-09a: `.approval*`/`.approvals`/`.question` ported from
+   `projects/bullpen-night/src/client/shell.css` (`.approvals` etc.
+   1113-1265, `.approval.is-question` etc. 4326-4424) for `approvals.rs`
+   and `questions.rs`. One deviation: `.approval-dismiss` uses `var(--muted)`
+   in place of the original's `var(--dim)` - that variable is never defined
+   anywhere in the TS original's own CSS either (grepped, no `--dim:`
+   declaration exists), so it was already falling back to `unset` there;
+   `--muted` is this port's nearest real token instead of carrying the same
+   gap forward. */
+
+.approvals {
+  max-width: 50%;
+  min-width: 22rem;
+  /* Centred over the composer rather than hugging the left edge - a thing
+     asking for a decision, not another message in the column. */
+  margin-inline: auto;
+}
+
+.approvals h3 {
+  text-align: center;
+}
+
+/* One header row, a single-line command, and buttons sized like buttons
+   rather than like a dialog - every line it takes is a line of
+   conversation pushed off screen. */
+.approval {
+  border: 1px solid #4a3f21;
+  background: #201c12;
+  border-radius: 9px;
+  padding: 0.4rem 0.55rem;
+  margin-bottom: 0.35rem;
+}
+
+.approval-top {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+  min-width: 0;
+}
+
+.approval-tool {
+  color: #f0c674;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 0.75rem;
+  flex: none;
+}
+
+/* One line by default. A command long enough to wrap four times is a
+   command worth opening the conversation for, and this is not the place to
+   read it. */
+.approval-args {
+  margin: 0.25rem 0 0;
+  padding: 0.25rem 0.4rem;
+  border-radius: 6px;
+  background: #16130c;
+  color: #e8dcc0;
+  font-size: 0.72rem;
+  line-height: 1.35;
+  white-space: pre;
+  overflow-x: auto;
+  overflow-y: hidden;
+  max-height: 2.4rem;
+}
+
+/* Right-aligned and content-sized. A button should be the size of its own
+   label. */
+.approval-acts {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.35rem;
+  margin-top: 0.4rem;
+}
+
+.approval-acts button {
+  flex: none;
+  min-width: 5.5rem;
+  border: 1px solid var(--line);
+  background: #1a222c;
+  color: var(--ink);
+  border-radius: 7px;
+  padding: 0.22rem 0.6rem;
+  font: inherit;
+  font-size: 0.76rem;
+  cursor: pointer;
+}
+
+.approval-acts button.ok {
+  background: #1f6b48;
+  border-color: #2a8259;
+  color: #ddf7ea;
+  font-weight: 600;
+}
+
+.approval-acts button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* "Always allow" / "Never": a standing decision for the TOOL, not a one-off
+   verdict on this call, so they read as quieter and smaller than Approve
+   and Reject rather than a third equally-weighted pair of choices. */
+.approval-acts button.approval-remember {
+  min-width: 0;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+  padding: 0.22rem 0.4rem;
+  font-size: 0.68rem;
+}
+
+.approval-acts button.approval-remember:hover:not(:disabled) {
+  color: var(--ink);
+  text-decoration: underline;
+}
+
+/* How many identical requests this card stands for. A routine that fires
+   every 30 minutes asks the same thing every time. */
+.approval-count {
+  flex: none;
+  font-size: 0.7rem;
+  color: #f0c674;
+  border: 1px solid #4a3f21;
+  border-radius: 5px;
+  padding: 0 0.25rem;
+}
+
+/* Where the request came from. Quiet, and last in the row so it is the
+   first thing to be truncated when the window is narrow. */
+.approval-cause {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.72rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+/* A question is a colleague asking which way to go, not a command about to
+   run - cool and quiet rather than the amber "something is about to happen
+   to your machine" ground. */
+.approval.is-question {
+  border-color: var(--line);
+  background: #161b22;
+}
+
+.approval-question {
+  margin: 0.3rem 0 0.1rem;
+  font-size: 0.86rem;
+  line-height: 1.4;
+  color: var(--ink);
+}
+
+.approval-answer {
+  margin-top: 0.4rem;
+}
+
+/* Wraps rather than scrolls: four options on a phone is two rows, and an
+   option pushed off the right edge is an answer he cannot give. */
+.approval-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin-bottom: 0.35rem;
+}
+
+.approval-options button {
+  flex: none;
+  border: 1px solid #2a8259;
+  background: #1f6b48;
+  color: #ddf7ea;
+  border-radius: 7px;
+  padding: 0.24rem 0.7rem;
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.approval-options button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.approval-typed {
+  display: flex;
+  gap: 0.3rem;
+}
+
+.approval-typed input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--line);
+  background: #16130c;
+  color: var(--ink);
+  border-radius: 7px;
+  padding: 0.24rem 0.5rem;
+  font: inherit;
+  font-size: 0.78rem;
+}
+
+.approval-typed button {
+  flex: none;
+  border: 1px solid var(--line);
+  background: #1a222c;
+  color: var(--ink);
+  border-radius: 7px;
+  padding: 0.24rem 0.7rem;
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.approval-typed button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Quiet, because skipping is the rare choice and should not compete with
+   answering. */
+.approval-dismiss {
+  margin-top: 0.3rem;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.72rem;
+  padding: 0.1rem 0;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.approval-dismiss:disabled {
+  opacity: 0.5;
+  cursor: default;
+}

@@ -1,12 +1,14 @@
 //! Dioxus client. Web by default; desktop and mobile behind features.
 mod api;
 mod app;
+mod approvals;
 mod avatar;
 mod bubble;
 mod composer;
 mod events;
 mod markdown;
 mod message_time;
+mod questions;
 mod rail;
 mod room_picker;
 mod thread;

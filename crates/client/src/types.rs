@@ -152,6 +152,58 @@ pub struct WorkingResponse {
     pub working: Vec<WorkingBot>,
 }
 
+/// One pending approval: a run parked mid-step on a gated tool call.
+/// `GET /api/approvals`'s row shape (`crates/server/src/routes/approvals.rs`'s
+/// `ApprovalView`), a strict subset of `PendingApproval` in
+/// `shared/types.ts` - no `routineName` field, since bullpen-rs's `trigger`
+/// column is a bare kind ("chat"/"routine"/"webhook"/"goal") and nothing in
+/// this port has routines of their own yet (see `approvals.rs`'s `cause_of`).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingApproval {
+    pub id: String,
+    pub run_id: String,
+    pub bot_id: String,
+    pub bot_name: String,
+    pub tool_name: String,
+    pub tool_args: String,
+    pub created_at: String,
+    #[serde(default)]
+    pub trigger: Option<String>,
+}
+
+/// `GET /api/approvals`'s response shape.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ApprovalsResponse {
+    #[serde(default)]
+    pub approvals: Vec<PendingApproval>,
+}
+
+/// One open question a bot asked without parking its run
+/// (`ask_josh { wait: false }`, S2-08's default). `GET /api/questions`'s row
+/// shape (`crates/server/src/routes/questions.rs`) - no `botName`: that
+/// route never sends one, so `questions.rs`'s pane renders the name its
+/// caller already knows (the open conversation's own bot) instead of a
+/// second copy of it.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenQuestion {
+    pub id: String,
+    pub bot_id: String,
+    pub conversation_id: String,
+    pub question: String,
+    #[serde(default)]
+    pub options: Vec<String>,
+    pub asked_at: String,
+}
+
+/// `GET /api/questions`'s response shape.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct QuestionsResponse {
+    #[serde(default)]
+    pub questions: Vec<OpenQuestion>,
+}
+
 /// `GET /api/auth/status`'s response shape - the gate's first question on
 /// every boot (`app.rs`, ported from `Gate.tsx:67-77`). `role` is not
 /// carried: this client has no member-vs-owner distinction yet (S5b's

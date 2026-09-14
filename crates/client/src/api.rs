@@ -4,8 +4,8 @@
 //! `:1424-1449` (`readSse`).
 
 use crate::types::{
-    AuthStatus, ConversationView, RoomResponse, RoomSummary, RoomsResponse, WorkingBot,
-    WorkingResponse,
+    ApprovalsResponse, AuthStatus, ConversationView, OpenQuestion, PendingApproval,
+    QuestionsResponse, RoomResponse, RoomSummary, RoomsResponse, WorkingBot, WorkingResponse,
 };
 use gloo_net::http::{Request, Response};
 use serde::{Deserialize, Serialize};
@@ -222,6 +222,104 @@ pub async fn mark_bot_seen(bot_id: &str) -> Result<(), String> {
 pub async fn mark_room_seen(room_id: &str) -> Result<(), String> {
     let url = format!("/api/rooms/{room_id}/seen");
     let resp = Request::post(&url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("{url} -> {}", resp.status()));
+    }
+    Ok(())
+}
+
+/// `GET /api/approvals` - every pending approval, across every bot.
+/// `approvals.rs`'s pane groups these itself
+/// (`shared::approval_groups::group_approvals`); this is the flat list, same
+/// as the server route answers. Ported from `Approvals.tsx`'s `useApprovals`.
+pub async fn fetch_approvals() -> Result<Vec<PendingApproval>, String> {
+    let resp = Request::get("/api/approvals")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("/api/approvals -> {}", resp.status()));
+    }
+    let body = resp
+        .json::<ApprovalsResponse>()
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(body.approvals)
+}
+
+#[derive(Serialize)]
+struct DecideBody<'a> {
+    approved: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remember: Option<&'a str>,
+}
+
+/// `POST /api/approvals/:id` - decides one pending call. `result` carries a
+/// question's typed/picked answer (`crates/server/src/routes/approvals.rs`
+/// does not read it yet - `ask_josh` is `allow` by default, S2-02, so it
+/// never actually reaches this pane in S2 - sent anyway so the field is
+/// already in place once a bot's default is ever tightened to `ask`).
+/// `remember` is the "Always allow"/"Never" press; S2-07 (blocked on S2-03)
+/// owns turning it into an auto-review rule, so today the server accepts and
+/// ignores it, same as `approved` alone would decide the call.
+pub async fn decide_approval(
+    id: &str,
+    approved: bool,
+    result: Option<&str>,
+    remember: Option<&str>,
+) -> Result<(), String> {
+    let url = format!("/api/approvals/{id}");
+    let resp = Request::post(&url)
+        .json(&DecideBody {
+            approved,
+            result,
+            remember,
+        })
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("{url} -> {}", resp.status()));
+    }
+    Ok(())
+}
+
+/// `GET /api/questions` - every open question, across every bot.
+/// `questions.rs`'s pane filters this to the open conversation's bot itself,
+/// same as the TS `Questions` component's own `mine` filter.
+pub async fn fetch_questions() -> Result<Vec<OpenQuestion>, String> {
+    let resp = Request::get("/api/questions")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("/api/questions -> {}", resp.status()));
+    }
+    let body = resp
+        .json::<QuestionsResponse>()
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(body.questions)
+}
+
+#[derive(Serialize)]
+struct AnswerBody<'a> {
+    answer: &'a str,
+}
+
+/// `POST /api/questions/:id` - records Josh's answer; the server posts it
+/// into the conversation as an ordinary message on success (204).
+pub async fn answer_question(id: &str, answer: &str) -> Result<(), String> {
+    let url = format!("/api/questions/{id}");
+    let resp = Request::post(&url)
+        .json(&AnswerBody { answer })
+        .map_err(|e| e.to_string())?
         .send()
         .await
         .map_err(|e| e.to_string())?;
