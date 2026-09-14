@@ -48,6 +48,8 @@ struct ApprovalView {
     tool_args: String,
     created_at: String,
     trigger: Option<String>,
+    judge_verdict: Option<String>,
+    judge_reason: Option<String>,
 }
 
 impl From<crate::approvals::Approval> for ApprovalView {
@@ -61,6 +63,8 @@ impl From<crate::approvals::Approval> for ApprovalView {
             tool_args: a.tool_args,
             created_at: a.created_at,
             trigger: a.trigger,
+            judge_verdict: a.judge_verdict,
+            judge_reason: a.judge_reason,
         }
     }
 }

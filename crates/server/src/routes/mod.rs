@@ -8,6 +8,7 @@
 
 mod approvals;
 mod auth;
+mod auto_review;
 mod bots;
 mod conversations;
 mod events;
@@ -42,6 +43,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/bots/{id}/unseen", post(mark_bot_unseen))
         .merge(approvals::router())
         .merge(auth::router())
+        .merge(auto_review::router())
         .merge(bots::router())
         .merge(conversations::router())
         .merge(permissions::router())
