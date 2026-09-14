@@ -23,7 +23,7 @@ fn seed_bot(db: &Db, id: &str) {
 
 /// Test 1: Fixture opens at migration 19.
 #[test]
-fn fixture_opens_at_migration_18() {
+fn fixture_opens_at_migration_20() {
     let temp = copy_fixture_to_temp();
     let db = Db::open(temp.to_str().expect("temp path is valid UTF-8"))
         .expect("Db::open the fixture copy");
@@ -33,7 +33,7 @@ fn fixture_opens_at_migration_18() {
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("read user_version");
 
-    assert_eq!(version, 19, "user_version must be 19 after open");
+    assert_eq!(version, 20, "user_version must be 20 after open");
 
     drop(db);
     let _ = fs::remove_file(&temp);
