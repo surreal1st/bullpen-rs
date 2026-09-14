@@ -16,7 +16,6 @@ use serde::{Deserialize, Serialize};
 ///
 /// So the two live in different places on purpose, and the model rule is
 /// enforced centrally rather than at each call site.
-
 const PREMIUM_KEY: &str = "models.premium";
 const DEFAULT_KEY: &str = "models.default";
 const MID_KEY: &str = "models.mid";
