@@ -69,7 +69,17 @@ async fn main() {
     #[cfg(not(debug_assertions))]
     let app = server::build_app(server::AppState::new(db));
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    // B7: was `0.0.0.0` - every route was unauthenticated (before this
+    // ticket's `/api/*` gate) while bound to every interface, so anyone on
+    // the LAN could POST messages and spend the OpenRouter key. Loopback by
+    // default now that the gate exists too; `BULLPEN_HOST` still opts back
+    // into a wider bind for the real deploy (behind the Cloudflare Tunnel).
+    let host = std::env::var("BULLPEN_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let ip: std::net::IpAddr = host.parse().unwrap_or_else(|_| {
+        tracing::warn!(%host, "invalid BULLPEN_HOST, falling back to 127.0.0.1");
+        std::net::IpAddr::from([127, 0, 0, 1])
+    });
+    let addr = SocketAddr::new(ip, port);
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .expect("bind port");

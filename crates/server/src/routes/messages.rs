@@ -114,6 +114,27 @@ async fn post_message(
             }
         };
 
+        // B14: `threadId` came straight off the request body - unchecked, a
+        // caller could POST to bot A with bot B's thread id and write a
+        // user message (plus a run) into B's conversation. A thread belongs
+        // to a bot when that bot owns it outright, or when it is a room the
+        // bot is a member of; anything else is a 404 - the same answer a
+        // thread that does not exist at all gets, so a probe cannot
+        // distinguish "wrong owner" from "no such thread". Loaded once here
+        // and reused below for the round check, rather than queried twice.
+        let conversation = store::get_conversation(&db, &conversation_id)?;
+        let owns_thread = matches!(
+            &conversation,
+            Some(c) if c.bot_id == bot.id || c.members.iter().any(|m| m == &bot.id)
+        );
+        if !owns_thread {
+            return Ok((
+                axum::http::StatusCode::NOT_FOUND,
+                Json(json!({"error": "no such thread"})),
+            )
+                .into_response());
+        }
+
         // A name that does not resolve is IGNORED, deliberately, and the
         // owner answers as usual - see the TS doc on `mentioned`.
         let mentioned: Vec<shared::Bot> = mentions
@@ -135,7 +156,7 @@ async fn post_message(
         // H12: a room's round. A `room` thread with no resolvable
         // `@mention` hands the turn to every member in order; `@everyone`
         // overrides the narrowing the same way no mention at all does.
-        let conversation = store::get_conversation(&db, &conversation_id)?;
+        // `conversation` is the same row the B14 check above already loaded.
         let round: Vec<String> = match &conversation {
             Some(c) if c.kind == "room" && (mentioned.is_empty() || everyone) => {
                 let mut ids = vec![c.bot_id.clone()];

@@ -23,6 +23,19 @@ use std::sync::{Arc, Mutex};
 
 use model::{EventStream, ModelEvent, ModelPort, ModelRequest, ToolCall};
 
+/// S1-F-05: the `/api/*` gate now requires a session on every route except
+/// the open list in `server::auth::OPEN_PATHS` - a test that used to hit a
+/// protected route with no credentials at all needs BOTH a password set
+/// (`is_configured`) and a valid session token, or it gets 503/401 instead
+/// of whatever it used to see. Call this on a test's own `db` before
+/// building the app, then attach the returned value as a `cookie` header on
+/// every request the test makes.
+pub fn seed_session(db: &store::Db) -> String {
+    store::set_password(db, "test-password").expect("seed test password");
+    let token = store::create_session(db).expect("create test session");
+    format!("bullpen_session={token}")
+}
+
 /// Replays one scripted event list per call to `stream`, in order; the last
 /// script repeats if `stream` is called more times than there are scripts.
 pub struct ScriptedPort {

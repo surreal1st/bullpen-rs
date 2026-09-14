@@ -4,6 +4,10 @@
 //! through `tower::ServiceExt::oneshot`, same seam every server test uses -
 //! never `RunManager`/`RoomEngine` internals directly. Ports of
 //! `test/rooms.test.ts` and `test/routing.test.ts:180-230`'s room-cap case.
+//!
+//! S1-F-05: every route here now sits behind the session gate, so each test
+//! seeds a password + session on its own `db` first (`common::seed_session`)
+//! and carries the resulting cookie on every request - see that helper's doc.
 
 mod common;
 
@@ -13,7 +17,7 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::http::{Request, StatusCode};
-use common::{GatedPort, ScriptedPort, text_script};
+use common::{GatedPort, ScriptedPort, seed_session, text_script};
 use futures::StreamExt;
 use http_body_util::BodyExt;
 use model::{EventStream, MessageContent, ModelEvent, ModelPort, ModelRequest};
@@ -48,37 +52,24 @@ fn app_for(db: Db, port: Arc<dyn ModelPort>) -> Router {
     build_app(AppState::with_port(db, port))
 }
 
-fn post_req(uri: &str, body: Value) -> Request<Body> {
+fn post_req(uri: &str, body: Value, cookie: &str) -> Request<Body> {
     Request::post(uri)
         .header("content-type", "application/json")
+        .header("cookie", cookie)
         .body(Body::from(body.to_string()))
         .expect("build request")
 }
 
-async fn post_json(app: Router, uri: &str, body: Value) -> (StatusCode, Value) {
-    let resp = app.oneshot(post_req(uri, body)).await.expect("oneshot");
-    let status = resp.status();
-    let bytes = resp
-        .into_body()
-        .collect()
-        .await
-        .expect("collect")
-        .to_bytes();
-    let json = if bytes.is_empty() {
-        Value::Null
-    } else {
-        serde_json::from_slice(&bytes).expect("response body is JSON")
-    };
-    (status, json)
+fn get_req(uri: &str, cookie: &str) -> Request<Body> {
+    Request::get(uri)
+        .header("cookie", cookie)
+        .body(Body::empty())
+        .expect("build request")
 }
 
-async fn get_json(app: Router, uri: &str) -> (StatusCode, Value) {
+async fn post_json(app: Router, uri: &str, body: Value, cookie: &str) -> (StatusCode, Value) {
     let resp = app
-        .oneshot(
-            Request::get(uri)
-                .body(Body::empty())
-                .expect("build request"),
-        )
+        .oneshot(post_req(uri, body, cookie))
         .await
         .expect("oneshot");
     let status = resp.status();
@@ -96,11 +87,29 @@ async fn get_json(app: Router, uri: &str) -> (StatusCode, Value) {
     (status, json)
 }
 
-async fn create_room(app: &Router, title: &str, member_ids: &[&str]) -> String {
+async fn get_json(app: Router, uri: &str, cookie: &str) -> (StatusCode, Value) {
+    let resp = app.oneshot(get_req(uri, cookie)).await.expect("oneshot");
+    let status = resp.status();
+    let bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let json = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).expect("response body is JSON")
+    };
+    (status, json)
+}
+
+async fn create_room(app: &Router, title: &str, member_ids: &[&str], cookie: &str) -> String {
     let (status, body) = post_json(
         app.clone(),
         "/api/rooms",
         json!({"title": title, "memberIds": member_ids}),
+        cookie,
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "create_room failed: {body:?}");
@@ -110,12 +119,13 @@ async fn create_room(app: &Router, title: &str, member_ids: &[&str]) -> String {
 /// Posts into the room and fully drains the OWNER's own SSE stream (that
 /// first leg's `done`/`error`) - the rest of the round chains in the
 /// background with no stream a caller holds, same as the TS original.
-async fn send_message(app: &Router, bot_id: &str, thread_id: &str, text: &str) {
+async fn send_message(app: &Router, bot_id: &str, thread_id: &str, text: &str, cookie: &str) {
     let resp = app
         .clone()
         .oneshot(post_req(
             &format!("/api/bots/{bot_id}/messages"),
             json!({"text": text, "threadId": thread_id}),
+            cookie,
         ))
         .await
         .expect("oneshot");
@@ -126,10 +136,12 @@ async fn conversation_messages(
     app: &Router,
     owner_bot_id: &str,
     conversation_id: &str,
+    cookie: &str,
 ) -> Vec<Value> {
     let (status, body) = get_json(
         app.clone(),
         &format!("/api/bots/{owner_bot_id}/conversation?thread={conversation_id}"),
+        cookie,
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -141,10 +153,11 @@ async fn wait_for_assistant_count(
     owner_bot_id: &str,
     conversation_id: &str,
     at_least: usize,
+    cookie: &str,
 ) -> usize {
     let mut n = 0;
     for _ in 0..300 {
-        let messages = conversation_messages(app, owner_bot_id, conversation_id).await;
+        let messages = conversation_messages(app, owner_bot_id, conversation_id, cookie).await;
         n = messages.iter().filter(|m| m["role"] == "assistant").count();
         if n >= at_least {
             break;
@@ -183,6 +196,7 @@ async fn read_next_frame(
 #[tokio::test]
 async fn create_room_route_enforces_the_roster_size() {
     let db = open_db();
+    let cookie = seed_session(&db);
     seed_bot(&db, "arthur", "Arthur");
     seed_bot(&db, "riley", "Riley");
     seed_bot(&db, "jason", "Jason");
@@ -199,6 +213,7 @@ async fn create_room_route_enforces_the_roster_size() {
         app.clone(),
         "/api/rooms",
         json!({"title": "Solo", "memberIds": ["arthur"]}),
+        &cookie,
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -209,6 +224,7 @@ async fn create_room_route_enforces_the_roster_size() {
         app.clone(),
         "/api/rooms",
         json!({"title": "Crowd", "memberIds": seven}),
+        &cookie,
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -219,6 +235,7 @@ async fn create_room_route_enforces_the_roster_size() {
         app.clone(),
         "/api/rooms",
         json!({"title": "BigGroup", "memberIds": six}),
+        &cookie,
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
@@ -232,6 +249,7 @@ async fn create_room_route_enforces_the_roster_size() {
         app.clone(),
         "/api/rooms",
         json!({"title": "Growth", "memberIds": ["arthur", "riley", "jason"]}),
+        &cookie,
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
@@ -246,6 +264,7 @@ async fn create_room_route_enforces_the_roster_size() {
         app.clone(),
         "/api/bots/arthur/threads",
         json!({"members": ["b0", "b1", "b2", "b3", "b4", "b5"]}),
+        &cookie,
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -259,6 +278,7 @@ async fn create_room_route_enforces_the_roster_size() {
 #[tokio::test]
 async fn room_round_runs_every_member_capped_at_the_cheap_model() {
     let db = open_db();
+    let cookie = seed_session(&db);
     seed_bot(&db, "arthur", "Arthur");
     seed_bot(&db, "riley", "Riley");
     seed_bot(&db, "jason", "Jason");
@@ -269,9 +289,9 @@ async fn room_round_runs_every_member_capped_at_the_cheap_model() {
     let port = Arc::new(ScriptedPort::new(vec![text_script("ok")]));
     let app = app_for(db, Arc::clone(&port) as Arc<dyn ModelPort>);
 
-    let room_id = create_room(&app, "Growth", &["arthur", "riley", "jason"]).await;
-    send_message(&app, "arthur", &room_id, "what do you all think?").await;
-    let n = wait_for_assistant_count(&app, "arthur", &room_id, 3).await;
+    let room_id = create_room(&app, "Growth", &["arthur", "riley", "jason"], &cookie).await;
+    send_message(&app, "arthur", &room_id, "what do you all think?", &cookie).await;
+    let n = wait_for_assistant_count(&app, "arthur", &room_id, 3, &cookie).await;
     assert_eq!(n, 3, "expected all three members to have answered");
 
     let requests = port.requests();
@@ -328,6 +348,7 @@ impl ModelPort for SilentExcept {
 #[tokio::test]
 async fn silence_leaves_only_the_member_who_actually_spoke() {
     let db = open_db();
+    let cookie = seed_session(&db);
     seed_bot(&db, "arthur", "Arthur");
     seed_bot(&db, "riley", "Riley");
     seed_bot(&db, "jason", "Jason");
@@ -337,8 +358,8 @@ async fn silence_leaves_only_the_member_who_actually_spoke() {
     };
     let app = app_for(db, Arc::new(port));
 
-    let room_id = create_room(&app, "Trio", &["arthur", "riley", "jason"]).await;
-    send_message(&app, "arthur", &room_id, "anything new on this?").await;
+    let room_id = create_room(&app, "Trio", &["arthur", "riley", "jason"], &cookie).await;
+    send_message(&app, "arthur", &room_id, "anything new on this?", &cookie).await;
 
     // Give the whole round (all three) time to settle, not just the first
     // reply - the point is that arthur and jason stay quiet, not merely
@@ -346,7 +367,7 @@ async fn silence_leaves_only_the_member_who_actually_spoke() {
     // network), so this margin is generous, not a race.
     tokio::time::sleep(Duration::from_millis(400)).await;
 
-    let messages = conversation_messages(&app, "arthur", &room_id).await;
+    let messages = conversation_messages(&app, "arthur", &room_id, &cookie).await;
     let assistants: Vec<&Value> = messages
         .iter()
         .filter(|m| m["role"] == "assistant")
@@ -362,15 +383,16 @@ async fn silence_leaves_only_the_member_who_actually_spoke() {
 #[tokio::test]
 async fn everyone_wakes_every_member_and_forbids_silence() {
     let db = open_db();
+    let cookie = seed_session(&db);
     seed_bot(&db, "arthur", "Arthur");
     seed_bot(&db, "riley", "Riley");
     seed_bot(&db, "jason", "Jason");
     let port = Arc::new(ScriptedPort::new(vec![text_script("ok")]));
     let app = app_for(db, Arc::clone(&port) as Arc<dyn ModelPort>);
 
-    let room_id = create_room(&app, "Growth", &["arthur", "riley", "jason"]).await;
-    send_message(&app, "arthur", &room_id, "@everyone status check").await;
-    let n = wait_for_assistant_count(&app, "arthur", &room_id, 3).await;
+    let room_id = create_room(&app, "Growth", &["arthur", "riley", "jason"], &cookie).await;
+    send_message(&app, "arthur", &room_id, "@everyone status check", &cookie).await;
+    let n = wait_for_assistant_count(&app, "arthur", &room_id, 3, &cookie).await;
     assert_eq!(n, 3);
 
     let requests = port.requests();
@@ -390,14 +412,22 @@ async fn everyone_wakes_every_member_and_forbids_silence() {
 #[tokio::test]
 async fn mention_inside_a_room_routes_to_just_that_member() {
     let db = open_db();
+    let cookie = seed_session(&db);
     seed_bot(&db, "arthur", "Arthur");
     seed_bot(&db, "riley", "Riley");
     seed_bot(&db, "jason", "Jason");
     let port = Arc::new(ScriptedPort::new(vec![text_script("ok")]));
     let app = app_for(db, Arc::clone(&port) as Arc<dyn ModelPort>);
 
-    let room_id = create_room(&app, "Growth", &["arthur", "riley", "jason"]).await;
-    send_message(&app, "arthur", &room_id, "@riley can you take this?").await;
+    let room_id = create_room(&app, "Growth", &["arthur", "riley", "jason"], &cookie).await;
+    send_message(
+        &app,
+        "arthur",
+        &room_id,
+        "@riley can you take this?",
+        &cookie,
+    )
+    .await;
 
     // Give a would-be round a moment to (wrongly) continue, then confirm it
     // didn't.
@@ -428,18 +458,16 @@ impl ModelPort for NeverPort {
 #[tokio::test]
 async fn events_stream_opens_with_hello_then_reports_a_working_touch() {
     let db = open_db();
+    let cookie = seed_session(&db);
     seed_bot(&db, "arthur", "Arthur");
     let app = app_for(db, Arc::new(NeverPort));
 
     let events_app = app.clone();
+    let events_cookie = cookie.clone();
     let (frames_tx, mut frames_rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
     tokio::spawn(async move {
         let resp = events_app
-            .oneshot(
-                Request::get("/api/events")
-                    .body(Body::empty())
-                    .expect("build request"),
-            )
+            .oneshot(get_req("/api/events", &events_cookie))
             .await
             .expect("oneshot");
         let mut stream = resp.into_body().into_data_stream();
@@ -464,7 +492,11 @@ async fn events_stream_opens_with_hello_then_reports_a_working_touch() {
     // is never drained.
     let _resp = app
         .clone()
-        .oneshot(post_req("/api/bots/arthur/messages", json!({"text": "hi"})))
+        .oneshot(post_req(
+            "/api/bots/arthur/messages",
+            json!({"text": "hi"}),
+            &cookie,
+        ))
         .await
         .expect("oneshot");
 
@@ -480,6 +512,7 @@ async fn events_stream_opens_with_hello_then_reports_a_working_touch() {
 #[tokio::test]
 async fn stopping_a_held_run_over_http_fails_it_with_stopped() {
     let db = open_db();
+    let cookie = seed_session(&db);
     seed_bot(&db, "arthur", "Arthur");
 
     let (gate_tx, gate_rx) = tokio::sync::oneshot::channel();
@@ -493,7 +526,11 @@ async fn stopping_a_held_run_over_http_fails_it_with_stopped() {
 
     let resp = app
         .clone()
-        .oneshot(post_req("/api/bots/arthur/messages", json!({"text": "hi"})))
+        .oneshot(post_req(
+            "/api/bots/arthur/messages",
+            json!({"text": "hi"}),
+            &cookie,
+        ))
         .await
         .expect("oneshot");
     let mut stream = resp.into_body().into_data_stream();
@@ -511,6 +548,7 @@ async fn stopping_a_held_run_over_http_fails_it_with_stopped() {
         .clone()
         .oneshot(
             Request::post(format!("/api/runs/{run_id}/stop"))
+                .header("cookie", &cookie)
                 .body(Body::empty())
                 .expect("build request"),
         )

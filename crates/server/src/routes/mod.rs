@@ -6,6 +6,7 @@
 //! surface, and the two SSE streams - one submodule per route family, same
 //! split as `tools/`.
 
+mod auth;
 mod conversations;
 mod events;
 mod messages;
@@ -29,6 +30,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/auth/status", get(auth_status))
         .route("/api/auth/check", get(auth_check))
         .route("/api/roster", get(roster))
+        .merge(auth::router())
         .merge(conversations::router())
         .merge(rooms::router())
         .merge(messages::router())

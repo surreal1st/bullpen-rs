@@ -11,10 +11,17 @@
 //!
 //! Drives `build_app` through `tower::ServiceExt::oneshot`, same seam every
 //! server test uses - never `RunManager`/`AppState` internals directly.
+//!
+//! S1-F-05: every route here now sits behind the session gate, so each test
+//! seeds a password + session on its own `db` first (`common::seed_session`)
+//! and carries the resulting cookie on every request.
+
+mod common;
 
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use common::seed_session;
 use http_body_util::BodyExt;
 use serde_json::Value;
 use server::{AppState, build_app};
@@ -37,10 +44,11 @@ fn app_for(db: store::Db) -> Router {
     build_app(AppState::new(db))
 }
 
-async fn get(app: Router, uri: &str) -> (StatusCode, Value) {
+async fn get(app: Router, uri: &str, cookie: &str) -> (StatusCode, Value) {
     let response = app
         .oneshot(
             Request::get(uri)
+                .header("cookie", cookie)
                 .body(Body::empty())
                 .expect("build request"),
         )
@@ -69,6 +77,7 @@ async fn get(app: Router, uri: &str) -> (StatusCode, Value) {
 #[tokio::test]
 async fn a_stray_bracket_before_a_link_in_a_preview_does_not_500_the_roster() {
     let db = open_db();
+    let cookie = seed_session(&db);
     seed_bot(&db, "arthur", "Arthur");
     let conversation_id =
         store::get_or_create_conversation(&db, "arthur").expect("get_or_create_conversation");
@@ -82,7 +91,7 @@ async fn a_stray_bracket_before_a_link_in_a_preview_does_not_500_the_roster() {
     .expect("append message");
 
     let app = app_for(db);
-    let (status, body) = get(app, "/api/roster").await;
+    let (status, body) = get(app, "/api/roster", &cookie).await;
     assert_eq!(status, StatusCode::OK);
     let bots = body["bots"].as_array().expect("bots array");
     assert_eq!(bots.len(), 1);
@@ -92,9 +101,12 @@ async fn a_stray_bracket_before_a_link_in_a_preview_does_not_500_the_roster() {
 // fault, not a silently-defaulted room.
 #[tokio::test]
 async fn malformed_json_body_to_create_room_is_400_with_a_parse_error() {
-    let app = app_for(open_db());
+    let db = open_db();
+    let cookie = seed_session(&db);
+    let app = app_for(db);
     let req = Request::post("/api/rooms")
         .header("content-type", "application/json")
+        .header("cookie", &cookie)
         .body(Body::from("{not valid json"))
         .expect("build request");
     let resp = app.oneshot(req).await.expect("oneshot");
@@ -116,13 +128,17 @@ async fn malformed_json_body_to_create_room_is_400_with_a_parse_error() {
 // of every later `lock()` panicking too.
 #[tokio::test]
 async fn a_poisoned_db_mutex_recovers_on_the_next_request() {
-    let app = app_for(open_db());
+    let db = open_db();
+    let cookie = seed_session(&db);
+    let app = app_for(db);
 
     let poisoning = app.clone();
+    let poison_cookie = cookie.clone();
     let joined = tokio::spawn(async move {
         poisoning
             .oneshot(
                 Request::post("/api/__test/poison")
+                    .header("cookie", poison_cookie)
                     .body(Body::empty())
                     .expect("build request"),
             )
@@ -134,7 +150,7 @@ async fn a_poisoned_db_mutex_recovers_on_the_next_request() {
         "expected the poison route to panic the spawned task"
     );
 
-    let (status, _) = get(app, "/api/roster").await;
+    let (status, _) = get(app, "/api/roster", &cookie).await;
     assert_eq!(
         status,
         StatusCode::OK,

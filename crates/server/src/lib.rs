@@ -38,6 +38,11 @@ pub struct AppState {
     /// (`rooms::RoomEngine::install`), so a route only ever needs to
     /// REGISTER a round's first leg - the chain from there runs itself.
     room_engine: Arc<rooms::RoomEngine>,
+    /// S1-F-05: `routes/auth.rs`'s login route reaches this to answer 429
+    /// "Too many attempts" - one throttle per running server, fresh per
+    /// `AppState` so `cargo test`'s many parallel instances never share a
+    /// counter (see `auth::LoginThrottle`'s doc).
+    login_throttle: Arc<auth::LoginThrottle>,
 }
 
 impl AppState {
@@ -66,6 +71,7 @@ impl AppState {
             client_root: Arc::new(client_root),
             runs,
             room_engine,
+            login_throttle: Arc::new(auth::LoginThrottle::new()),
         }
     }
 
@@ -135,10 +141,16 @@ async fn static_or_spa(State(state): State<AppState>, req: Request) -> Response 
 /// Builds the router. No port binding here - `main.rs` reads
 /// `BULLPEN_DATA_DIR` / `BULLPEN_PORT`, opens the db, and serves this.
 pub fn build_app(state: AppState) -> Router {
-    // API routes first (via routes::router())
-    // Then a fallback handler that serves static files and index.html for SPA routing
+    // B7: the session gate wraps ONLY the API routes, not the static/SPA
+    // fallback below - "static files stay open" falls out of that ordering
+    // for free, with no path check needed inside the layer itself.
+    let api = routes::router().layer(axum::middleware::from_fn_with_state(
+        state.clone(),
+        auth::require_session,
+    ));
+
     Router::new()
-        .merge(routes::router())
+        .merge(api)
         .fallback(static_or_spa)
         .layer(TraceLayer::new_for_http())
         .with_state(state)

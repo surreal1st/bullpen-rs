@@ -110,8 +110,14 @@ async fn expired_session_is_401_on_check() {
 
 #[tokio::test]
 async fn roster_returns_three_bots_camel_case() {
-    let app = app_for(fixture_copy("roster"));
-    let (status, body) = get(app, "/api/roster", None).await;
+    // S1-F-05: `/api/roster` now sits behind the session gate.
+    let db = fixture_copy("roster");
+    let token = "s1-f-05-roster-token";
+    insert_session(&db, token, Utc::now() + Duration::days(1));
+    let cookie = format!("bullpen_session={token}");
+
+    let app = app_for(db);
+    let (status, body) = get(app, "/api/roster", Some(&cookie)).await;
     assert_eq!(status, StatusCode::OK);
 
     let bots = body["bots"].as_array().expect("bots array");
