@@ -1,0 +1,10 @@
+/target
+/dist
+/shots
+*.db
+*.db-wal
+*.db-shm
+.env
+*.env
+/data
+.impeccable/

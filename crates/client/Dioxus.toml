@@ -1,0 +1,10 @@
+[application]
+name = "bullpen"
+
+[web.app]
+title = "Bullpen"
+base_path = "bullpen"
+
+[web.resource]
+style = []
+script = []
