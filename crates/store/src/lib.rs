@@ -1,7 +1,12 @@
 //! SQLite schema and queries. Same file format as the TS Bullpen's `bullpen.db`:
 //! migrations 1..16 are equivalent, every self-creating table/column is here.
 
+pub mod bots;
 mod migrations;
+pub mod roster;
+
+pub use bots::{get_bot, list_bots, list_sections};
+pub use roster::list_roster;
 
 use rusqlite::{Connection, OptionalExtension, params};
 use std::time::Duration;
