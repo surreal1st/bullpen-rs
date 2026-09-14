@@ -113,10 +113,8 @@ pub fn default_shape_for(name: &str) -> &'static str {
 
 /// Anything stored, coerced to a shape that exists.
 pub fn normalize_shape(value: Option<&str>, name: &str) -> &'static str {
-    if let Some(v) = value {
-        if let Some((k, _)) = SHAPES.iter().find(|(k, _)| k == &v) {
-            return k;
-        }
+    if let Some((k, _)) = value.and_then(|v| SHAPES.iter().find(|(k, _)| k == &v)) {
+        return k;
     }
     default_shape_for(name)
 }
