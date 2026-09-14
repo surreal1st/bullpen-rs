@@ -68,6 +68,11 @@ impl AppState {
         Self::build(db, default_client_root(), port, default_catalog())
     }
 
+    /// S2-06: lets a test swap in a fixture catalog while keeping the same port.
+    pub fn with_catalog(db: Db, catalog: Arc<dyn Catalog>) -> Self {
+        Self::build(db, default_client_root(), default_port(), catalog)
+    }
+
     fn build(
         db: Db,
         client_root: String,

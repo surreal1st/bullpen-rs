@@ -15,7 +15,9 @@ mod common;
 use common::seed_session;
 
 fn open_db() -> Db {
-    Db::open(":memory:").expect("open :memory: db")
+    let db = Db::open(":memory:").expect("open :memory: db");
+    model::routing::ensure_routing_tables(&db).expect("ensure routing tables");
+    db
 }
 
 fn app_for(db: Db) -> Router {
@@ -268,7 +270,7 @@ async fn test_tier1_models_get_put_roundtrip() {
     assert!(response["models"]["code"].is_string());
     assert!(response["models"]["reason"].is_string());
     assert!(response["models"]["vision"].is_string());
-    assert_eq!(response["kinds"], vec!["code", "reason", "vision"]);
+    assert_eq!(response["kinds"], json!(["code", "reason", "vision"]));
 
     // PUT sets a code tier1 model
     let (status, response) = put_route(
@@ -355,7 +357,7 @@ async fn test_routing_get_put_toggle() {
     assert!(response["log"].is_array());
 
     // PUT to toggle enabled
-    let (status, response) =
+    let (status, _response) =
         put_route(&app, "/api/routing", &session, json!({ "enabled": false })).await;
     assert_eq!(status, 200);
 
