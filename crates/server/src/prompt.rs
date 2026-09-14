@@ -295,25 +295,83 @@ pub fn build_prompt(db: &Db, bot: &Bot, history: &[HistoryTurn]) -> Vec<ModelMes
     // Skill index: SKIP for now (hook for a later ticket).
     // Open tasks / questions: SKIP for now (hook for a later ticket).
 
-    let recall = store::recall_for(db, &bot.id, store::RECALL_TOKEN_BUDGET).unwrap_or_else(|err| {
-        tracing::error!("build_prompt: recall query failed: {err}");
-        store::Recall {
-            entries: Vec::new(),
-            older: 0,
-        }
+    // S3-03: tiered recall - own > project > shared, newest first within
+    // each tier, one header per tier so the model can tell whose fact is
+    // whose. `store::recall_for` returns a flat, untagged `Vec<LogEntry>`
+    // that cannot be split back into tiers by a caller, so this calls
+    // `store::scoped_entries`/`count_scoped` directly, one per tier.
+    if let Err(err) = store::sweep_expired(db) {
+        tracing::error!("build_prompt: sweep_expired failed: {err}");
+    }
+    let projects = store::projects_for(db, &bot.id).unwrap_or_else(|err| {
+        tracing::error!("build_prompt: projects_for query failed: {err}");
+        Vec::new()
     });
-    if !recall.entries.is_empty() {
-        blocks.push(String::new());
-        blocks.push("## What you remember".to_string());
-        blocks.push(String::new());
-        for entry in &recall.entries {
-            blocks.push(format!("- {}", entry.content));
+
+    let mut candidate_tiers: Vec<(String, Vec<store::LogEntry>)> = Vec::new();
+    let mut available: i64 = 0;
+
+    match own_tier(db, &bot.id) {
+        Ok((entries, total)) => {
+            available += total;
+            candidate_tiers.push(("## What you know".to_string(), entries));
         }
-        if recall.older > 0 {
+        Err(err) => tracing::error!("build_prompt: own recall query failed: {err}"),
+    }
+    for project in &projects {
+        match project_tier(db, &project.id) {
+            Ok((entries, total)) => {
+                available += total;
+                candidate_tiers.push((format!("## Project: {}", project.name), entries));
+            }
+            Err(err) => tracing::error!("build_prompt: project recall query failed: {err}"),
+        }
+    }
+    match shared_tier(db) {
+        Ok((entries, total)) => {
+            available += total;
+            candidate_tiers.push(("## Shared".to_string(), entries));
+        }
+        Err(err) => tracing::error!("build_prompt: shared recall query failed: {err}"),
+    }
+
+    // One running budget spent in precedence order - own gets first claim,
+    // shared is first to be dropped when it is tight.
+    let mut spent: i64 = 0;
+    let mut kept_total: i64 = 0;
+    let mut kept_tiers: Vec<(String, Vec<store::LogEntry>)> = Vec::new();
+    for (header, entries) in candidate_tiers {
+        let mut kept: Vec<store::LogEntry> = Vec::new();
+        for entry in entries {
+            let cost = approx_tokens(&entry.content) + 2;
+            if spent + cost > store::RECALL_TOKEN_BUDGET {
+                break;
+            }
+            spent += cost;
+            kept.push(entry);
+        }
+        kept_total += kept.len() as i64;
+        if !kept.is_empty() {
+            // Newest first out of the query; a prompt reads better oldest first.
+            kept.reverse();
+            kept_tiers.push((header, kept));
+        }
+    }
+
+    if !kept_tiers.is_empty() {
+        for (header, entries) in &kept_tiers {
+            blocks.push(String::new());
+            blocks.push(header.clone());
+            blocks.push(String::new());
+            for entry in entries {
+                blocks.push(format!("- {}", entry.content));
+            }
+        }
+        let older = (available - kept_total).max(0);
+        if older > 0 {
             blocks.push(String::new());
             blocks.push(format!(
-                "There are {} older notes not shown here. Use search_memory to look something up rather than telling Josh you do not know it.",
-                recall.older
+                "There are {older} older notes not shown here. Use search_memory to look something up rather than telling Josh you do not know it."
             ));
         }
     }
@@ -345,6 +403,41 @@ pub fn build_prompt(db: &Db, bot: &Bot, history: &[HistoryTurn]) -> Vec<ModelMes
     let mut messages = vec![ModelMessage::system(system)];
     messages.extend(trimmed);
     messages
+}
+
+/// How many recent entries a single tier pulls before the budget trims it
+/// further. Matches the cap `store::scoped_entries` uses internally.
+const TIER_QUERY_LIMIT: i64 = 40;
+
+/// The bot's own-scope log, newest first, plus how many exist in total
+/// (ignoring the query limit) so `build_prompt` can report an accurate
+/// "older" count.
+fn own_tier(db: &Db, bot_id: &str) -> rusqlite::Result<(Vec<store::LogEntry>, i64)> {
+    let entries = store::scoped_entries(db, bot_id, store::Scope::Own, &[], TIER_QUERY_LIMIT)?;
+    let total = store::count_scoped(db, bot_id, store::Scope::Own, &[])?;
+    Ok((entries, total))
+}
+
+/// One project's log, newest first, plus its total count.
+fn project_tier(db: &Db, project_id: &str) -> rusqlite::Result<(Vec<store::LogEntry>, i64)> {
+    let ids = [project_id.to_string()];
+    let entries = store::scoped_entries(db, "", store::Scope::Project, &ids, TIER_QUERY_LIMIT)?;
+    let total = store::count_scoped(db, "", store::Scope::Project, &ids)?;
+    Ok((entries, total))
+}
+
+/// The shared log every bot can see, newest first, plus its total count.
+fn shared_tier(db: &Db) -> rusqlite::Result<(Vec<store::LogEntry>, i64)> {
+    let entries = store::scoped_entries(db, "", store::Scope::Shared, &[], TIER_QUERY_LIMIT)?;
+    let total = store::count_scoped(db, "", store::Scope::Shared, &[])?;
+    Ok((entries, total))
+}
+
+/// Roughly four characters per token. Mirrors `store::memory`'s private
+/// `approx_tokens` - enough to police the recall budget, not a billing
+/// system.
+fn approx_tokens(text: &str) -> i64 {
+    (text.len() as i64 + 3) / 4
 }
 
 /// What a room member is told before it speaks. `mandatory` (Josh typed

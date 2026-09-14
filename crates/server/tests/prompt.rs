@@ -44,7 +44,7 @@ fn block_order_is_where_you_are_rules_about_josh_instructions_known_remembered()
     let about_josh = system.find("ABOUT-JOSH-MARKER").unwrap();
     let instructions = system.find("UNIQUE-INSTRUCTIONS-MARKER").unwrap();
     let known = system.find("## What you already know").unwrap();
-    let remembered = system.find("## What you remember").unwrap();
+    let remembered = system.find("## What you know").unwrap();
 
     assert!(
         where_you_are < rules,
@@ -61,7 +61,7 @@ fn block_order_is_where_you_are_rules_about_josh_instructions_known_remembered()
     );
     assert!(
         known < remembered,
-        "## What you already know must precede ## What you remember"
+        "## What you already know must precede the recall tier's ## What you know"
     );
 }
 
@@ -128,7 +128,7 @@ fn recall_holds_the_newest_within_budget_and_names_the_older_count() {
     let messages = build_prompt(&db, &bot, &[]);
     let system = system_text(&messages);
 
-    assert!(system.contains("## What you remember"));
+    assert!(system.contains("## What you know"));
     let kept = system.lines().filter(|l| l.starts_with("- entry-")).count();
     assert!(kept > 0, "the newest entries must be kept");
     assert!(

@@ -12,8 +12,12 @@ mod ask_josh;
 mod create_room;
 pub(crate) mod escalate;
 mod message_bot;
+mod note;
+mod project_remember;
 mod remember;
+mod remember_shared;
 mod say;
+mod search_memory;
 mod shell;
 
 use std::future::Future;
@@ -126,6 +130,10 @@ pub fn build(params: BuildParams) -> ToolBox {
         say::spec(),
         ask_josh::spec(),
         remember::spec(),
+        note::spec(),
+        remember_shared::spec(),
+        project_remember::spec(),
+        search_memory::spec(),
         message_bot::spec(),
         create_room::spec(),
         add_to_room::spec(),
@@ -155,6 +163,10 @@ pub fn build(params: BuildParams) -> ToolBox {
                     "say" => (say::run(&db, &bot_id, &args), None),
                     "ask_josh" => (ask_josh::run(&db, &bot_id, &args, changes), None),
                     "remember" => (remember::run(&db, &bot_id, &args), None),
+                    "note" => (note::run(&db, &bot_id, &args), None),
+                    "remember_shared" => (remember_shared::run(&db, &bot_id, &args), None),
+                    "project_remember" => (project_remember::run(&db, &bot_id, &args), None),
+                    "search_memory" => (search_memory::run(&db, &bot_id, &args), None),
                     "create_room" => (create_room::run(&db, &bot_id, &args), None),
                     "add_to_room" => (add_to_room::run(&db, &args), None),
                     "shell" => (shell::run(&args), None),

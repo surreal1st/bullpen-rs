@@ -234,8 +234,12 @@ pub fn recent_log(db: &Db, bot_id: &str, limit: i64) -> rusqlite::Result<Vec<Log
     Ok(rows)
 }
 
-/// Get entries from a specific scope for recall purposes, excluding expired notes.
-fn scoped_entries(
+/// Get entries from a specific scope for recall purposes, excluding expired
+/// notes. `pub`: S3-03's tiered prompt recall needs this split by tier
+/// (own/project/shared, one header each) which `recall_for`'s flat
+/// `Vec<LogEntry>` cannot express since `LogEntry` carries no `scope` or
+/// `project_id` of its own.
+pub fn scoped_entries(
     db: &Db,
     bot_id: &str,
     scope: Scope,
@@ -314,6 +318,56 @@ fn scoped_entries(
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(rows)
         }
+    }
+}
+
+/// How many entries exist in one scope (ignoring `scoped_entries`' `limit`)
+/// so a caller rendering that tier can report an accurate "N older" count.
+/// Same filters as `scoped_entries`, as a `COUNT(*)` instead of a `SELECT`.
+pub fn count_scoped(
+    db: &Db,
+    bot_id: &str,
+    scope: Scope,
+    project_ids: &[String],
+) -> rusqlite::Result<i64> {
+    let now = now_iso();
+    match scope {
+        Scope::Own => db.conn().query_row(
+            "SELECT COUNT(*) FROM memory_log
+              WHERE bot_id = ?1 AND scope = 'own' AND (expires_at IS NULL OR expires_at > ?2)",
+            params![bot_id, now],
+            |row| row.get(0),
+        ),
+        Scope::Project => {
+            if project_ids.is_empty() {
+                return Ok(0);
+            }
+            let placeholders = project_ids
+                .iter()
+                .map(|_| "?")
+                .collect::<Vec<_>>()
+                .join(",");
+            let query = format!(
+                "SELECT COUNT(*) FROM memory_log
+                  WHERE scope = 'project' AND project_id IN ({}) AND (expires_at IS NULL OR expires_at > ?)",
+                placeholders
+            );
+            let mut params: Vec<&dyn rusqlite::ToSql> = project_ids
+                .iter()
+                .map(|id| id as &dyn rusqlite::ToSql)
+                .collect();
+            params.push(&now);
+            db.conn()
+                .query_row(&query, rusqlite::params_from_iter(params.iter()), |row| {
+                    row.get(0)
+                })
+        }
+        Scope::Shared => db.conn().query_row(
+            "SELECT COUNT(*) FROM memory_log
+              WHERE scope = 'shared' AND (expires_at IS NULL OR expires_at > ?1)",
+            params![now],
+            |row| row.get(0),
+        ),
     }
 }
 

@@ -119,6 +119,14 @@ pub fn default_decisions() -> Permissions {
     m.insert("twitch_live_ping".to_string(), Decision::Allow);
     m.insert("remember".to_string(), Decision::Allow);
 
+    // S3-03: `note` (own, TTL), `remember_shared` and `project_remember`
+    // (shared/project scope). Same blast radius as `remember` - the bot's
+    // own memory log, or memory it and colleagues already share - so they
+    // get the same trust: free to write, no approval in the way.
+    m.insert("note".to_string(), Decision::Allow);
+    m.insert("remember_shared".to_string(), Decision::Allow);
+    m.insert("project_remember".to_string(), Decision::Allow);
+
     // Reading a skill Josh already gave this bot. It is text he wrote or imported,
     // it grants no tool and widens no permission, and asking would stall a run
     // behind a prompt for instructions the bot was handed on purpose.
@@ -468,6 +476,9 @@ pub fn always_on_set() -> Vec<&'static str> {
         "say",
         "ask_josh",
         "remember",
+        "note",
+        "remember_shared",
+        "project_remember",
         "search_memory",
         "add_task",
         "update_task",
