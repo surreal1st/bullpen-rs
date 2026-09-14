@@ -45,6 +45,7 @@ pub fn hue_for(section_id: Option<&str>, section_ids: &[String], name: &str) -> 
 /// Build the SVG face string for a given bot id and hue. The id MUST be
 /// sanitised to prevent breaking out of the id="" attribute with markup injection.
 #[cfg_attr(not(test), allow(dead_code))]
+#[allow(clippy::too_many_arguments)]
 fn build_face_svg(id: &str, hue: i32, hue2: i32, path: &str, size: f64, ex1: f64, ex2: f64, ey: f64) -> String {
     let fill_id = format!("face-{}", sanitise_id(id));
     format!(
