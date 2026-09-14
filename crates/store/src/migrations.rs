@@ -6,6 +6,9 @@
 //! The TS source's own comments misnumber two entries as "12" (a documented
 //! bug, see db.ts:313 and :342) - positions below are renumbered 1..16 to
 //! match array order, which is what `PRAGMA user_version` actually counts.
+//!
+//! 17+ are bullpen-rs's own - new features, no TS counterpart to stay
+//! byte-identical to.
 
 pub const MIGRATIONS: &[&str] = &[
     // 1
@@ -361,4 +364,33 @@ pub const MIGRATIONS: &[&str] = &[
     // one go arrives already distinguishable, the same reason the colours
     // are generated rather than picked.
     r#"ALTER TABLE bots ADD COLUMN shape TEXT;"#,
+    // 17. S2-F-07 (F8): a parked approval nobody ever answers used to hold
+    //     its `pending` row (and the run's bus/backlog entries) forever, and
+    //     a decided row was never pruned either. The sweep that fixes this
+    //     needs a third terminal status distinct from `approved`/`rejected`
+    //     so Josh's history can tell "he said no" from "he never got to it" -
+    //     which means rebuilding the table, since SQLite has no ALTER TABLE
+    //     for a CHECK constraint. First bullpen-rs-only migration: 1..16 are
+    //     the byte-for-byte TS port, this and everything after is new.
+    r#"
+  CREATE TABLE approvals_new (
+    id          TEXT PRIMARY KEY,
+    run_id      TEXT NOT NULL REFERENCES runs(id),
+    bot_id      TEXT NOT NULL REFERENCES bots(id),
+    tool_name   TEXT NOT NULL,
+    tool_args   TEXT NOT NULL,
+    call_id     TEXT NOT NULL,
+    status      TEXT NOT NULL CHECK (status IN ('pending','approved','rejected','expired')),
+    created_at  TEXT NOT NULL,
+    decided_at  TEXT
+  );
+
+  INSERT INTO approvals_new (id, run_id, bot_id, tool_name, tool_args, call_id, status, created_at, decided_at)
+    SELECT id, run_id, bot_id, tool_name, tool_args, call_id, status, created_at, decided_at FROM approvals;
+
+  DROP TABLE approvals;
+  ALTER TABLE approvals_new RENAME TO approvals;
+
+  CREATE INDEX idx_approvals_pending ON approvals(status, created_at DESC);
+  "#,
 ];

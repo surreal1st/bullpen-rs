@@ -1,5 +1,7 @@
 //! S0-02 acceptance tests: `Db::open` applies migrations 1..16 and opens the
-//! TS-made fixture unchanged.
+//! TS-made fixture unchanged. S2-F-07 added migration 17
+//! (`crates/store/src/migrations.rs`), bullpen-rs-only - the TS fixture
+//! predates it, so `Db::open` migrates it forward same as any other db.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -34,15 +36,19 @@ fn copy_fixture_to_temp() -> std::path::PathBuf {
     temp
 }
 
-/// 1. `Db::open(":memory:")` leaves `user_version == 16`.
+/// Test 1: `Db::open(":memory:")` leaves `user_version` at the full
+/// migration count (17, once S2-F-07's migration lands).
 #[test]
-fn memory_db_migrates_to_version_16() {
+fn memory_db_migrates_to_latest_version() {
     let db = Db::open(":memory:").expect("open :memory:");
-    assert_eq!(user_version(db.conn()), 16);
+    assert_eq!(user_version(db.conn()), 17);
 }
 
-/// Test 2: opening a copy of the TS-made fixture (already at user_version
-/// 16) leaves `user_version` and the `sqlite_master` object set unchanged.
+/// Test 2: opening a copy of the TS-made fixture (checked in at
+/// user_version 16, migration 17's own predecessor) brings it forward to 17
+/// and leaves the `sqlite_master` object set the same names as before -
+/// migration 17 rebuilds `approvals` in place (SQLite has no ALTER TABLE for
+/// a CHECK constraint) but the table and its index keep the same names.
 #[test]
 fn fixture_db_opens_unchanged() {
     let temp = copy_fixture_to_temp();
@@ -62,8 +68,8 @@ fn fixture_db_opens_unchanged() {
 
     assert_eq!(
         user_version(db.conn()),
-        16,
-        "user_version must stay 16 after open"
+        17,
+        "user_version must reach 17 after open"
     );
 
     let after = schema_names(db.conn());

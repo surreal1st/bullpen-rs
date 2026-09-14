@@ -58,8 +58,8 @@ pub struct Db(Connection);
 impl Db {
     /// Opens (or creates) the database at `path` (`:memory:` works),
     /// applying the same pragmas as the TS `openDb` (WAL, foreign_keys,
-    /// busy_timeout) and running migrations 1..16 to bring `user_version`
-    /// up to 16.
+    /// busy_timeout) and running every migration to bring `user_version`
+    /// up to date.
     pub fn open(path: &str) -> rusqlite::Result<Db> {
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;

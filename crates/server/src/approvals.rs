@@ -159,6 +159,74 @@ pub fn take_pending(
     Ok(Some(row))
 }
 
+/// One pending approval old enough for the sweep to expire it, with the
+/// columns `RunManager::sweep_approvals` (`crate::runs`) needs to fail the
+/// run the same way `settle`'s failed branch does - F8.
+pub struct ExpiredApproval {
+    pub id: String,
+    pub run_id: String,
+    pub bot_id: String,
+    /// `None` only if the run row itself is somehow already gone - the
+    /// LEFT JOIN mirrors `list_pending`'s own, never turning a missing run
+    /// into a missing approval.
+    pub conversation_id: Option<String>,
+}
+
+/// Pending approvals created at or before `cutoff` (an ISO-8601 string,
+/// same format `created_at` is stored in, so a lexical `<=` is a
+/// chronological one) - what the 24h sweep expires. F8: nothing else ever
+/// revisits a `waiting` run once `park` leaves it - a pending approval
+/// Josh never answers held its row, and the run's `bus`/`backlog`/
+/// `interjections` entries, forever.
+pub fn list_pending_older_than(
+    db: &Db,
+    cutoff: &str,
+) -> Result<Vec<ExpiredApproval>, rusqlite::Error> {
+    let mut stmt = db.conn().prepare(
+        "SELECT a.id, a.run_id, a.bot_id, r.conversation_id
+           FROM approvals a
+           LEFT JOIN runs r ON r.id = a.run_id
+          WHERE a.status = 'pending' AND a.created_at <= ?1",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![cutoff], |row| {
+        Ok(ExpiredApproval {
+            id: row.get(0)?,
+            run_id: row.get(1)?,
+            bot_id: row.get(2)?,
+            conversation_id: row.get(3)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// Marks one approval row `expired` - the sweep's terminal status for a
+/// `pending` row nobody answered in time, distinct from `take_pending`'s
+/// `approved`/`rejected` so Josh's history can tell "he said no" from "he
+/// never got to it". `AND status = 'pending'` guards the same race
+/// `take_pending` guards: a decision landing between the sweep's list and
+/// this write means there is no longer anything here to expire, not an
+/// error - the `bool` says which happened.
+pub fn mark_expired(db: &Db, approval_id: &str) -> Result<bool, rusqlite::Error> {
+    let changed = db.conn().execute(
+        "UPDATE approvals SET status = 'expired', decided_at = ?1 WHERE id = ?2 AND status = 'pending'",
+        rusqlite::params![now_iso(), approval_id],
+    )?;
+    Ok(changed > 0)
+}
+
+/// Deletes every approval whose `decided_at` is at or before `cutoff` -
+/// F8's retention policy for `approved`/`rejected`/`expired` rows, which
+/// otherwise sat in the table forever. A still-`pending` row has no
+/// `decided_at` (`NULL <= x` is never true in SQL) and is never touched
+/// here - only the sweep's own `mark_expired`, or Josh deciding it, can
+/// make a row eligible.
+pub fn prune_decided_older_than(db: &Db, cutoff: &str) -> Result<usize, rusqlite::Error> {
+    db.conn().execute(
+        "DELETE FROM approvals WHERE decided_at IS NOT NULL AND decided_at <= ?1",
+        rusqlite::params![cutoff],
+    )
+}
+
 /// Same format as JS `new Date().toISOString()` - matches `crate::runs`'s
 /// own `now_iso`, kept as a second copy for the same reason that one is:
 /// `store::conversations::now_iso` is `pub(crate)` to the store crate.

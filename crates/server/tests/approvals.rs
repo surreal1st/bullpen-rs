@@ -18,9 +18,12 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use common::{ScriptedPort, as_port, own_conversation, seed_bot, seed_session, seed_user_message};
+use common::{
+    ScriptedPort, as_port, own_conversation, run_row, seed_bot, seed_session, seed_user_message,
+};
 use model::ladder::Trigger;
 use model::{MessageContent, ModelEvent, ModelMessage, ToolCall};
+use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
 use server::runs::{RunEvent, RunManager, StartOptions};
 use server::{AppState, build_app};
@@ -137,6 +140,55 @@ async fn wait_for_status(db: &Arc<Mutex<Db>>, run_id: &str, target: &str) -> Str
         status = run_status(db, run_id);
     }
     status
+}
+
+// ---- F8: sweep helpers - back-date a row so a test proves the TTL/
+// retention math without sleeping out real hours or days. ----
+
+fn backdate_approval_created_at(db: &Arc<Mutex<Db>>, approval_id: &str, ago: chrono::Duration) {
+    let ts = (chrono::Utc::now() - ago).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let db = db.lock().expect("db mutex poisoned");
+    db.conn()
+        .execute(
+            "UPDATE approvals SET created_at = ?1 WHERE id = ?2",
+            rusqlite::params![ts, approval_id],
+        )
+        .expect("backdate approval created_at");
+}
+
+fn backdate_approval_decided_at(db: &Arc<Mutex<Db>>, approval_id: &str, ago: chrono::Duration) {
+    let ts = (chrono::Utc::now() - ago).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let db = db.lock().expect("db mutex poisoned");
+    db.conn()
+        .execute(
+            "UPDATE approvals SET decided_at = ?1 WHERE id = ?2",
+            rusqlite::params![ts, approval_id],
+        )
+        .expect("backdate approval decided_at");
+}
+
+fn approval_row_exists(db: &Arc<Mutex<Db>>, approval_id: &str) -> bool {
+    let db = db.lock().expect("db mutex poisoned");
+    db.conn()
+        .query_row(
+            "SELECT COUNT(*) FROM approvals WHERE id = ?1",
+            rusqlite::params![approval_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("count approval rows")
+        > 0
+}
+
+fn approval_status(db: &Arc<Mutex<Db>>, approval_id: &str) -> Option<String> {
+    let db = db.lock().expect("db mutex poisoned");
+    db.conn()
+        .query_row(
+            "SELECT status FROM approvals WHERE id = ?1",
+            rusqlite::params![approval_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .expect("query approval status")
 }
 
 // 1. Ask: a `shell` call pauses the run, writes a pending approval row, and
@@ -422,6 +474,110 @@ async fn a_tool_call_with_no_permission_row_parks_the_run_instead_of_running_fre
         .expect("expected a pending approval row for the unmapped tool");
     assert_eq!(tool_name, "totally_unmapped_tool");
     assert_eq!(status, "pending");
+}
+
+// ---- 7. F8: a pending approval 25h old is expired by the sweep, and the
+// run it parked reads `failed` - THE BITE ----
+#[tokio::test]
+async fn a_pending_approval_25_hours_old_is_expired_by_the_sweep_and_the_run_fails() {
+    let db = open_db();
+    seed_bot(&db, "arthur", "Arthur");
+    let conversation_id = own_conversation(&db, "arthur");
+    seed_user_message(&db, &conversation_id, "clean up");
+
+    let manager = Arc::new(RunManager::new(
+        Arc::clone(&db),
+        as_port(shell_then_answer("Cleaned it up.")),
+    ));
+    let run_id = manager.start(StartOptions {
+        bot_id: "arthur".to_string(),
+        conversation_id: conversation_id.clone(),
+        model: "test/model".to_string(),
+        messages: vec![ModelMessage::user("clean up")],
+        trigger: Trigger::Chat,
+        room: false,
+    });
+    drain_until_paused_or_done(manager.subscribe(&run_id)).await;
+    let (approval_id, ..) = pending_approval(&db, &run_id).expect("pending approval");
+
+    backdate_approval_created_at(&db, &approval_id, chrono::Duration::hours(25));
+    manager.sweep_approvals(chrono::Utc::now());
+
+    let (status, error) = run_row(&db, &run_id);
+    assert_eq!(status, "failed", "an expired approval must fail its run");
+    assert_eq!(error.as_deref(), Some("approval expired"));
+    assert_eq!(
+        approval_status(&db, &approval_id),
+        Some("expired".to_string())
+    );
+}
+
+// ---- 8. F8: a decided approval 31 days old is pruned by the sweep ----
+#[tokio::test]
+async fn a_decided_approval_31_days_old_is_pruned_by_the_sweep() {
+    let db = open_db();
+    seed_bot(&db, "arthur", "Arthur");
+    let conversation_id = own_conversation(&db, "arthur");
+    seed_user_message(&db, &conversation_id, "clean up");
+
+    let manager = Arc::new(RunManager::new(
+        Arc::clone(&db),
+        as_port(shell_then_answer("Cleaned it up.")),
+    ));
+    let run_id = manager.start(StartOptions {
+        bot_id: "arthur".to_string(),
+        conversation_id: conversation_id.clone(),
+        model: "test/model".to_string(),
+        messages: vec![ModelMessage::user("clean up")],
+        trigger: Trigger::Chat,
+        room: false,
+    });
+    drain_until_paused_or_done(manager.subscribe(&run_id)).await;
+    let (approval_id, ..) = pending_approval(&db, &run_id).expect("pending approval");
+    assert!(manager.decide_approval(&approval_id, true).await);
+    assert_eq!(wait_for_status(&db, &run_id, "done").await, "done");
+
+    backdate_approval_decided_at(&db, &approval_id, chrono::Duration::days(31));
+    manager.sweep_approvals(chrono::Utc::now());
+
+    assert!(
+        !approval_row_exists(&db, &approval_id),
+        "a decided row 31 days old must be pruned by the sweep"
+    );
+}
+
+// ---- 9. F8: a decided approval 1 day old survives the sweep ----
+#[tokio::test]
+async fn a_decided_approval_1_day_old_is_kept_by_the_sweep() {
+    let db = open_db();
+    seed_bot(&db, "arthur", "Arthur");
+    let conversation_id = own_conversation(&db, "arthur");
+    seed_user_message(&db, &conversation_id, "clean up");
+
+    let manager = Arc::new(RunManager::new(
+        Arc::clone(&db),
+        as_port(shell_then_answer("Cleaned it up.")),
+    ));
+    let run_id = manager.start(StartOptions {
+        bot_id: "arthur".to_string(),
+        conversation_id: conversation_id.clone(),
+        model: "test/model".to_string(),
+        messages: vec![ModelMessage::user("clean up")],
+        trigger: Trigger::Chat,
+        room: false,
+    });
+    drain_until_paused_or_done(manager.subscribe(&run_id)).await;
+    let (approval_id, ..) = pending_approval(&db, &run_id).expect("pending approval");
+    assert!(manager.decide_approval(&approval_id, true).await);
+    assert_eq!(wait_for_status(&db, &run_id, "done").await, "done");
+
+    backdate_approval_decided_at(&db, &approval_id, chrono::Duration::days(1));
+    manager.sweep_approvals(chrono::Utc::now());
+
+    assert!(
+        approval_row_exists(&db, &approval_id),
+        "a decided row only 1 day old must survive the sweep"
+    );
 }
 
 // ---- HTTP: GET /api/approvals, POST /api/approvals/:id ----

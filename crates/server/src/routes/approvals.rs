@@ -66,6 +66,11 @@ impl From<crate::approvals::Approval> for ApprovalView {
 }
 
 async fn list_approvals(State(state): State<AppState>) -> ApiResult<Response> {
+    // F8: sweeps expired/decided approval rows before every read, so a
+    // pending row nobody ever answers does not sit in this list forever -
+    // the other sweep trigger is the delayed cleanup `finish` already
+    // schedules per run (`RunManager::sweep_approvals`'s own doc).
+    state.runs.sweep_approvals(chrono::Utc::now());
     let approvals = {
         let db = state.db();
         crate::approvals::list_pending(&db)?
@@ -138,8 +143,13 @@ async fn decide(
             // sentence, not a grid flip. Errors here are logged, not fatal:
             // the grid write above already landed, and a rule that failed
             // to save is not a reason to fail the whole approval.
+            // F7: `upsert_rule`, not `add_rule` - a second "Always
+            // allow"/"Never" press on a call that describes the same way
+            // updates the existing rule's behavior instead of adding a
+            // duplicate row that `list_rules_for` would hand to the
+            // classifier a second time forever.
             let text = rules::describe_call(&target.tool_name, &target.tool_args);
-            if let Err(err) = rules::add_rule(
+            if let Err(err) = rules::upsert_rule(
                 &db,
                 Some(target.bot_id.clone()),
                 &text,
@@ -254,7 +264,10 @@ async fn create_rule(
         .and_then(RuleBehavior::parse)
         .unwrap_or(RuleBehavior::Ask);
 
-    match rules::add_rule(&db, parsed.bot_id, &parsed.text, behavior) {
+    // F7: dedupes against an existing rule with the same bot_id + text
+    // (see `upsert_rule`'s own doc) rather than adding a row every time the
+    // same sentence is posted.
+    match rules::upsert_rule(&db, parsed.bot_id, &parsed.text, behavior) {
         Ok(rule) => Ok((
             StatusCode::CREATED,
             Json(json!({ "rule": RuleView::from(rule) })),

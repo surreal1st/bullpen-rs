@@ -41,6 +41,20 @@ const MAX_STEPS: i64 = 24;
 /// entry a late `subscribe` recreated in the meantime (S1-F-04: B3, B5).
 const BACKLOG_TTL: Duration = Duration::from_secs(60);
 
+/// F8: how long a `pending` approval may sit unanswered before
+/// `sweep_approvals` fails the run parked on it. Nothing else ever
+/// revisits a `waiting` run - `park` deliberately leaves `bus`/`backlog`/
+/// `interjections` alone expecting `decide_approval` to pick it back up,
+/// and if Josh never does, none of that was ever going away on its own.
+const APPROVAL_TTL_HOURS: i64 = 24;
+
+/// F8: how long a decided (`approved`/`rejected`) or `expired` approval row
+/// survives before `sweep_approvals` deletes it - the `approvals` table's
+/// only retention policy. A still-`pending` row is never touched by this;
+/// only `APPROVAL_TTL_HOURS` (via `mark_expired`) or Josh deciding it moves
+/// a row into scope for this one.
+const APPROVAL_RETENTION_DAYS: i64 = 30;
+
 /// One event a run's subscribers see. Port of the TS `RunEvent`.
 #[derive(Debug, Clone)]
 pub enum RunEvent {
@@ -1516,6 +1530,126 @@ is looking at."
         true
     }
 
+    /// F8: expires any `pending` approval older than `APPROVAL_TTL_HOURS`
+    /// and prunes any decided/expired row older than
+    /// `APPROVAL_RETENTION_DAYS`. Takes `now` rather than reading the clock
+    /// itself so a test can sweep a 25-hour-old row without sleeping 25
+    /// hours - same precedent `with_backlog_ttl` sets for `finish`'s own
+    /// delayed cleanup.
+    ///
+    /// Called from `finish`'s spawned cleanup task (so an approval a run's
+    /// own settlement never revisits still gets swept on roughly the same
+    /// cadence live traffic already produces) and from
+    /// `routes/approvals.rs` right before every `GET /api/approvals` reads
+    /// `list_pending` - the two places F8 named as already touching
+    /// `approvals` on a schedule or on every poll, rather than standing up
+    /// a third, dedicated timer loop for one narrow cleanup.
+    pub fn sweep_approvals(self: &Arc<Self>, now: chrono::DateTime<chrono::Utc>) {
+        let expire_cutoff = (now - chrono::Duration::hours(APPROVAL_TTL_HOURS))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let prune_cutoff = (now - chrono::Duration::days(APPROVAL_RETENTION_DAYS))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+
+        let expired = {
+            let db = self.db();
+            approvals::list_pending_older_than(&db, &expire_cutoff).unwrap_or_else(|err| {
+                tracing::error!("approvals sweep: failed to list expired approvals: {err}");
+                Vec::new()
+            })
+        };
+        for row in expired {
+            let marked = {
+                let db = self.db();
+                approvals::mark_expired(&db, &row.id)
+            };
+            match marked {
+                Ok(true) => self.fail_waiting_run(
+                    &row.run_id,
+                    &row.bot_id,
+                    row.conversation_id.as_deref(),
+                    "approval expired",
+                ),
+                // Raced with `decide_approval` between the list above and
+                // this write - Josh answered it, so there is nothing left
+                // for the sweep to fail.
+                Ok(false) => {}
+                Err(err) => tracing::error!(
+                    "approvals sweep: failed to expire approval {}: {err}",
+                    row.id
+                ),
+            }
+        }
+
+        if let Err(err) = {
+            let db = self.db();
+            approvals::prune_decided_older_than(&db, &prune_cutoff)
+        } {
+            tracing::error!("approvals sweep: failed to prune old approvals: {err}");
+        }
+    }
+
+    /// Fails a `waiting` run directly, for `sweep_approvals` - the sweep has
+    /// no `RunState` in hand (only a stale row it is about to expire), so
+    /// this writes just the run's status/error and reproduces the
+    /// subscriber-visible half of `settle`'s failed branch: the same
+    /// `RunEvent::Error`, the same `on_run_done` hook, the same `finish`
+    /// teardown of `bus`/`stopping`/`interjections` and delayed backlog
+    /// drop. `AND status = 'waiting'` guards the same race `decide_approval`
+    /// guards elsewhere: losing it means Josh (or a resumed turn) already
+    /// moved the run on, and there is nothing here left to fail.
+    fn fail_waiting_run(
+        self: &Arc<Self>,
+        run_id: &str,
+        bot_id: &str,
+        conversation_id: Option<&str>,
+        reason: &str,
+    ) {
+        let changed = {
+            let db = self.db();
+            db.conn().execute(
+                "UPDATE runs SET status = 'failed', error = ?1, updated_at = ?2 \
+                 WHERE id = ?3 AND status = 'waiting'",
+                rusqlite::params![reason, now_iso(), run_id],
+            )
+        };
+        let changed = match changed {
+            Ok(n) => n,
+            Err(err) => {
+                tracing::error!("run {run_id}: approvals sweep failed to mark it failed: {err}");
+                return;
+            }
+        };
+        if changed == 0 {
+            return;
+        }
+
+        self.changes.touch(ChangeKind::Roster);
+        self.activity
+            .lock()
+            .expect("activity mutex poisoned")
+            .remove(run_id);
+        self.changes.touch(ChangeKind::Working);
+        self.changes.touch(ChangeKind::Approvals);
+
+        self.emit(
+            run_id,
+            RunEvent::Error {
+                message: reason.to_string(),
+                status: None,
+            },
+        );
+
+        if let Some(hook) = self
+            .on_run_done
+            .lock()
+            .expect("on_run_done mutex poisoned")
+            .as_ref()
+        {
+            hook(run_id, bot_id, conversation_id.unwrap_or_default());
+        }
+        self.finish(run_id);
+    }
+
     /// S1-F-04 (B3, B5, B13): once a run has emitted its terminal event,
     /// nothing will ever `emit` into it again, so `bus`'s senders and
     /// `stopping`'s entry can go immediately - the latter closes B13's race
@@ -1559,6 +1693,10 @@ is looking at."
                 .lock()
                 .expect("bus mutex poisoned")
                 .remove(&run_id);
+            // F8: piggybacks the approvals sweep on the same delayed task
+            // that already fires once per finished run, rather than a
+            // dedicated timer loop - see `sweep_approvals`'s own doc.
+            manager.sweep_approvals(chrono::Utc::now());
         });
     }
 

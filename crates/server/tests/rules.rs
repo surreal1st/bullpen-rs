@@ -221,6 +221,25 @@ impl RulesPort {
             .expect("classify log poisoned")
             .len()
     }
+
+    /// The most recent request sent to the classifier - what F6's test
+    /// inspects to prove a huge tool argument reached it truncated and
+    /// fenced, rather than verbatim.
+    fn last_classify_request(&self) -> ModelRequest {
+        self.classify_calls
+            .lock()
+            .expect("classify log poisoned")
+            .last()
+            .cloned()
+            .expect("classify was never called")
+    }
+}
+
+fn message_text(message: &ModelMessage) -> &str {
+    match &message.content {
+        MessageContent::Text(t) => t,
+        other => panic!("expected text content, got {other:?}"),
+    }
 }
 
 fn is_classify_request(request: &ModelRequest) -> bool {
@@ -897,4 +916,211 @@ async fn auto_review_rules_crud_round_trips_over_http() {
     let (no_bot_list_status, _) =
         get_json(&app, "/api/auto-review/rules?botId=ghost", &session).await;
     assert_eq!(no_bot_list_status, StatusCode::NOT_FOUND);
+}
+
+// ---- 12. F6: a huge tool argument reaches the classifier capped and
+// fenced, not verbatim - THE BITE ----
+
+#[tokio::test]
+async fn a_huge_command_argument_reaches_the_classifier_truncated_and_fenced() {
+    let db = open_db();
+    seed_bot(&db, "arthur", "Arthur");
+    // A rule exists so `apply_rules`/`classify` is actually consulted -
+    // "no rules means no model call" (test 2) covers the other branch.
+    seed_rule(
+        &db,
+        "arthur",
+        "clean up temp files for me",
+        RuleBehavior::Allow,
+    );
+    let conversation_id = own_conversation(&db, "arthur");
+    seed_user_message(&db, &conversation_id, "clean up");
+
+    let big_command = "x".repeat(5000);
+    let script_command = big_command.clone();
+    let port = Arc::new(RulesPort::new(
+        move |turn| {
+            if turn % 2 == 1 {
+                vec![ModelEvent::ToolCalls {
+                    calls: vec![ToolCall {
+                        id: format!("call-{turn}"),
+                        name: "shell".to_string(),
+                        arguments: json!({ "command": script_command }).to_string(),
+                    }],
+                    usage: None,
+                }]
+            } else {
+                vec![
+                    ModelEvent::Delta {
+                        text: "Done.".to_string(),
+                    },
+                    ModelEvent::Done {
+                        model: "test/model".to_string(),
+                        usage: None,
+                        finish_reason: None,
+                    },
+                ]
+            }
+        },
+        // Doesn't match - irrelevant to this test, which only inspects
+        // what was SENT to the classifier, not how it answered.
+        ClassifyBehavior::Reply(vec![]),
+    ));
+    let manager = Arc::new(RunManager::new(Arc::clone(&db), port.clone()));
+    let run_id = manager.start(StartOptions {
+        bot_id: "arthur".to_string(),
+        conversation_id: conversation_id.clone(),
+        model: "test/model".to_string(),
+        messages: vec![ModelMessage::user("clean up")],
+        trigger: Trigger::Chat,
+        room: false,
+    });
+
+    drain_until_paused_or_done(manager.subscribe(&run_id)).await;
+    assert_eq!(wait_for_status(&db, &run_id, "waiting").await, "waiting");
+    assert_eq!(port.classify_call_count(), 1);
+
+    let request = port.last_classify_request();
+    let user_text = message_text(&request.messages[1]);
+    let system_text = message_text(&request.messages[0]);
+
+    assert!(
+        !user_text.contains(&big_command),
+        "the full 5KB command must never reach the classifier, got {} bytes",
+        user_text.len()
+    );
+    assert!(
+        user_text.len() < 400,
+        "expected the fenced, capped description to stay well under 400 bytes, got {} bytes",
+        user_text.len()
+    );
+    assert!(
+        user_text.starts_with("<<<PENDING_ACTION_DATA>>>")
+            && user_text.contains("<<<END_PENDING_ACTION_DATA>>>"),
+        "expected the pending action to be fenced, got {user_text:?}"
+    );
+    assert!(
+        system_text.to_lowercase().contains("data")
+            && system_text.contains("<<<PENDING_ACTION_DATA>>>"),
+        "expected the system message to name the fence and call it data, got {system_text:?}"
+    );
+}
+
+// ---- 13. F7: identical rule text for the same bot dedupes on insert,
+// through both callers of the shared upsert - THE BITE ----
+
+#[tokio::test]
+async fn identical_rule_text_for_the_same_bot_is_deduped_on_insert() {
+    let db = open_db();
+    seed_bot(&db, "arthur", "Arthur");
+    {
+        let guard = db.lock().expect("db mutex poisoned");
+        rules::upsert_rule(
+            &guard,
+            Some("arthur".to_string()),
+            "clean up temp files",
+            RuleBehavior::Allow,
+        )
+        .expect("first upsert");
+        rules::upsert_rule(
+            &guard,
+            Some("arthur".to_string()),
+            "clean up temp files",
+            RuleBehavior::Never,
+        )
+        .expect("second upsert, same text, different behavior");
+    }
+
+    let rules = {
+        let guard = db.lock().expect("db mutex poisoned");
+        rules::list_rules_for(&guard, "arthur").expect("list rules")
+    };
+    assert_eq!(
+        rules.len(),
+        1,
+        "two identical presses must write one rule, got {rules:?}"
+    );
+    assert_eq!(
+        rules[0].behavior,
+        RuleBehavior::Never,
+        "the second press's behavior must win"
+    );
+}
+
+#[tokio::test]
+async fn two_identical_posts_to_the_rules_route_write_one_rule() {
+    let db = open_db_plain();
+    store::set_password(&db, "test-password").expect("set password");
+    seed_bot_plain(&db, "arthur", "Arthur");
+    let session = seed_session(&db);
+    let app = app_for(db, as_port(shell_then_answer_http("x")));
+
+    let body = json!({"botId": "arthur", "text": "clean up temp files", "behavior": "allow"});
+    let (first_status, _) = send_json(
+        &app,
+        "POST",
+        "/api/auto-review/rules",
+        body.clone(),
+        &session,
+    )
+    .await;
+    assert_eq!(first_status, StatusCode::CREATED);
+    let (second_status, _) =
+        send_json(&app, "POST", "/api/auto-review/rules", body, &session).await;
+    assert_eq!(second_status, StatusCode::CREATED);
+
+    let (list_status, list_body) =
+        get_json(&app, "/api/auto-review/rules?botId=arthur", &session).await;
+    assert_eq!(list_status, StatusCode::OK);
+    let rules = list_body["rules"].as_array().expect("rules array");
+    assert_eq!(
+        rules.len(),
+        1,
+        "two identical POSTs must write one rule, got {rules:?}"
+    );
+}
+
+// ---- 14. F7: `list_rules_for` caps at the newest 40 rules - THE BITE ----
+
+#[tokio::test]
+async fn list_rules_for_caps_at_the_newest_forty() {
+    let db = open_db();
+    seed_bot(&db, "arthur", "Arthur");
+    {
+        let guard = db.lock().expect("db mutex poisoned");
+        for i in 0..45 {
+            rules::add_rule(
+                &guard,
+                Some("arthur".to_string()),
+                &format!("rule number {i}"),
+                RuleBehavior::Ask,
+            )
+            .unwrap_or_else(|_| panic!("seed rule {i}"));
+            // `created_at` has millisecond resolution and these inserts can
+            // land in the same millisecond - a strictly increasing rowid
+            // (the tiebreak the cap orders by) is what actually keeps them
+            // distinguishable, so no sleep is needed here.
+        }
+    }
+
+    let rules = {
+        let guard = db.lock().expect("db mutex poisoned");
+        rules::list_rules_for(&guard, "arthur").expect("list rules")
+    };
+    assert_eq!(
+        rules.len(),
+        40,
+        "expected the cap to hold at 40, got {}",
+        rules.len()
+    );
+    assert_eq!(
+        rules.last().expect("at least one rule").text,
+        "rule number 44",
+        "expected the newest rules to survive the cap"
+    );
+    assert_eq!(
+        rules.first().expect("at least one rule").text,
+        "rule number 5",
+        "expected the oldest 5 to have been dropped by the cap"
+    );
 }
