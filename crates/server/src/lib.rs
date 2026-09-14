@@ -2,6 +2,7 @@
 //! test drives it through `tower::ServiceExt::oneshot`.
 
 mod auth;
+pub mod prompt;
 mod routes;
 
 use axum::extract::{Request, State};

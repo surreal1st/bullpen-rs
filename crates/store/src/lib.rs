@@ -4,6 +4,7 @@
 pub mod auth;
 pub mod bots;
 pub mod conversations;
+pub mod memory;
 pub mod messages;
 mod migrations;
 pub mod rooms;
@@ -14,6 +15,9 @@ pub use bots::{get_bot, list_bots, list_sections};
 pub use conversations::{
     create_thread, get_conversation, get_or_create_conversation, list_threads,
     title_from_first_message, touch_thread, validate_members,
+};
+pub use memory::{
+    LogEntry, RECALL_TOKEN_BUDGET, Recall, get_core, recall_for, remember, search_log, set_core,
 };
 pub use messages::{NewMessage, Usage, append_message, delete_message, list_messages};
 pub use rooms::{create_room, get_room, list_rooms, update_room};
@@ -71,6 +75,20 @@ impl Db {
             "messages",
             "reactions",
             "ALTER TABLE messages ADD COLUMN reactions TEXT",
+        )?;
+        // S1-04: `bots.rs` (`get_bot`/`list_bots`) already reads these three -
+        // self-creating in the TS original too (`ensureBotsEffortColumn`,
+        // `ensureBotVoiceColumn`, `ensureBotIsTemplateColumn`), never a
+        // MIGRATIONS entry. Missing here meant `get_bot` threw "no such
+        // column: effort" on any database that only ran migrations 1..16 -
+        // every fresh `:memory:` db, just not the checked-in fixture, which
+        // already carries them from the TS export.
+        db.ensure_column("bots", "effort", "ALTER TABLE bots ADD COLUMN effort TEXT")?;
+        db.ensure_column("bots", "voice", "ALTER TABLE bots ADD COLUMN voice TEXT")?;
+        db.ensure_column(
+            "bots",
+            "is_template",
+            "ALTER TABLE bots ADD COLUMN is_template INTEGER NOT NULL DEFAULT 0",
         )?;
 
         Ok(db)

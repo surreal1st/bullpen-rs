@@ -1,6 +1,7 @@
 //! Types both halves of Bullpen use. Port of `src/shared` in the TS original.
 
 pub mod faces;
+pub mod nothing_new;
 
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
