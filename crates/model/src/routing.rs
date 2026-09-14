@@ -3,7 +3,7 @@
 //! whether Josh's turn asks for something new (work), running a known routine
 //! (action), or answering from memory (lookup). Port of `src/server/routing.ts`.
 
-use crate::port::{ModelEvent, ModelPort, ModelRequest, ModelUsage, CHEAP_DEFAULT_MODEL};
+use crate::port::{CHEAP_DEFAULT_MODEL, ModelEvent, ModelPort, ModelRequest, ModelUsage};
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 use store::Db;
@@ -35,8 +35,7 @@ pub struct RoutingSettings {
 }
 
 /// Josh asked for this by name, so it ships ON, with this text, not parked behind a flag.
-pub const DEFAULT_ROUTING_TEXT: &str =
-    "Route to the stronger model when the message asks for something new to be written, planned, analysed, coded or decided. Keep the fast model for questions I can answer from what I already know, and for running things I already have.";
+pub const DEFAULT_ROUTING_TEXT: &str = "Route to the stronger model when the message asks for something new to be written, planned, analysed, coded or decided. Keep the fast model for questions I can answer from what I already know, and for running things I already have.";
 
 const ENABLED_KEY: &str = "routing.enabled";
 const TEXT_KEY: &str = "routing.text";
@@ -140,7 +139,9 @@ pub fn list_routing_log(db: &Db, limit: usize) -> Result<Vec<RoutingLogEntry>, S
             })
         })
         .map_err(|e| e.to_string())?;
-    entries.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    entries
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
 }
 
 /// Record a routing verdict in the log, capped at MAX_LOG_ROWS.
@@ -196,11 +197,22 @@ fn uuid() -> String {
 
     format!(
         "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0], bytes[1], bytes[2], bytes[3],
-        bytes[4], bytes[5],
-        bytes[6], bytes[7],
-        bytes[8], bytes[9],
-        bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15],
     )
 }
 
@@ -323,7 +335,8 @@ Reply with ONLY that one word. No other words, no punctuation."#,
         rule_text
     );
 
-    let messages_for_call = crate::port::utility_messages(&instruction, recent_turns_text(messages));
+    let messages_for_call =
+        crate::port::utility_messages(&instruction, recent_turns_text(messages));
     let request = ModelRequest {
         model: CHEAP_DEFAULT_MODEL.to_string(),
         messages: messages_for_call,
@@ -343,13 +356,16 @@ Reply with ONLY that one word. No other words, no punctuation."#,
                 return ClassifyResult {
                     verdict: RoutingVerdict::Lookup,
                     usage: None,
-                }
+                };
             }
         }
     }
 
     let cleaned = text.trim().to_lowercase();
-    let cleaned = cleaned.chars().filter(|c| c.is_alphabetic()).collect::<String>();
+    let cleaned = cleaned
+        .chars()
+        .filter(|c| c.is_alphabetic())
+        .collect::<String>();
     let verdict = match cleaned.as_str() {
         "work" => RoutingVerdict::Work,
         "action" => RoutingVerdict::Action,
@@ -367,10 +383,7 @@ fn is_routable(trigger: Trigger, messages: &[crate::port::ModelMessage], room: b
     if trigger != Trigger::Chat || room {
         return false;
     }
-    messages
-        .last()
-        .map(|m| m.role == "user")
-        .unwrap_or(false)
+    messages.last().map(|m| m.role == "user").unwrap_or(false)
 }
 
 /// The model floor that this run uses (re-exported from ladder).
@@ -407,8 +420,7 @@ pub async fn maybe_route(
     }
 
     // Run the classifier
-    let ClassifyResult { verdict, usage } =
-        classify_turn(port, &settings.text, messages).await;
+    let ClassifyResult { verdict, usage } = classify_turn(port, &settings.text, messages).await;
 
     // Determine the final model and record the verdict
     let final_model = if verdict == RoutingVerdict::Work {
