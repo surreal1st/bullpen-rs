@@ -160,14 +160,13 @@ pub async fn judge_pin(catalog: &dyn Catalog, model_id: &str, has_routine: bool)
     //    killed both scheduled runs of qwen3.7-flash with
     //    `429 limit_source: upstream_provider_shared_pool`.
     if let Ok(Some((provider_count, _))) = catalog.detail(model_id).await {
-        if provider_count <= 1 {
-            if has_routine {
-                return PinVerdict::refusal(
-                    "Only one provider serves this model, so its rate limit is other people's traffic. \
-                     A scheduled run will die on a 429 at some point and you will not be watching. \
-                     Pin a model with more than one provider.",
-                );
-            }
+        if provider_count <= 1 && has_routine {
+            return PinVerdict::refusal(
+                "Only one provider serves this model, so its rate limit is other people's traffic. \
+                 A scheduled run will die on a 429 at some point and you will not be watching. \
+                 Pin a model with more than one provider.",
+            );
+        } else if provider_count <= 1 {
             return PinVerdict::warning(
                 "Only one provider serves this model. Expect rate limits under load.",
             );

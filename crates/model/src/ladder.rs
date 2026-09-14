@@ -252,7 +252,6 @@ pub fn tier_of(db: &Db, model: &str) -> u8 {
 /// Getter functions using TS naming convention (for routes).
 ///
 /// These mirror the TS `getDefaultModel`, `getMidModel`, etc. from app.ts.
-
 pub fn get_default_model(db: &Db) -> String {
     default_model(db)
 }
