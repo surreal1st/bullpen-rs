@@ -8,3 +8,6 @@
 *.env
 /data
 .impeccable/
+# Per-builder cargo target dirs (CARGO_TARGET_DIR=target-<ticket>) used when
+# another builder's debug server holds target/debug/bullpen.exe.
+target-*/
