@@ -55,8 +55,9 @@ fn row_to_bot(row: BotRow) -> Bot {
 }
 
 /// Strip markdown and truncate to 140 chars. Matches TS `firstLine` function.
-/// `pub(crate)`: `rooms.rs` reuses it for a room's own preview line.
-pub(crate) fn first_line(content: &str) -> String {
+/// Strips paired emphasis (`**bold**`, `*italic*`) and headings/links,
+/// but preserves bare asterisks/underscores (e.g. `repo_read`).
+pub fn first_line(content: &str) -> String {
     let lines: Vec<&str> = content
         .split('\n')
         .map(|l| l.trim())
@@ -69,10 +70,22 @@ pub(crate) fn first_line(content: &str) -> String {
 
     let mut line = lines[0].to_string();
 
-    // Remove headings (1-6 hashes followed by space)
-    let trimmed = line.trim_start_matches('#').trim_start();
-    if trimmed != line {
-        line = trimmed.to_string();
+    // Remove headings (1-6 hashes followed by space, like TS regex /^#{1,6}\s+/)
+    // Only remove if there's a space after the hashes
+    if line.starts_with('#') {
+        let hash_count = line.chars().take_while(|&c| c == '#').count();
+        if hash_count > 0 && hash_count <= 6 && line.len() > hash_count {
+            // Check if after the hashes there's whitespace
+            if line
+                .chars()
+                .nth(hash_count)
+                .map(|c| c.is_whitespace())
+                .unwrap_or(false)
+            {
+                // Remove the hashes and the following whitespace
+                line = line[hash_count..].trim_start().to_string();
+            }
+        }
     }
 
     // Remove list markers
@@ -90,12 +103,43 @@ pub(crate) fn first_line(content: &str) -> String {
     // Remove code formatting
     line = line.replace("```", "").replace("`", "");
 
-    // Remove bold
-    line = line.replace("**", "");
-    line = line.replace("__", "");
+    // Remove paired emphasis markers: **bold** and *italic*.
+    // Mirrors TS `firstLine` which uses regexes to match only when there are no
+    // asterisks inside the delimiters.
 
-    // Remove italic
-    line = line.replace("*", "").replace("_", "");
+    // Remove **bold** - keep replacing while we find pairs
+    while let Some(start) = line.find("**") {
+        if let Some(rest) = line[start + 2..].find("**") {
+            let end = start + 2 + rest;
+            let between = &line[start + 2..end];
+            if between.contains('*') {
+                break; // Found **, but asterisk inside, so stop
+            }
+            line = format!("{}{}{}", &line[..start], between, &line[end + 2..]);
+        } else {
+            break; // No closing **, stop
+        }
+    }
+
+    // Remove *italic* - only single asterisks
+    while let Some(start) = line.find('*') {
+        if start + 1 < line.len() && line.as_bytes()[start + 1] == b'*' {
+            break; // This is **, skip
+        }
+        if let Some(rest) = line[start + 1..].find('*') {
+            let end = start + 1 + rest;
+            if end + 1 < line.len() && line.as_bytes()[end + 1] == b'*' {
+                break; // Next char is *, would be **, so stop
+            }
+            let between = &line[start + 1..end];
+            if between.contains('*') {
+                break; // Asterisk inside, stop
+            }
+            line = format!("{}{}{}", &line[..start], between, &line[end + 1..]);
+        } else {
+            break; // No closing *, stop
+        }
+    }
 
     // Remove links
     while let Some(start) = line.find('[') {

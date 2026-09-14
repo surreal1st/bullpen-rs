@@ -197,3 +197,28 @@ fn set_house_rules_caps_at_4000_chars() {
     assert_eq!(stored.len(), 4000);
     assert_eq!(house_rules(&db).len(), 4000);
 }
+
+#[test]
+fn history_budget_uses_utf16_code_units() {
+    // F22: verify recent_history counts UTF-16 code units like TS, not UTF-8 bytes.
+    // Test with messages where UTF-16 code unit count differs from byte count
+    // to prove the fix is working correctly.
+
+    // Budget: 6000 tokens * 4 = 24000 UTF-16 code units
+    // Emoji 😀 outside BMP: 1 scalar, 2 UTF-16 units, 4 UTF-8 bytes
+    // Test with 50 emoji per message = 100 UTF-16 units or 200 UTF-8 bytes
+    // Correct UTF-16: 240 messages fit. Wrong UTF-8: 120 messages fit.
+    let emoji_msg = "😀".repeat(50);
+    let messages: Vec<HistoryTurn> = (0..180)
+        .map(|i| HistoryTurn::user(format!("msg-{:03} {}", i, emoji_msg)))
+        .collect();
+
+    let kept = server::prompt::recent_history(&messages);
+
+    // UTF-16 counting: 180 messages fit. UTF-8 counting: ~120 messages fit.
+    assert!(
+        kept.len() >= 150,
+        "with UTF-16 code unit counting, should keep most of 180 emoji messages (kept {})",
+        kept.len()
+    );
+}

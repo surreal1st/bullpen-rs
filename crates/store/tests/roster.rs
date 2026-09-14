@@ -144,3 +144,29 @@ fn test_roster_entry_serialization() {
     // Clean up
     let _ = fs::remove_file(&temp_db);
 }
+
+#[test]
+fn test_first_line_strips_paired_emphasis_and_preserves_bare_underscores() {
+    // F15: first_line should strip only paired */* emphasis and preserve bare
+    // underscores that are not part of emphasis markers.
+    use store::roster::first_line;
+
+    // Test: **bold** should be stripped
+    assert_eq!(first_line("**bold** text"), "bold text");
+
+    // Test: *italic* should be stripped
+    assert_eq!(first_line("*italic* text"), "italic text");
+
+    // Test: bare underscore in repo_read should be preserved
+    assert_eq!(first_line("Ran repo_read on the checkout"), "Ran repo_read on the checkout");
+
+    // Test: # with space should be stripped but #1 without space should be kept
+    assert_eq!(first_line("# Heading text"), "Heading text");
+    assert_eq!(first_line("#1 on the list"), "#1 on the list");
+
+    // Test: complex case with mixed emphasis and bare underscores
+    assert_eq!(first_line("Fixed **task_name** in *module_code*"), "Fixed task_name in module_code");
+
+    // Test: multiple paired emphasis
+    assert_eq!(first_line("This is **bold** and *italic* text"), "This is bold and italic text");
+}

@@ -106,7 +106,14 @@ pub fn recent_history(history: &[HistoryTurn]) -> Vec<HistoryTurn> {
     let mut kept: Vec<HistoryTurn> = Vec::new();
 
     for message in history.iter().rev() {
-        budget -= message.content.len() as i64;
+        // Count UTF-16 code units like TS `.length`, not UTF-8 bytes or Unicode scalars.
+        // Emoji outside BMP count as 2 code units in UTF-16, 1 scalar in Rust.
+        let utf16_len = message
+            .content
+            .chars()
+            .map(|c| if c as u32 > 0xFFFF { 2 } else { 1 })
+            .sum::<i64>();
+        budget -= utf16_len;
         if budget < 0 && !kept.is_empty() {
             break;
         }

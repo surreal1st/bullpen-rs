@@ -104,8 +104,11 @@ pub const SHAPES: &[(&str, Shape)] = &[
 /// face on reload.
 pub fn default_shape_for(name: &str) -> &'static str {
     let mut h: u32 = 0;
-    for b in name.bytes() {
-        h = (h.wrapping_mul(31).wrapping_add(b as u32)) % 9973;
+    // Hash UTF-16 code units like TS `charCodeAt`, not UTF-8 bytes.
+    // This ensures bots with non-ASCII names draw the same face in the Rust client
+    // as in live Bullpen.
+    for code_unit in name.encode_utf16() {
+        h = (h.wrapping_mul(31).wrapping_add(code_unit as u32)) % 9973;
     }
     let idx = (h as usize) % SHAPES.len();
     SHAPES[idx].0

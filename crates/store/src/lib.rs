@@ -10,7 +10,10 @@ mod migrations;
 pub mod rooms;
 pub mod roster;
 
-pub use auth::{is_configured, session_valid};
+pub use auth::{
+    PasswordRecord, create_session, destroy_session, is_configured, password_record, session_valid,
+    set_password, verify_password,
+};
 pub use bots::{get_bot, list_bots, list_sections};
 pub use conversations::{
     archive_thread, create_thread, get_conversation, get_or_create_conversation, list_threads,
@@ -21,7 +24,7 @@ pub use memory::{
 };
 pub use messages::{NewMessage, Usage, append_message, delete_message, list_messages};
 pub use rooms::{create_room, get_room, list_rooms, mark_room_seen, mark_room_unread, update_room};
-pub use roster::list_roster;
+pub use roster::{first_line, list_roster};
 
 use rusqlite::{Connection, OptionalExtension, params};
 use std::time::Duration;
