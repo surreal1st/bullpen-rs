@@ -879,6 +879,21 @@ button.effort-glyph:disabled {
   width: min(40rem, calc(100vw - 2rem));
   max-height: min(34rem, calc(100vh - 4rem));
   overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.mem,
+.mem * {
+  /* S3-F-01c (D3, `shots/s3-memory.png`): `.mem-core-box` is `.rules-box`
+     (`width: 100%` + padding + a border) with no `box-sizing` reset
+     anywhere in this file, so under the browser's content-box default the
+     textarea's rendered width was 100% of the modal PLUS its own padding
+     and border - a few px wider than the modal on every render, which is
+     exactly what `overflow-y: auto` on `.mem-modal` (auto-computes
+     `overflow-x` to `auto` too, per spec, when only one axis is set) turned
+     into a permanent horizontal scrollbar. `overflow-x: hidden` above is
+     belt-and-suspenders; this is the actual fix. */
+  box-sizing: border-box;
 }
 
 .mem {
@@ -958,15 +973,48 @@ button.effort-glyph:disabled {
   color: var(--danger);
 }
 
+.mem-search {
+  margin: 0.6rem 0 0;
+}
+
+.mem-search input {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--ink);
+  padding: 0.4rem 0.6rem;
+  font: inherit;
+  font-size: 0.85rem;
+}
+
+.mem-add-group {
+  margin-top: 0.7rem;
+}
+
+.mem-add-group .mem-add-note {
+  margin-top: 0.3rem;
+}
+
+.mem-add-label {
+  display: block;
+  color: #5c6a7b;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
 .mem-add-note {
   display: flex;
   align-items: center;
   gap: 0.5rem;
   margin-top: 0.7rem;
+  min-width: 0;
 }
 
 .mem-add-note input {
   flex: 1;
+  min-width: 0;
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--bg);

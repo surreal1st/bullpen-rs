@@ -717,14 +717,48 @@ pub async fn patch_bot(bot_id: &str, body: serde_json::Value) -> Result<Bot, Str
 
 /* --------------------------------------------------------------- S3-05: memory */
 
-/// `GET /api/bots/:id/memory` - core, its token budget, and the recent log.
-pub async fn fetch_bot_memory(bot_id: &str) -> Result<MemoryView, String> {
-    let url = format!("/api/bots/{bot_id}/memory");
+/// `GET /api/bots/:id/memory[?q=...]` - core, its token budget, and the log,
+/// filtered server-side when `query` is non-empty (`routes/memory.rs`'s
+/// `get_bot_memory` reads `q` and calls `store::memory::search_log`). Every
+/// caller in `memory_editor.rs` passes the search box's current value, empty
+/// or not - there is no separate "plain" fetch.
+pub async fn fetch_bot_memory_query(bot_id: &str, query: &str) -> Result<MemoryView, String> {
+    let url = if query.is_empty() {
+        format!("/api/bots/{bot_id}/memory")
+    } else {
+        let encoded: String = js_sys::encode_uri_component(query).into();
+        format!("/api/bots/{bot_id}/memory?q={encoded}")
+    };
     let resp = Request::get(&url).send().await.map_err(|e| e.to_string())?;
     if !resp.ok() {
         return Err(format!("{url} -> {}", resp.status()));
     }
     resp.json::<MemoryView>().await.map_err(|e| e.to_string())
+}
+
+/// `POST /api/bots/:id/memory` - a durable entry with no TTL (`source:
+/// "josh"`, `routes/memory.rs::post_bot_memory`). The pane's "Remember"
+/// row - see `S3-F-01c`'s doc on `memory_editor.rs` for why the note form
+/// alone could not express this.
+pub async fn remember_entry(bot_id: &str, content: &str) -> Result<MemoryEntry, String> {
+    #[derive(Serialize)]
+    struct Req<'a> {
+        content: &'a str,
+    }
+    let url = format!("/api/bots/{bot_id}/memory");
+    let resp = Request::post(&url)
+        .json(&Req { content })
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("{url} -> {}", resp.status()));
+    }
+    resp.json::<MemoryEntryField>()
+        .await
+        .map(|b| b.entry)
+        .map_err(|e| e.to_string())
 }
 
 /// `PUT /api/bots/:id/memory/core`.

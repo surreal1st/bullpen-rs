@@ -28,8 +28,13 @@ use dioxus::prelude::*;
 use js_sys::Date;
 use wasm_bindgen::JsValue;
 
-/// Add-note TTL choices: label -> seconds.
+/// Add-note TTL choices: label -> seconds. Default index is 1 ("1d"),
+/// matching the `note` TOOL's own default (`tools/note.rs:25`) - S3-F-01c
+/// (F1 in `S3-R.md`): the old default (index 0, "1h") meant a note typed in
+/// the UI silently outlived its usefulness by the next prompt build's sweep
+/// unless Josh caught the dropdown.
 const TTL_CHOICES: &[(&str, u64)] = &[("1h", 3_600), ("1d", 86_400), ("1w", 604_800)];
+const DEFAULT_TTL_INDEX: usize = 1;
 
 fn parse_iso_ms(iso: &str) -> Option<f64> {
     let date = Date::new(&JsValue::from_str(iso));
@@ -56,13 +61,18 @@ fn format_ttl(expires_at: &str) -> Option<String> {
     Some(format!("expires in {}d", hours / 24))
 }
 
+/// `query` is the current search box value - empty means the plain recent
+/// log, non-empty hits the server's `?q=` branch (S3-F-01c, F1: the search
+/// box was missing entirely, so this branch of `GET .../memory` was dead
+/// from the client's side even though the server already served it).
 async fn load_view(
     bot_id: String,
+    query: String,
     mut view: Signal<Option<MemoryView>>,
     mut core_text: Signal<String>,
     mut core_saved: Signal<String>,
 ) {
-    if let Ok(v) = api::fetch_bot_memory(&bot_id).await {
+    if let Ok(v) = api::fetch_bot_memory_query(&bot_id, &query).await {
         // Never stomp an unsaved core edit sitting in the textarea when a
         // background change (another tab, a bot's own `remember`) fires
         // this refetch - only seed the textarea when it is not currently
@@ -99,6 +109,7 @@ fn delete_memory_entry(
     view: Signal<Option<MemoryView>>,
     core_text: Signal<String>,
     core_saved: Signal<String>,
+    search_query: Signal<String>,
     mut error: Signal<Option<String>>,
     bot_id: String,
     entry_id: String,
@@ -107,7 +118,8 @@ fn delete_memory_entry(
         if let Err(err) = api::delete_bot_memory_entry(&bot_id, &entry_id).await {
             error.set(Some(err));
         }
-        load_view(bot_id, view, core_text, core_saved).await;
+        let query = search_query.read().clone();
+        load_view(bot_id, query, view, core_text, core_saved).await;
     });
 }
 
@@ -171,9 +183,12 @@ fn MemoryEditor(bot_id: String) -> Element {
     let mut core_text = use_signal(String::new);
     let mut core_saved = use_signal(String::new);
     let mut core_busy = use_signal(|| false);
+    let mut remember_content = use_signal(String::new);
+    let mut remember_busy = use_signal(|| false);
     let mut note_content = use_signal(String::new);
-    let mut note_ttl = use_signal(|| TTL_CHOICES[0].1);
+    let mut note_ttl = use_signal(|| TTL_CHOICES[DEFAULT_TTL_INDEX].1);
     let mut note_busy = use_signal(|| false);
+    let mut search_query = use_signal(String::new);
     let mut error = use_signal(|| None::<String>);
     let projects = use_signal(Vec::<ProjectSummary>::new);
     let mut new_project_name = use_signal(String::new);
@@ -183,7 +198,13 @@ fn MemoryEditor(bot_id: String) -> Element {
     let load_bot_id = bot_id.clone();
     use_effect(move || {
         let bot_id = load_bot_id.clone();
-        spawn(load_view(bot_id, view, core_text, core_saved));
+        spawn(load_view(
+            bot_id,
+            String::new(),
+            view,
+            core_text,
+            core_saved,
+        ));
     });
 
     use_effect(move || {
@@ -204,7 +225,10 @@ fn MemoryEditor(bot_id: String) -> Element {
         subscribe_events(move |kind| {
             if kind == ChangeKind::Memory {
                 let bot_id = bot_id.clone();
-                wasm_bindgen_futures::spawn_local(load_view(bot_id, view, core_text, core_saved));
+                let query = search_query.read().clone();
+                wasm_bindgen_futures::spawn_local(load_view(
+                    bot_id, query, view, core_text, core_saved,
+                ));
                 wasm_bindgen_futures::spawn_local(load_projects(projects));
                 wasm_bindgen_futures::spawn_local(load_shared(shared));
             }
@@ -240,6 +264,40 @@ fn MemoryEditor(bot_id: String) -> Element {
         });
     };
 
+    // The durable path (S3-F-01c, F1) - `POST .../memory`, no TTL, sits
+    // above the note form so "permanent" vs "expires" reads as a choice
+    // made up front rather than a dropdown easy to miss (the TS original's
+    // `.memory-add`, `MemoryEditor.tsx:161-172`).
+    let bot_id_remember = bot_id.clone();
+    let add_remember = move |evt: FormEvent| {
+        evt.prevent_default();
+        let content = remember_content.read().trim().to_string();
+        if content.is_empty() {
+            return;
+        }
+        let bot_id = bot_id_remember.clone();
+        remember_busy.set(true);
+        spawn(async move {
+            match api::remember_entry(&bot_id, &content).await {
+                Ok(_) => {
+                    remember_content.set(String::new());
+                    let query = search_query.read().clone();
+                    load_view(bot_id, query, view, core_text, core_saved).await;
+                }
+                Err(err) => error.set(Some(err)),
+            }
+            remember_busy.set(false);
+        });
+    };
+
+    let bot_id_search = bot_id.clone();
+    let on_search_input = move |evt: FormEvent| {
+        let query = evt.value();
+        search_query.set(query.clone());
+        let bot_id = bot_id_search.clone();
+        spawn(load_view(bot_id, query, view, core_text, core_saved));
+    };
+
     let bot_id_note = bot_id.clone();
     let add_note = move |evt: FormEvent| {
         evt.prevent_default();
@@ -254,7 +312,8 @@ fn MemoryEditor(bot_id: String) -> Element {
             match api::post_bot_memory_note(&bot_id, &content, ttl).await {
                 Ok(_) => {
                     note_content.set(String::new());
-                    load_view(bot_id, view, core_text, core_saved).await;
+                    let query = search_query.read().clone();
+                    load_view(bot_id, query, view, core_text, core_saved).await;
                 }
                 Err(err) => error.set(Some(err)),
             }
@@ -286,8 +345,10 @@ fn MemoryEditor(bot_id: String) -> Element {
     };
     let is_dirty = *core_text.read() != *core_saved.read();
     let is_core_busy = *core_busy.read();
+    let is_remember_busy = *remember_busy.read();
     let is_note_busy = *note_busy.read();
     let is_project_busy = *project_busy.read();
+    let is_searching = !search_query.read().trim().is_empty();
 
     // Precomputed per the codebase's own pattern for a `for` body that
     // needs more than one derived value per row (`permissions_editor.rs`'s
@@ -337,8 +398,18 @@ fn MemoryEditor(bot_id: String) -> Element {
 
             div { class: "stg-sub",
                 h4 { class: "stg-sub-h", "Log ({status.entries})" }
+                div { class: "mem-search",
+                    input {
+                        value: "{search_query}",
+                        placeholder: "Search this memory\u{2026}",
+                        "aria-label": "Search memory",
+                        oninput: on_search_input,
+                    }
+                }
                 if log_rows.is_empty() {
-                    p { class: "muted", "Nothing remembered yet." }
+                    p { class: "muted",
+                        if is_searching { "Nothing matches." } else { "Nothing remembered yet." }
+                    }
                 } else {
                     ul { class: "mem-log",
                         for (entry , kind , ttl) in log_rows {
@@ -359,6 +430,7 @@ fn MemoryEditor(bot_id: String) -> Element {
                                                     view,
                                                     core_text,
                                                     core_saved,
+                                                    search_query,
                                                     error,
                                                     bot_id.clone(),
                                                     entry_id.clone(),
@@ -374,32 +446,54 @@ fn MemoryEditor(bot_id: String) -> Element {
                     }
                 }
 
-                form {
-                    class: "mem-add-note",
-                    onsubmit: add_note,
-                    input {
-                        value: "{note_content}",
-                        placeholder: "Add a note\u{2026}",
-                        "aria-label": "Note content",
-                        oninput: move |evt| note_content.set(evt.value()),
-                    }
-                    select {
-                        class: "mem-ttl-select",
-                        "aria-label": "Note expiry",
-                        value: "{note_ttl}",
-                        onchange: move |evt| {
-                            if let Ok(secs) = evt.value().parse::<u64>() {
-                                note_ttl.set(secs);
-                            }
-                        },
-                        for (label , secs) in TTL_CHOICES.iter().copied() {
-                            option { key: "{label}", value: "{secs}", "{label}" }
+                div { class: "mem-add-group",
+                    span { class: "mem-add-label", "Remember (permanent)" }
+                    form {
+                        class: "mem-add-note",
+                        onsubmit: add_remember,
+                        input {
+                            value: "{remember_content}",
+                            placeholder: "Tell it something to remember\u{2026}",
+                            "aria-label": "Remember permanently",
+                            oninput: move |evt| remember_content.set(evt.value()),
+                        }
+                        button {
+                            r#type: "submit",
+                            disabled: is_remember_busy || remember_content.read().trim().is_empty(),
+                            if is_remember_busy { "Remembering\u{2026}" } else { "Remember" }
                         }
                     }
-                    button {
-                        r#type: "submit",
-                        disabled: is_note_busy || note_content.read().trim().is_empty(),
-                        "Add note"
+                }
+
+                div { class: "mem-add-group",
+                    span { class: "mem-add-label", "Note (expires)" }
+                    form {
+                        class: "mem-add-note",
+                        onsubmit: add_note,
+                        input {
+                            value: "{note_content}",
+                            placeholder: "Add a note\u{2026}",
+                            "aria-label": "Note content",
+                            oninput: move |evt| note_content.set(evt.value()),
+                        }
+                        select {
+                            class: "mem-ttl-select",
+                            "aria-label": "Note expiry",
+                            value: "{note_ttl}",
+                            onchange: move |evt| {
+                                if let Ok(secs) = evt.value().parse::<u64>() {
+                                    note_ttl.set(secs);
+                                }
+                            },
+                            for (label , secs) in TTL_CHOICES.iter().copied() {
+                                option { key: "{label}", value: "{secs}", "{label}" }
+                            }
+                        }
+                        button {
+                            r#type: "submit",
+                            disabled: is_note_busy || note_content.read().trim().is_empty(),
+                            "Add note"
+                        }
                     }
                 }
             }
