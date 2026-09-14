@@ -18,7 +18,10 @@ export PATH="/c/Users/rain/.cargo/bin:$PATH"
 MERIDIAN_HOST="meridian"
 BULLPEN_HOME="/home/bullpen"
 BULLPEN_RS_HOME="$BULLPEN_HOME/bullpen-rs"
-INCOMING="$BULLPEN_RS_HOME/incoming"
+# Staged in the ssh user's own home: /home/bullpen is 750 bullpen:bullpen, so the
+# transfer user cannot create anything under it. install.sh (root) reads from
+# wherever it sits, then installs into $BULLPEN_RS_HOME.
+INCOMING="/home/rainmade/bullpen-rs-incoming"
 
 echo "Checking zig availability..."
 zig version
