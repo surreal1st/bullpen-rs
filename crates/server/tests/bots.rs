@@ -8,6 +8,7 @@ use axum::body::Body;
 use axum::http::Request;
 use serde_json::{Value, json};
 use server::AppState;
+use std::sync::Arc;
 use store::Db;
 use tower::ServiceExt;
 
@@ -16,6 +17,46 @@ use common::seed_session;
 
 fn open_db() -> Db {
     Db::open(":memory:").expect("open :memory: db")
+}
+
+/// F2/D9: `PATCH /api/bots/:id`'s model pin now judges against the
+/// catalogue (`model::judge_pin`), so any test that expects a pin to be
+/// ACCEPTED needs one that actually lists the model - `AppState::new`'s
+/// default is an empty fixture in tests, which would refuse every pin with
+/// "OpenRouter does not list this model."
+fn fixture_catalog() -> Arc<dyn model::catalog::Catalog> {
+    let json = r#"[
+        {
+            "id": "anthropic/claude-sonnet-5",
+            "name": "Claude Sonnet 5",
+            "inPerM": 3.0,
+            "outPerM": 15.0,
+            "contextLength": 200000,
+            "supportsTools": true,
+            "supportsImages": true,
+            "supportsReasoning": false,
+            "providerCount": 2,
+            "supportsCaching": true
+        },
+        {
+            "id": "anthropic/claude-fable-5.1",
+            "name": "Claude Fable 5.1",
+            "inPerM": 1.5,
+            "outPerM": 6.0,
+            "contextLength": 100000,
+            "supportsTools": true,
+            "supportsImages": true,
+            "supportsReasoning": false,
+            "providerCount": 2,
+            "supportsCaching": true
+        }
+    ]"#;
+    Arc::new(model::catalog::FixtureCatalog::from_json(json).expect("parse fixture"))
+}
+
+fn app_with_catalog(db: Db, catalog: Arc<dyn model::catalog::Catalog>) -> Router {
+    let state = AppState::with_catalog(db, catalog);
+    server::build_app(state)
 }
 
 fn seed_bot(db: &Db, id: &str, name: &str) {
@@ -71,7 +112,7 @@ async fn patch_model_round_trips_via_roster() {
     let db = open_db();
     seed_bot(&db, "test-bot", "Test Bot");
     let session = seed_session(&db);
-    let app = app_for(db);
+    let app = app_with_catalog(db, fixture_catalog());
 
     let (status, response) = patch_route(
         &app,
@@ -128,6 +169,38 @@ async fn patch_model_refuses_premium() {
 
     // Bite: the pin must not have landed - GET the roster and confirm the
     // refused model never reached the bot row.
+    let (_status, roster) = get_route(&app, "/api/roster", &session).await;
+    let bots = roster["bots"].as_array().unwrap();
+    let bot = bots.iter().find(|b| b["id"] == "test-bot").unwrap();
+    assert!(bot["model"].is_null(), "a refused pin must not be stored");
+}
+
+/// F2/D9: `judge_pin` refuses a `:batch` slug with TS's message - "13 of 15
+/// bots died on it on the previous platform" (S2-R-spec.md D9). Bite: before
+/// this ticket, `judge_pin` had no caller here at all, so this pin landed
+/// and a run against it would 404.
+#[tokio::test]
+async fn patch_model_refuses_batch_suffix() {
+    let db = open_db();
+    seed_bot(&db, "test-bot", "Test Bot");
+    let session = seed_session(&db);
+    let app = app_with_catalog(db, fixture_catalog());
+
+    let (status, response) = patch_route(
+        &app,
+        "/api/bots/test-bot",
+        &session,
+        json!({ "model": "anthropic/claude-sonnet-5:batch" }),
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert!(
+        response["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("batch-only")
+    );
+
     let (_status, roster) = get_route(&app, "/api/roster", &session).await;
     let bots = roster["bots"].as_array().unwrap();
     let bot = bots.iter().find(|b| b["id"] == "test-bot").unwrap();

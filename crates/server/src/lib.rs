@@ -123,10 +123,17 @@ fn default_port() -> Arc<dyn model::ModelPort> {
     Arc::new(model::OpenRouterPort::new(model::KeySource::Env))
 }
 
-/// S2-06: empty fixture catalog for production (real catalog would come from env).
-/// Tests override this with their own fixture.
+/// F2: the real OpenRouter catalogue when a key is configured - the only
+/// way a production server's picker is ever non-empty - falling back to an
+/// empty fixture only when no key is set at all (a dev box with nothing
+/// configured yet, not a real deployment). Tests override this entirely
+/// with their own fixture via `AppState::with_catalog`.
 fn default_catalog() -> Arc<dyn Catalog> {
-    Arc::new(model::FixtureCatalog::from_json("[]").unwrap())
+    if model::KeySource::Env.resolve().is_some() {
+        Arc::new(model::OpenRouterCatalog::new(model::KeySource::Env))
+    } else {
+        Arc::new(model::FixtureCatalog::from_json("[]").unwrap())
+    }
 }
 
 /// Fallback for anything the API router didn't match: `/api/*` gets a plain

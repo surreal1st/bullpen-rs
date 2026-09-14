@@ -15,6 +15,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::patch;
 use axum::{Json, Router};
+use model::judge_pin;
 use serde_json::json;
 
 use super::settings::refuse_if_premium;
@@ -37,10 +38,17 @@ async fn patch_bot(
     Path(id): Path<String>,
     body: axum::body::Bytes,
 ) -> Result<Response, crate::AppError> {
-    let db = state.db();
-    if store::get_bot(&db, &id)?.is_none() {
+    // Locked scope: `existing` (and its `has_routine`) is read here and the
+    // guard dropped before the `judge_pin` await below - a `MutexGuard`
+    // cannot cross an `.await` and stay `Send`, which is what an axum
+    // handler future must be.
+    let existing = {
+        let db = state.db();
+        store::get_bot(&db, &id)?
+    };
+    let Some(existing) = existing else {
         return Ok(no_such_bot());
-    }
+    };
 
     let parsed: serde_json::Value = if body.is_empty() {
         json!({})
@@ -52,6 +60,10 @@ async fn patch_bot(
         return Err(crate::AppError::bad_request("invalid JSON body"));
     };
 
+    // `Some(Some(id))` = set the pin, `Some(None)` = clear it, `None` = the
+    // field was absent from the body at all - collected here and written
+    // once the db lock is retaken below.
+    let mut model_update: Option<Option<String>> = None;
     if let Some(raw) = obj.get("model") {
         let model = match raw {
             serde_json::Value::Null => None,
@@ -67,19 +79,31 @@ async fn patch_bot(
         };
         if let Some(ref m) = model {
             // The pin is judged HERE, while Josh is looking at the screen -
-            // same posture the TS `judgePin` call takes, narrowed to the one
-            // check this ticket ports.
-            refuse_if_premium(&db, m)?;
+            // same posture the TS `judgePin` call takes (`app.ts:1207`).
+            // `existing.has_routine` tightens the free-tier and
+            // provider-redundancy rules the same way an unattended run
+            // needs; `refuse_if_premium` runs first since it needs no
+            // catalogue round trip.
+            {
+                let db = state.db();
+                refuse_if_premium(&db, m)?;
+            }
+            let verdict = judge_pin(state.catalog.as_ref(), m, existing.has_routine).await;
+            if !verdict.ok {
+                return Err(crate::AppError::bad_request(
+                    verdict
+                        .refusal
+                        .unwrap_or_else(|| "that model cannot be pinned".to_string()),
+                ));
+            }
         }
-        db.conn().execute(
-            "UPDATE bots SET model = ?1 WHERE id = ?2",
-            rusqlite::params![model, id],
-        )?;
+        model_update = Some(model);
     }
 
     // M3: the effort a bot's calls carry. Only ever one of the three - a
     // typo or a stale client sending something else is refused here rather
     // than landing in the column and reading back as garbage later.
+    let mut effort_update: Option<&str> = None;
     if let Some(raw) = obj.get("effort") {
         let effort = raw.as_str().unwrap_or("");
         if !matches!(effort, "low" | "medium" | "high") {
@@ -87,6 +111,17 @@ async fn patch_bot(
                 "effort must be low, medium or high",
             ));
         }
+        effort_update = Some(effort);
+    }
+
+    let db = state.db();
+    if let Some(model) = model_update {
+        db.conn().execute(
+            "UPDATE bots SET model = ?1 WHERE id = ?2",
+            rusqlite::params![model, id],
+        )?;
+    }
+    if let Some(effort) = effort_update {
         db.conn().execute(
             "UPDATE bots SET effort = ?1 WHERE id = ?2",
             rusqlite::params![effort, id],

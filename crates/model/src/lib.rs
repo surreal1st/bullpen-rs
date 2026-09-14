@@ -16,7 +16,9 @@ pub mod secrets;
 #[cfg(any(test, feature = "fake"))]
 pub mod fake;
 
-pub use catalog::{Catalog, CatalogModel, FixtureCatalog, PinVerdict, judge_pin};
+pub use catalog::{
+    Catalog, CatalogModel, FixtureCatalog, OpenRouterCatalog, PinVerdict, judge_pin,
+};
 pub use port::{
     CHEAP_DEFAULT_MODEL, CHEAP_FALLBACK_MODELS, ContentPart, EventStream, FunctionCall, ImageUrl,
     MAX_OUTPUT_TOKENS, MessageContent, MessageToolCall, ModelEvent, ModelMessage, ModelPort,

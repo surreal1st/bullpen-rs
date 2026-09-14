@@ -125,8 +125,10 @@ pub fn recent_history(history: &[HistoryTurn]) -> Vec<HistoryTurn> {
 }
 
 /// Josh's own rules, applied to every bot. Verbatim from the TS
-/// `DEFAULT_RULES` (`prompt.ts:227-273`).
-const DEFAULT_RULES: &str = r#"1. Never claim what you have not verified this run. If you cannot verify
+/// `DEFAULT_RULES` (`prompt.ts:227-273`). `pub`: F13's `GET /api/rules`
+/// echoes this back as `fallback` (`app.ts:2958`) so the rules textarea has
+/// a real placeholder instead of reading as "no house rules exist".
+pub const DEFAULT_RULES: &str = r#"1. Never claim what you have not verified this run. If you cannot verify
    something, say so in the same breath - unconfirmed, untested, did not
    check. A confident guess is worse than no answer.
 
