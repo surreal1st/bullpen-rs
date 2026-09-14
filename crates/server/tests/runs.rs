@@ -353,7 +353,7 @@ async fn working_reports_thinking_then_tool_phrasing_then_empties_and_gates_the_
 
     // The row exists the instant `start` returns, before the spawned task
     // has run at all - the indicator must not wait a beat to appear.
-    let mid = manager.working(&conversation_id);
+    let mid = manager.working(&conversation_id).expect("working query");
     assert_eq!(mid.len(), 1);
     assert_eq!(mid[0].name, "Arthur");
     assert!(!mid[0].waiting);
@@ -374,7 +374,7 @@ async fn working_reports_thinking_then_tool_phrasing_then_empties_and_gates_the_
     let _ = gate_tx.send(());
     let mut phrased = false;
     for _ in 0..200 {
-        let seen = manager.working(&conversation_id);
+        let seen = manager.working(&conversation_id).expect("working query");
         if seen.first().map(|b| b.activity.as_str()) == Some("Reading its checklist") {
             phrased = true;
             break;
@@ -396,7 +396,10 @@ async fn working_reports_thinking_then_tool_phrasing_then_empties_and_gates_the_
     drain(manager.subscribe(&run_id)).await;
 
     assert!(
-        manager.working(&conversation_id).is_empty(),
+        manager
+            .working(&conversation_id)
+            .expect("working query")
+            .is_empty(),
         "expected nobody working once the run settled"
     );
 }

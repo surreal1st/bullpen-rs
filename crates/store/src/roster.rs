@@ -100,6 +100,14 @@ pub(crate) fn first_line(content: &str) -> String {
     // Remove links
     while let Some(start) = line.find('[') {
         if let Some(end) = line.find(']') {
+            // B1: a preview line can carry a `]` that has nothing to do with
+            // this `[` (a bot replying `Done] see [docs](https://x)` finds
+            // `]` at index 4, `[` at index 13) - slicing `start + 1..end`
+            // there is an out-of-order byte range and panics. Bail out of
+            // the link-removal pass instead of taking the string apart.
+            if end <= start {
+                break;
+            }
             if let Some(paren_start) = line[end..].find('(') {
                 let paren_end = line[end + paren_start..].find(')');
                 if let Some(paren_end) = paren_end {

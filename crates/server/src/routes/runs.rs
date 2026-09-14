@@ -9,7 +9,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::json;
 
-use crate::AppState;
+use crate::{ApiResult, AppState};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -24,13 +24,14 @@ pub fn router() -> Router<AppState> {
 /// exists) fires with no tab open at all - so an indicator built from the
 /// tab's own events would show one face out of four. This reads the run
 /// rows, so it sees every one of them.
-async fn working(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
-    Json(json!({ "working": state.runs.working(&id) }))
+async fn working(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Response> {
+    let working = state.runs.working(&id)?;
+    Ok(Json(json!({ "working": working })).into_response())
 }
 
 async fn stop(State(state): State<AppState>, Path(id): Path<String>) -> Response {
     let running = {
-        let db = state.db.lock().expect("db mutex poisoned");
+        let db = state.db();
         db.conn()
             .query_row(
                 "SELECT 1 FROM runs WHERE id = ?1 AND status = 'running'",

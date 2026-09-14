@@ -9,7 +9,7 @@
 //! routine with no client at all, once S2 adds those) never abandons it.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use futures::StreamExt;
 use model::ladder::{Trigger, model_for_run};
@@ -153,6 +153,14 @@ impl RunManager {
             .expect("room hook mutex poisoned") = Some(Box::new(f));
     }
 
+    /// B2: the guard every db-touching method here takes the lock through -
+    /// see `AppState::db`'s doc for why `.expect("db mutex poisoned")` used
+    /// to be dangerous: a poisoned `Mutex` made every later run fail too,
+    /// not just the one that panicked under the lock.
+    fn db(&self) -> MutexGuard<'_, Db> {
+        self.db.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// Starts a run and returns its id immediately - the run itself proceeds
     /// on a spawned task whether or not anyone is listening. Mirrors the TS
     /// `start`, minus the `notice`/routing/snapshot legwork out of scope for
@@ -163,28 +171,49 @@ impl RunManager {
 
         // The ONLY place a run's model is settled, same as the TS original.
         let model = {
-            let db = self.db.lock().expect("db mutex poisoned");
+            let db = self.db();
             model_for_run(&db, options.trigger, &options.model, options.room)
         };
 
-        {
-            let db = self.db.lock().expect("db mutex poisoned");
-            db.conn()
-                .execute(
-                    "INSERT INTO runs (id, bot_id, conversation_id, trigger, status, model, messages, text, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, 'running', ?5, ?6, '', ?7, ?8)",
-                    rusqlite::params![
-                        id,
-                        options.bot_id,
-                        options.conversation_id,
-                        trigger_str(options.trigger),
-                        model,
-                        serde_json::to_string(&options.messages).expect("serialize run messages"),
-                        now,
-                        now,
-                    ],
-                )
-                .expect("insert run");
+        let messages_json = serde_json::to_string(&options.messages).unwrap_or_else(|err| {
+            tracing::error!("run {id}: failed to serialize run messages: {err}");
+            "[]".to_string()
+        });
+
+        let inserted = {
+            let db = self.db();
+            db.conn().execute(
+                "INSERT INTO runs (id, bot_id, conversation_id, trigger, status, model, messages, text, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, 'running', ?5, ?6, '', ?7, ?8)",
+                rusqlite::params![
+                    id,
+                    options.bot_id,
+                    options.conversation_id,
+                    trigger_str(options.trigger),
+                    model,
+                    messages_json,
+                    now,
+                    now,
+                ],
+            )
+        };
+
+        // B12: `start` hands back a bare run id, not a `Result` - both
+        // `rooms.rs`'s chained round and `routes/messages.rs`'s handler call
+        // it the same way, and only one of those has an HTTP response to
+        // fail. A store error here is reported to subscribers as the run's
+        // own error instead of panicking the caller (and, via B2, poisoning
+        // the db mutex for every other request in flight).
+        if let Err(err) = inserted {
+            tracing::error!("run {id}: failed to insert run row: {err}");
+            self.emit(
+                &id,
+                RunEvent::Error {
+                    message: "could not start run".to_string(),
+                    status: None,
+                },
+            );
+            return id;
         }
 
         // The working indicator's own signal - see the TS doc on why this is
@@ -241,7 +270,14 @@ impl RunManager {
     /// run that has started and not yet emitted anything has no activity
     /// entry, and leaving it out would mean the indicator appeared a second
     /// or two after the run began - exactly the moment it is most wanted.
-    pub fn working(&self, conversation_id: &str) -> Vec<shared::working::WorkingBot> {
+    /// B11: this backs a request handler (`routes/runs.rs`'s `working`), so
+    /// a store failure returns `?` into `AppError` there instead of
+    /// panicking - which, pre-fix, would have poisoned the db mutex (B2)
+    /// for every other request too.
+    pub fn working(
+        &self,
+        conversation_id: &str,
+    ) -> rusqlite::Result<Vec<shared::working::WorkingBot>> {
         type Row = (
             String,
             String,
@@ -252,16 +288,13 @@ impl RunManager {
             Option<String>,
         );
         let rows: Vec<Row> = {
-            let db = self.db.lock().expect("db mutex poisoned");
-            let mut stmt = db
-                .conn()
-                .prepare(
-                    "SELECT r.id, r.status, b.id, b.name, b.avatar, b.section_id, b.shape
-                       FROM runs r JOIN bots b ON b.id = r.bot_id
-                      WHERE r.conversation_id = ?1 AND r.status IN ('running', 'waiting')
-                      ORDER BY r.created_at ASC",
-                )
-                .expect("prepare working query");
+            let db = self.db();
+            let mut stmt = db.conn().prepare(
+                "SELECT r.id, r.status, b.id, b.name, b.avatar, b.section_id, b.shape
+                   FROM runs r JOIN bots b ON b.id = r.bot_id
+                  WHERE r.conversation_id = ?1 AND r.status IN ('running', 'waiting')
+                  ORDER BY r.created_at ASC",
+            )?;
             stmt.query_map(rusqlite::params![conversation_id], |row| {
                 Ok((
                     row.get(0)?,
@@ -272,10 +305,8 @@ impl RunManager {
                     row.get(5)?,
                     row.get(6)?,
                 ))
-            })
-            .expect("query working rows")
-            .collect::<Result<_, _>>()
-            .expect("collect working rows")
+            })?
+            .collect::<Result<_, _>>()?
         };
 
         let activity = self.activity.lock().expect("activity mutex poisoned");
@@ -302,7 +333,7 @@ impl RunManager {
                 ),
             });
         }
-        out
+        Ok(out)
     }
 
     fn toolbox_for(self: &Arc<Self>, bot_id: &str) -> ToolBox {
@@ -505,31 +536,34 @@ impl RunManager {
             cached_tokens: 0,
         });
 
-        {
-            let db = self.db.lock().expect("db mutex poisoned");
-            db.conn()
-                .execute(
-                    "UPDATE runs SET status = ?1, messages = ?2, text = ?3, model = ?4, steps = ?5,
-                            cost_usd = ?6, input_tokens = ?7, output_tokens = ?8, cached_tokens = ?9,
-                            error = ?10, updated_at = ?11
-                       WHERE id = ?12",
-                    rusqlite::params![
-                        status,
-                        serde_json::to_string(&state.messages).expect("serialize run messages"),
-                        state.text,
-                        state.model,
-                        state.steps,
-                        usage.cost_usd,
-                        usage.input_tokens,
-                        usage.output_tokens,
-                        usage.cached_tokens,
-                        failure,
-                        now_iso(),
-                        run_id,
-                    ],
-                )
-                .expect("update run");
-        }
+        let messages_json = serde_json::to_string(&state.messages).unwrap_or_else(|err| {
+            tracing::error!("run {run_id}: failed to serialize run messages: {err}");
+            "[]".to_string()
+        });
+
+        let updated = {
+            let db = self.db();
+            db.conn().execute(
+                "UPDATE runs SET status = ?1, messages = ?2, text = ?3, model = ?4, steps = ?5,
+                        cost_usd = ?6, input_tokens = ?7, output_tokens = ?8, cached_tokens = ?9,
+                        error = ?10, updated_at = ?11
+                   WHERE id = ?12",
+                rusqlite::params![
+                    status,
+                    messages_json,
+                    state.text,
+                    state.model,
+                    state.steps,
+                    usage.cost_usd,
+                    usage.input_tokens,
+                    usage.output_tokens,
+                    usage.cached_tokens,
+                    failure,
+                    now_iso(),
+                    run_id,
+                ],
+            )
+        };
         // The rail's busy flag and unread count both come off this row.
         self.changes.touch(ChangeKind::Roster);
         // And it is the end of this face at the bottom of the thread.
@@ -539,10 +573,37 @@ impl RunManager {
             .remove(run_id);
         self.changes.touch(ChangeKind::Working);
 
-        let saved_id = {
-            let db = self.db.lock().expect("db mutex poisoned");
+        // B12: a run task has no HTTP response to fail - a store error past
+        // this point is reported to subscribers as the run's own error
+        // instead of panicking the task (and, via B2, poisoning the db
+        // mutex for every other request in flight).
+        if let Err(err) = updated {
+            tracing::error!("run {run_id}: failed to update run row: {err}");
+            self.emit(
+                run_id,
+                RunEvent::Error {
+                    message: "internal error saving run result".to_string(),
+                    status: None,
+                },
+            );
+            if let Some(hook) = self
+                .on_run_done
+                .lock()
+                .expect("on_run_done mutex poisoned")
+                .as_ref()
+            {
+                hook(run_id, bot_id, conversation_id);
+            }
+            return;
+        }
+
+        let saved_id: Option<String> = {
+            let db = self.db();
             let owner = store::get_conversation(&db, conversation_id)
-                .expect("get_conversation")
+                .unwrap_or_else(|err| {
+                    tracing::error!("run {run_id}: failed to read conversation: {err}");
+                    None
+                })
                 .map(|c| c.bot_id);
             let extra = store::NewMessage {
                 model: Some(state.model.clone()),
@@ -563,9 +624,13 @@ impl RunManager {
                     cached_tokens: usage.cached_tokens as i64,
                 }),
             };
-            store::append_message(&db, conversation_id, "assistant", &state.text, extra)
-                .expect("append settle message")
-                .id
+            match store::append_message(&db, conversation_id, "assistant", &state.text, extra) {
+                Ok(message) => Some(message.id),
+                Err(err) => {
+                    tracing::error!("run {run_id}: failed to append settle message: {err}");
+                    None
+                }
+            }
         };
 
         if status == "failed" {
@@ -576,12 +641,20 @@ impl RunManager {
                     status: None,
                 },
             );
-        } else {
+        } else if let Some(saved_id) = saved_id {
             self.emit(
                 run_id,
                 RunEvent::Done {
                     model: state.model.clone(),
                     message_id: saved_id,
+                },
+            );
+        } else {
+            self.emit(
+                run_id,
+                RunEvent::Error {
+                    message: "internal error saving run result".to_string(),
+                    status: None,
                 },
             );
         }

@@ -26,6 +26,26 @@ pub use roster::list_roster;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::time::Duration;
 
+/// The tables `ensure_column` (B22) is allowed to touch - closed so the
+/// `PRAGMA table_info(...)` it builds can never be handed a name read out of
+/// a row.
+#[derive(Clone, Copy)]
+enum Table {
+    Conversations,
+    Messages,
+    Bots,
+}
+
+impl Table {
+    fn as_str(self) -> &'static str {
+        match self {
+            Table::Conversations => "conversations",
+            Table::Messages => "messages",
+            Table::Bots => "bots",
+        }
+    }
+}
+
 /// A rusqlite connection carrying the Bullpen schema. Opens the same
 /// `bullpen.db` byte-compatible with the TS server.
 pub struct Db(Connection);
@@ -52,27 +72,27 @@ impl Db {
         // `ensureMessageAuthorColumn` (routine-health.ts) and
         // `ensureMessageReactionColumn` (store.ts).
         db.ensure_column(
-            "conversations",
+            Table::Conversations,
             "kind",
             "ALTER TABLE conversations ADD COLUMN kind TEXT NOT NULL DEFAULT 'chat'",
         )?;
         db.ensure_column(
-            "conversations",
+            Table::Conversations,
             "members",
             "ALTER TABLE conversations ADD COLUMN members TEXT",
         )?;
         db.ensure_column(
-            "conversations",
+            Table::Conversations,
             "seen_at",
             "ALTER TABLE conversations ADD COLUMN seen_at TEXT",
         )?;
         db.ensure_column(
-            "messages",
+            Table::Messages,
             "bot_id",
             "ALTER TABLE messages ADD COLUMN bot_id TEXT",
         )?;
         db.ensure_column(
-            "messages",
+            Table::Messages,
             "reactions",
             "ALTER TABLE messages ADD COLUMN reactions TEXT",
         )?;
@@ -83,10 +103,18 @@ impl Db {
         // column: effort" on any database that only ran migrations 1..16 -
         // every fresh `:memory:` db, just not the checked-in fixture, which
         // already carries them from the TS export.
-        db.ensure_column("bots", "effort", "ALTER TABLE bots ADD COLUMN effort TEXT")?;
-        db.ensure_column("bots", "voice", "ALTER TABLE bots ADD COLUMN voice TEXT")?;
         db.ensure_column(
-            "bots",
+            Table::Bots,
+            "effort",
+            "ALTER TABLE bots ADD COLUMN effort TEXT",
+        )?;
+        db.ensure_column(
+            Table::Bots,
+            "voice",
+            "ALTER TABLE bots ADD COLUMN voice TEXT",
+        )?;
+        db.ensure_column(
+            Table::Bots,
             "is_template",
             "ALTER TABLE bots ADD COLUMN is_template INTEGER NOT NULL DEFAULT 0",
         )?;
@@ -99,9 +127,16 @@ impl Db {
     /// a fixture opened a second time (or the TS-made `ts-made.db`) always
     /// has. Checked with `PRAGMA table_info` first, same as every TS
     /// `ensure*Column`.
-    fn ensure_column(&self, table: &str, column: &str, ddl: &str) -> rusqlite::Result<()> {
+    ///
+    /// B22: `table` is a closed enum, not a caller-supplied `&str`, so this
+    /// stays the one string-built `PRAGMA` statement in the crate without
+    /// being the one a future caller makes injectable by passing a name read
+    /// out of a row.
+    fn ensure_column(&self, table: Table, column: &str, ddl: &str) -> rusqlite::Result<()> {
         let exists = {
-            let mut stmt = self.0.prepare(&format!("PRAGMA table_info({table})"))?;
+            let mut stmt = self
+                .0
+                .prepare(&format!("PRAGMA table_info({})", table.as_str()))?;
             stmt.query_map([], |row| row.get::<_, String>(1))?
                 .filter_map(Result::ok)
                 .any(|name| name == column)

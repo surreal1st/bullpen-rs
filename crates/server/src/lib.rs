@@ -3,17 +3,20 @@
 
 mod auth;
 pub mod changes;
+mod error;
 pub mod prompt;
 mod rooms;
 mod routes;
 pub mod runs;
 mod tools;
 
+pub use error::{ApiResult, AppError};
+
 use axum::extract::{Request, State};
 use axum::response::{IntoResponse, Response};
 use axum::{Router, http::StatusCode};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use store::Db;
 use tower::Service;
 use tower_http::services::ServeDir;
@@ -65,6 +68,15 @@ impl AppState {
             room_engine,
         }
     }
+
+    /// B2: the one guard every route takes the db lock through. A poisoned
+    /// `Mutex` (left behind by a panic under the lock elsewhere) used to
+    /// mean every later `.expect("db mutex poisoned")` panicked too, turning
+    /// one bad request into a dead server that only a restart fixed -
+    /// `unwrap_or_else(PoisonError::into_inner)` recovers the guard instead.
+    pub(crate) fn db(&self) -> MutexGuard<'_, Db> {
+        self.db.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 fn default_client_root() -> String {
@@ -95,11 +107,13 @@ async fn static_or_spa(State(state): State<AppState>, req: Request) -> Response 
     let has_extension = Path::new(&path).extension().is_some();
     if has_extension {
         let mut serve_dir = ServeDir::new(state.client_root.as_str());
-        return serve_dir
-            .call(req)
-            .await
-            .expect("ServeDir::call is infallible")
-            .into_response();
+        // B21: `ServeDir::call`'s error type is `Infallible` today, not a
+        // reason to `.expect()` it - matching on the empty type is exhaustive
+        // and stays correct even if a future tower-http widens the error.
+        return match serve_dir.call(req).await {
+            Ok(response) => response.into_response(),
+            Err(never) => match never {},
+        };
     }
 
     // Extensionless path: serve index.html for SPA routing.

@@ -175,17 +175,28 @@ const SHARED_CORE_KEY: &str = "memory.shared_core";
 const HOUSE_RULES_CHAR_CAP: usize = 4000;
 
 /// Josh's house rules, or `DEFAULT_RULES` when he has not set any.
+///
+/// B12: called both from a request handler and from inside the spawned run
+/// task (a room round, a tool call) with no `Result` to hand either one - a
+/// store error here falls back to `DEFAULT_RULES` and logs, rather than
+/// panicking a detached task (and, via the db mutex, every other request).
 pub fn house_rules(db: &Db) -> String {
     db.settings_get(RULES_KEY)
-        .expect("settings query")
+        .unwrap_or_else(|err| {
+            tracing::error!("house_rules: settings query failed: {err}");
+            None
+        })
         .unwrap_or_else(|| DEFAULT_RULES.to_string())
 }
 
 /// Stores Josh's house rules, capped at 4000 characters, and returns what
-/// was actually stored.
+/// was actually stored. B12: a failed write is logged, not panicked - the
+/// caller still gets back the (unsaved) cleaned value.
 pub fn set_house_rules(db: &Db, rules: &str) -> String {
     let clean: String = rules.trim().chars().take(HOUSE_RULES_CHAR_CAP).collect();
-    db.settings_set(RULES_KEY, &clean).expect("settings upsert");
+    if let Err(err) = db.settings_set(RULES_KEY, &clean) {
+        tracing::error!("set_house_rules: settings upsert failed: {err}");
+    }
     clean
 }
 
@@ -204,12 +215,22 @@ const NO_NEW_MESSAGE_TRAILER: &str = "Josh has not sent a new message - the conv
 /// Skill index and open tasks/questions are left as hooks (S1-04 skips
 /// them, per the ticket) rather than ported here.
 pub fn build_prompt(db: &Db, bot: &Bot, history: &[HistoryTurn]) -> Vec<ModelMessage> {
+    // B12: same posture as `house_rules` above - this runs inside the
+    // spawned run task as often as it runs inside a request handler, so a
+    // store error here degrades the prompt (an empty block) instead of
+    // panicking either one.
     let shared_core = db
         .settings_get(SHARED_CORE_KEY)
-        .expect("settings query")
+        .unwrap_or_else(|err| {
+            tracing::error!("build_prompt: shared core query failed: {err}");
+            None
+        })
         .unwrap_or_default();
     let shared_core = shared_core.trim();
-    let core = store::get_core(db, &bot.id).expect("memory core query");
+    let core = store::get_core(db, &bot.id).unwrap_or_else(|err| {
+        tracing::error!("build_prompt: memory core query failed: {err}");
+        String::new()
+    });
     let core = core.trim();
 
     let mut blocks: Vec<String> = vec![
@@ -265,7 +286,13 @@ pub fn build_prompt(db: &Db, bot: &Bot, history: &[HistoryTurn]) -> Vec<ModelMes
     // Skill index: SKIP for now (hook for a later ticket).
     // Open tasks / questions: SKIP for now (hook for a later ticket).
 
-    let recall = store::recall_for(db, &bot.id, store::RECALL_TOKEN_BUDGET).expect("recall query");
+    let recall = store::recall_for(db, &bot.id, store::RECALL_TOKEN_BUDGET).unwrap_or_else(|err| {
+        tracing::error!("build_prompt: recall query failed: {err}");
+        store::Recall {
+            entries: Vec::new(),
+            older: 0,
+        }
+    });
     if !recall.entries.is_empty() {
         blocks.push(String::new());
         blocks.push("## What you remember".to_string());
@@ -324,7 +351,10 @@ pub fn room_instruction(
     let mut names: Vec<String> = Vec::new();
     for id in all_bot_ids.iter().filter(|id| id.as_str() != speaking_id) {
         let name = store::get_bot(db, id)
-            .expect("bot query")
+            .unwrap_or_else(|err| {
+                tracing::error!("room_instruction: bot query failed: {err}");
+                None
+            })
             .map(|bot| bot.name)
             .unwrap_or_else(|| id.clone());
         names.push(name);
