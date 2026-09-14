@@ -21,10 +21,11 @@ use store::Db;
 use crate::prompt::{self, HistoryTurn};
 use crate::runs::{RunManager, StartOptions};
 
-/// One room round still in flight, keyed by the run id that will finish it.
-/// No `conversation_id` field - `on_run_done` already gets the finished
-/// run's own conversation id from `RunManager`'s hook, and every run in one
-/// round shares it.
+/// One room round still in flight, keyed by the conversation it is chaining
+/// through (see `register`'s doc for why the key is the conversation id and
+/// not the leg's run id). No `conversation_id` field of its own - the map
+/// key already is one, and `on_run_done` also gets the finished run's own
+/// conversation id straight from `RunManager`'s hook.
 struct PendingRound {
     all_bot_ids: Vec<String>,
     remaining: Vec<String>,
@@ -61,18 +62,23 @@ impl RoomEngine {
         engine
     }
 
-    /// Registers the round a caller (a route) just started the OWNER's leg
-    /// of - the entry point every round begins from. `on_run_done` below
-    /// carries it the rest of the way, reading the conversation id back off
-    /// each finished run rather than off this record. `all_bot_ids[0]` must
-    /// be the run's own `bot_id`.
-    pub fn register(&self, run_id: &str, all_bot_ids: Vec<String>, mandatory: bool) {
+    /// Registers the round a caller (a route, or this module's own
+    /// `start_room_turn`/`on_run_done`) is about to start a leg of - keyed
+    /// by `conversation_id`, not the leg's run id, and called BEFORE that
+    /// leg's `runs.start` (B9): a run can settle before `start` even
+    /// returns (an instant `ModelEvent::Error` - no key configured, for
+    /// one), and keying by conversation id, known ahead of time, is what
+    /// lets the entry exist for `on_run_done` to find no matter how fast
+    /// that happens - keying by the not-yet-known run id could not. Also
+    /// what `pending` checks for B6's re-entry refusal. `all_bot_ids[0]`
+    /// must be the run's own `bot_id`.
+    pub fn register(&self, conversation_id: &str, all_bot_ids: Vec<String>, mandatory: bool) {
         let remaining = all_bot_ids.get(1..).map(<[_]>::to_vec).unwrap_or_default();
         self.pending
             .lock()
             .expect("pending rooms mutex poisoned")
             .insert(
-                run_id.to_string(),
+                conversation_id.to_string(),
                 PendingRound {
                     all_bot_ids,
                     remaining,
@@ -81,12 +87,29 @@ impl RoomEngine {
             );
     }
 
+    /// True while `conversation_id` has a round in flight. B6: `start_room_turn`
+    /// refuses to start a second round on top of one already chaining, which
+    /// is what stops two bots that each name the other's room from paging
+    /// each other forever through `message_bot`.
+    pub fn pending(&self, conversation_id: &str) -> bool {
+        self.pending
+            .lock()
+            .expect("pending rooms mutex poisoned")
+            .contains_key(conversation_id)
+    }
+
     /// H12: starts a room's round from whatever is already in the
     /// conversation's history. The entry point `message_bot` reaches
     /// through the `start_room_turn` hook when it posts into a room by
     /// title, the same way a person typing into it does. `false` when
-    /// `conversation_id` is not actually a room.
+    /// `conversation_id` is not actually a room, OR (B6) when a round is
+    /// already pending for it - the caller (`message_bot`'s room branch)
+    /// reads `false` back as "already in progress" rather than trying to
+    /// wake a second, overlapping round.
     fn start_room_turn(&self, conversation_id: &str, mandatory: bool) -> bool {
+        if self.pending(conversation_id) {
+            return false;
+        }
         let started = {
             let db = self.db.lock().expect("db mutex poisoned");
             let Some(conversation) =
@@ -118,7 +141,11 @@ impl RoomEngine {
             return false;
         };
 
-        let run_id = self.runs.start(StartOptions {
+        // B9: registered before `runs.start` is even called - see
+        // `register`'s doc for why this ordering, not the run id, is what
+        // closes the race.
+        self.register(conversation_id, round, mandatory);
+        self.runs.start(StartOptions {
             bot_id: owner_id,
             conversation_id: conversation_id.to_string(),
             model,
@@ -127,7 +154,6 @@ impl RoomEngine {
             // H12: what keeps a round cheap - see `model_for_run`'s doc.
             room: true,
         });
-        self.register(&run_id, round, mandatory);
         true
     }
 
@@ -139,7 +165,7 @@ impl RoomEngine {
             .pending
             .lock()
             .expect("pending rooms mutex poisoned")
-            .remove(run_id);
+            .remove(conversation_id);
         let Some(pending) = pending else { return };
 
         // H12: silence. A member that declared NOTHING_NEW has its own
@@ -186,7 +212,24 @@ impl RoomEngine {
         };
         let (member_id, messages, model) = started;
 
-        let next_run_id = self.runs.start(StartOptions {
+        // B9: same ordering as `start_room_turn` - register this leg (still
+        // keyed by `conversation_id`) before `runs.start`, so a member whose
+        // run settles before `start` returns cannot race this insert. Set
+        // even when `remaining` is now empty: this is the LAST member's run,
+        // and `on_run_done` still needs an entry to check ITS answer for
+        // silence when it in turn finishes.
+        self.pending
+            .lock()
+            .expect("pending rooms mutex poisoned")
+            .insert(
+                conversation_id.to_string(),
+                PendingRound {
+                    all_bot_ids: pending.all_bot_ids,
+                    remaining,
+                    mandatory: pending.mandatory,
+                },
+            );
+        self.runs.start(StartOptions {
             bot_id: member_id,
             conversation_id: conversation_id.to_string(),
             model,
@@ -194,20 +237,6 @@ impl RoomEngine {
             trigger: Trigger::Chat,
             room: true,
         });
-        // Set even when `remaining` is now empty: this is the LAST member's
-        // run, and `on_run_done` still needs an entry to check ITS answer
-        // for silence when it in turn finishes.
-        self.pending
-            .lock()
-            .expect("pending rooms mutex poisoned")
-            .insert(
-                next_run_id,
-                PendingRound {
-                    all_bot_ids: pending.all_bot_ids,
-                    remaining,
-                    mandatory: pending.mandatory,
-                },
-            );
     }
 }
 

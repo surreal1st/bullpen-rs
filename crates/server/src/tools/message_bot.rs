@@ -99,10 +99,23 @@ pub async fn run(
             )
             .expect("append message_bot room message");
         }
-        if let Some(hook) = room_hook.lock().expect("room hook mutex poisoned").as_ref() {
-            hook(&room.id, false);
-        }
+        // B6: the hook itself refuses (and starts nothing) when this room
+        // already has a round in flight - see `RoomEngine::start_room_turn`'s
+        // doc. Without this, a member woken by its own room's round could
+        // `message_bot` right back into that same room and start a second,
+        // overlapping round every lap - two bots naming each other's room
+        // would then page each other forever, N model calls a lap, against
+        // Josh's $60/month ceiling with nothing to stop it. The message
+        // itself still posts either way; only waking a NEW round is refused.
+        let awakened = room_hook
+            .lock()
+            .expect("room hook mutex poisoned")
+            .as_ref()
+            .is_some_and(|hook| hook(&room.id, false));
         let said_by = caller_name.unwrap_or_else(|| "You".to_string());
+        if !awakened {
+            return format!("The {} room already has a round in progress.", room.title);
+        }
         return format!(
             "Posted to the {} room. {said_by} said: {message}",
             room.title

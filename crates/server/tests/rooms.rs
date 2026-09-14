@@ -20,7 +20,7 @@ use axum::http::{Request, StatusCode};
 use common::{GatedPort, ScriptedPort, seed_session, text_script};
 use futures::StreamExt;
 use http_body_util::BodyExt;
-use model::{EventStream, MessageContent, ModelEvent, ModelPort, ModelRequest};
+use model::{EventStream, MessageContent, ModelEvent, ModelPort, ModelRequest, ToolCall};
 use serde_json::{Value, json};
 use server::{AppState, build_app};
 use store::Db;
@@ -566,4 +566,131 @@ async fn stopping_a_held_run_over_http_fails_it_with_stopped() {
         }
     }
     assert_eq!(error_message.as_deref(), Some("Stopped."));
+}
+
+// 8. S1-F-06 (B6): a member woken by its own room's round calls
+//    `message_bot` back into that SAME room, mid-round - the hook refuses to
+//    start a second, overlapping round, so exactly 3 model requests happen
+//    (owner's leg, the member's tool-call step, the member's final answer)
+//    rather than a second full round piling 2 more on top.
+#[tokio::test]
+async fn message_bot_into_its_own_room_mid_round_does_not_start_a_second_round() {
+    let db = open_db();
+    let cookie = seed_session(&db);
+    seed_bot(&db, "arthur", "Arthur");
+    seed_bot(&db, "riley", "Riley");
+
+    let message_bot_args = json!({"to": "Loop", "message": "echo"}).to_string();
+    let port = Arc::new(ScriptedPort::new(vec![
+        text_script("ok"), // arthur's (owner's) leg
+        vec![ModelEvent::ToolCalls {
+            calls: vec![ToolCall {
+                id: "c1".to_string(),
+                name: "message_bot".to_string(),
+                arguments: message_bot_args,
+            }],
+            usage: None,
+        }], // riley's leg, step 1: calls message_bot back into "Loop"
+        text_script("done"), // riley's leg, step 2: final answer
+    ]));
+    let app = app_for(db, Arc::clone(&port) as Arc<dyn ModelPort>);
+
+    let room_id = create_room(&app, "Loop", &["arthur", "riley"], &cookie).await;
+    send_message(&app, "arthur", &room_id, "go", &cookie).await;
+
+    // 3 assistant-authored rows once the round (plus riley's message_bot
+    // post) settles: arthur's "ok", riley's message_bot post ("echo"),
+    // riley's own final "done".
+    let n = wait_for_assistant_count(&app, "arthur", &room_id, 3, &cookie).await;
+    assert_eq!(n, 3, "expected exactly the one round's worth of messages");
+
+    // A second (illegitimate) round would add 2 more requests almost
+    // immediately - give it a moment it would need, then confirm nothing
+    // more ever arrived.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        port.requests().len(),
+        3,
+        "message_bot into the room's own in-flight round must not wake a second one"
+    );
+}
+
+/// Fails the FIRST call instantly (the owner's leg), then answers normally -
+/// proves B9: the round still chains to member two even though the owner's
+/// run settles about as fast as a run possibly can, leaving no window for
+/// `on_run_done` to beat the round's own registration.
+struct FailFirstThenAnswer {
+    calls: Mutex<usize>,
+}
+
+impl ModelPort for FailFirstThenAnswer {
+    fn stream(&self, _request: ModelRequest) -> EventStream {
+        let mut calls = self.calls.lock().expect("calls mutex poisoned");
+        *calls += 1;
+        if *calls == 1 {
+            Box::pin(futures::stream::iter(vec![ModelEvent::Error {
+                message: "no key configured".to_string(),
+                status: None,
+            }]))
+        } else {
+            Box::pin(futures::stream::iter(text_script("ok")))
+        }
+    }
+}
+
+// 9. S1-F-06 (B9): the owner's leg fails instantly - the round still chains
+//    to member two, proving the round is registered before that instant a
+//    failure could possibly settle it.
+#[tokio::test]
+async fn an_instant_error_owner_run_still_chains_to_member_two() {
+    let db = open_db();
+    let cookie = seed_session(&db);
+    seed_bot(&db, "arthur", "Arthur");
+    seed_bot(&db, "riley", "Riley");
+    seed_bot(&db, "jason", "Jason");
+    let port = FailFirstThenAnswer {
+        calls: Mutex::new(0),
+    };
+    let app = app_for(db, Arc::new(port));
+
+    let room_id = create_room(&app, "Growth", &["arthur", "riley", "jason"], &cookie).await;
+    send_message(&app, "arthur", &room_id, "go", &cookie).await;
+
+    // Whether the owner's own (empty-text, instantly-failed) leg leaves a
+    // row of its own is S1-F-10's call (F6), not this ticket's - what B9
+    // guards is that riley AND jason both still answer, proving the round
+    // chained past the owner's instant failure rather than losing it to the
+    // race B9 named. Polled directly on bot id rather than a total count so
+    // this does not couple to that other, concurrently-landing behaviour.
+    let mut answered_bot_ids: Vec<Option<String>> = Vec::new();
+    for _ in 0..300 {
+        let messages = conversation_messages(&app, "arthur", &room_id, &cookie).await;
+        answered_bot_ids = messages
+            .iter()
+            .filter(|m| m["role"] == "assistant")
+            .map(|m| m["botId"].as_str().map(str::to_string))
+            .collect();
+        let riley_done = answered_bot_ids
+            .iter()
+            .any(|id| id.as_deref() == Some("riley"));
+        let jason_done = answered_bot_ids
+            .iter()
+            .any(|id| id.as_deref() == Some("jason"));
+        if riley_done && jason_done {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        answered_bot_ids
+            .iter()
+            .any(|id| id.as_deref() == Some("riley")),
+        "expected riley to have answered: {answered_bot_ids:?}"
+    );
+    assert!(
+        answered_bot_ids
+            .iter()
+            .any(|id| id.as_deref() == Some("jason")),
+        "expected jason to have answered: {answered_bot_ids:?}"
+    );
 }

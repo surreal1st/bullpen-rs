@@ -39,21 +39,46 @@ struct MessageBody {
     thread_id: Option<String>,
 }
 
-/// Resolves "jason", "Jason", or a bare bot id to a bot. Port of the TS
-/// `findBot`'s name/id matching (the multi-user `scope` half of that
-/// function does not apply here - S1 has no scope concept yet).
+/// Resolves "jason", "Jason", a bare bot id, a purpose ("Chief of Staff"),
+/// or an unambiguous name prefix to a bot. Port of the TS `findBot`
+/// (`delegate.ts:46-67`; the multi-user `scope` half of that function does
+/// not apply here - S1 has no scope concept yet).
+///
+/// F16: the id arm compares case-sensitively against the RAW (trimmed but
+/// not lowercased) input - TS lowercases the needle before every arm,
+/// including the id one, which makes any bot whose id itself has an
+/// uppercase letter unreachable by id no matter what a caller types; the
+/// other three arms stay case-insensitive, same as TS.
 fn find_bot(db: &Db, name_or_id: &str) -> Option<shared::Bot> {
-    let needle = name_or_id.trim().to_lowercase();
-    if needle.is_empty() {
+    let raw = name_or_id.trim();
+    if raw.is_empty() {
         return None;
     }
+    let needle = raw.to_lowercase();
     let all = store::list_bots(db).ok()?;
-    if let Some(direct) = all.iter().find(|b| b.id == needle)
+
+    if let Some(direct) = all.iter().find(|b| b.id == raw)
         && !direct.archived
     {
         return Some(direct.clone());
     }
-    all.into_iter().find(|b| b.name.to_lowercase() == needle)
+    if let Some(by_name) = all.iter().find(|b| b.name.to_lowercase() == needle) {
+        return Some(by_name.clone());
+    }
+    if let Some(by_purpose) = all.iter().find(|b| b.purpose.to_lowercase() == needle) {
+        return Some(by_purpose.clone());
+    }
+    // A unique prefix match only - two bots both starting with "j" must
+    // still be named exactly, same as TS's `partial.length === 1` guard.
+    let mut prefix_matches = all
+        .into_iter()
+        .filter(|b| b.name.to_lowercase().starts_with(&needle));
+    let first = prefix_matches.next()?;
+    if prefix_matches.next().is_none() {
+        Some(first)
+    } else {
+        None
+    }
 }
 
 fn history_turns(db: &Db, conversation_id: &str) -> rusqlite::Result<Vec<HistoryTurn>> {
@@ -185,6 +210,23 @@ async fn post_message(
         (conversation_id, speaker, round, pinned, messages)
     };
 
+    // B9: registered (keyed by `conversation_id` - see `RoomEngine::register`'s
+    // doc) BEFORE `runs.start`, so a run that settles before `start` even
+    // returns (an instant `ModelEvent::Error` - no key configured, for one)
+    // cannot fire `on_run_done` before this entry exists to chain past the
+    // owner's leg.
+    // B9: registered (keyed by `conversation_id` - see `RoomEngine::register`'s
+    // doc) BEFORE `runs.start`, so a run that settles before `start` even
+    // returns (an instant `ModelEvent::Error` - no key configured, for one)
+    // cannot fire `on_run_done` before this entry exists to chain past the
+    // owner's leg.
+    let is_room_round = !round.is_empty();
+    if is_room_round {
+        state
+            .room_engine
+            .register(&conversation_id, round, everyone);
+    }
+
     let run_id = state.runs.start(StartOptions {
         bot_id: speaker.id.clone(),
         conversation_id: conversation_id.clone(),
@@ -194,12 +236,8 @@ async fn post_message(
         // Only a real ROUND (more than the owner alone) needs to chain and
         // costs N times one answer - a narrowed `@mention` inside a room
         // leaves `round` empty and is priced like any other chat turn.
-        room: !round.is_empty(),
+        room: is_room_round,
     });
-
-    if !round.is_empty() {
-        state.room_engine.register(&run_id, round, everyone);
-    }
 
     // The stream SUBSCRIBES to the run. It does not drive it, so closing
     // the tab costs nothing.
