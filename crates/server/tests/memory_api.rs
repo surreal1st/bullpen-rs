@@ -523,3 +523,106 @@ async fn delete_unknown_entry_returns_404() {
     let (status, _) = delete(&app, "/api/bots/arthur/memory/nonexistent", &cookie).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn note_includes_kind_and_expires_at() {
+    let db = Db::open(":memory:").expect("open :memory: db");
+    let cookie = seed_session(&db);
+
+    db.conn()
+        .execute(
+            "INSERT INTO bots (id, name, purpose, instructions, model, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            rusqlite::params!["arthur", "Arthur", "", "", None::<String>, "2026-01-01T00:00:00Z"],
+        )
+        .expect("seed bot");
+
+    let app = build_app(AppState::new(db));
+
+    // POST a note with TTL
+    let (status, _) = post(
+        &app,
+        "/api/bots/arthur/memory/notes",
+        json!({ "content": "Temporary reminder", "ttlSeconds": 3600 }),
+        &cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    // GET and verify kind="note" and expires_at is not null
+    let (status, view) = get(&app, "/api/bots/arthur/memory", &cookie).await;
+    assert_eq!(status, StatusCode::OK);
+    let log = view["log"].as_array().unwrap();
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0]["kind"], "note");
+    assert!(log[0]["expiresAt"].is_string());
+}
+
+#[tokio::test]
+async fn log_entry_includes_kind_and_null_expires_at() {
+    let db = Db::open(":memory:").expect("open :memory: db");
+    let cookie = seed_session(&db);
+
+    db.conn()
+        .execute(
+            "INSERT INTO bots (id, name, purpose, instructions, model, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            rusqlite::params!["arthur", "Arthur", "", "", None::<String>, "2026-01-01T00:00:00Z"],
+        )
+        .expect("seed bot");
+
+    let app = build_app(AppState::new(db));
+
+    // POST a log entry
+    let (status, _) = post(
+        &app,
+        "/api/bots/arthur/memory",
+        json!({ "content": "Regular log entry" }),
+        &cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    // GET and verify kind="log" and expires_at is null
+    let (status, view) = get(&app, "/api/bots/arthur/memory", &cookie).await;
+    assert_eq!(status, StatusCode::OK);
+    let log = view["log"].as_array().unwrap();
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0]["kind"], "log");
+    assert!(log[0]["expiresAt"].is_null());
+}
+
+#[tokio::test]
+async fn post_and_get_shared_memory_with_default_bot_id() {
+    let db = Db::open(":memory:").expect("open :memory: db");
+    let cookie = seed_session(&db);
+
+    // Seed a bot for the default "josh" author
+    db.conn()
+        .execute(
+            "INSERT INTO bots (id, name, purpose, instructions, model, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            rusqlite::params!["josh", "Josh", "", "", None::<String>, "2026-01-01T00:00:00Z"],
+        )
+        .expect("seed josh bot");
+
+    let app = build_app(AppState::new(db));
+
+    // POST a shared memory entry without botId (defaults to "josh")
+    let (status, created) = post(
+        &app,
+        "/api/memory/shared",
+        json!({ "content": "Shared knowledge for all bots" }),
+        &cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(created["entry"]["content"], "Shared knowledge for all bots");
+    assert_eq!(created["entry"]["scope"], "shared");
+
+    // GET shared memory and verify the entry is there with scope="shared"
+    let (status, body) = get(&app, "/api/memory/shared", &cookie).await;
+    assert_eq!(status, StatusCode::OK);
+    let log = body["log"].as_array().unwrap();
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0]["content"], "Shared knowledge for all bots");
+    assert_eq!(log[0]["scope"], "shared");
+    assert_eq!(log[0]["kind"], "log");
+}

@@ -21,6 +21,14 @@ pub struct LogEntry {
     /// `"bot"` (written during a run) or `"josh"` (written by hand).
     pub source: String,
     pub created_at: String,
+    /// `"log"` (persistent) or `"note"` (temporary with TTL).
+    pub kind: String,
+    /// ISO 8601 timestamp when this note expires; `None` for log entries.
+    pub expires_at: Option<String>,
+    /// Scope: `"own"`, `"project"`, or `"shared"`.
+    pub scope: String,
+    /// Project ID if scope is `"project"`; `None` otherwise.
+    pub project_id: Option<String>,
 }
 
 /// Scope of a memory entry: own (bot's private), project (shared within a project), or shared (visible to all).
@@ -103,6 +111,10 @@ pub fn remember(db: &Db, bot_id: &str, content: &str, source: &str) -> rusqlite:
         content: content.trim().to_string(),
         source: source.to_string(),
         created_at: now_iso(),
+        kind: "log".to_string(),
+        expires_at: None,
+        scope: "own".to_string(),
+        project_id: None,
     };
     db.conn().execute(
         "INSERT INTO memory_log (id, bot_id, content, source, created_at, kind, scope) VALUES (?1, ?2, ?3, ?4, ?5, 'log', 'own')",
@@ -129,6 +141,10 @@ pub fn note(db: &Db, bot_id: &str, content: &str, ttl_secs: u64) -> rusqlite::Re
         content: content.trim().to_string(),
         source: "bot".to_string(),
         created_at: now_iso,
+        kind: "note".to_string(),
+        expires_at: Some(expires_at.clone()),
+        scope: "own".to_string(),
+        project_id: None,
     };
 
     db.conn().execute(
@@ -146,11 +162,27 @@ pub fn remember_scoped(
     scope: Scope,
     project_id: Option<&str>,
 ) -> rusqlite::Result<LogEntry> {
+    remember_scoped_with_source(db, bot_id, content, scope, project_id, "bot")
+}
+
+/// Appends a scoped memory entry to a bot's memory log with a custom source.
+pub fn remember_scoped_with_source(
+    db: &Db,
+    bot_id: &str,
+    content: &str,
+    scope: Scope,
+    project_id: Option<&str>,
+    source: &str,
+) -> rusqlite::Result<LogEntry> {
     let entry = LogEntry {
         id: uuid::Uuid::new_v4().to_string(),
         content: content.trim().to_string(),
-        source: "bot".to_string(),
+        source: source.to_string(),
         created_at: now_iso(),
+        kind: "log".to_string(),
+        expires_at: None,
+        scope: scope.as_str().to_string(),
+        project_id: project_id.map(|s| s.to_string()),
     };
     db.conn().execute(
         "INSERT INTO memory_log (id, bot_id, content, source, created_at, kind, scope, project_id) VALUES (?1, ?2, ?3, ?4, ?5, 'log', ?6, ?7)",
@@ -218,7 +250,7 @@ pub fn projects_for(db: &Db, bot_id: &str) -> rusqlite::Result<Vec<Project>> {
 /// `recentLog`.
 pub fn recent_log(db: &Db, bot_id: &str, limit: i64) -> rusqlite::Result<Vec<LogEntry>> {
     let mut stmt = db.conn().prepare(
-        "SELECT id, content, source, created_at FROM memory_log
+        "SELECT id, content, source, created_at, kind, expires_at, scope, project_id FROM memory_log
           WHERE bot_id = ?1 ORDER BY created_at DESC, rowid DESC LIMIT ?2",
     )?;
     let rows = stmt
@@ -228,6 +260,10 @@ pub fn recent_log(db: &Db, bot_id: &str, limit: i64) -> rusqlite::Result<Vec<Log
                 content: row.get(1)?,
                 source: row.get(2)?,
                 created_at: row.get(3)?,
+                kind: row.get(4)?,
+                expires_at: row.get(5)?,
+                scope: row.get(6)?,
+                project_id: row.get(7)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -250,7 +286,7 @@ pub fn scoped_entries(
     match scope {
         Scope::Own => {
             let mut stmt = db.conn().prepare(
-                "SELECT id, content, source, created_at FROM memory_log
+                "SELECT id, content, source, created_at, kind, expires_at, scope, project_id FROM memory_log
                   WHERE bot_id = ?1 AND scope = 'own' AND (expires_at IS NULL OR expires_at > ?2)
                   ORDER BY created_at DESC, rowid DESC LIMIT ?3",
             )?;
@@ -261,6 +297,10 @@ pub fn scoped_entries(
                         content: row.get(1)?,
                         source: row.get(2)?,
                         created_at: row.get(3)?,
+                        kind: row.get(4)?,
+                        expires_at: row.get(5)?,
+                        scope: row.get(6)?,
+                        project_id: row.get(7)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -276,7 +316,7 @@ pub fn scoped_entries(
                 .collect::<Vec<_>>()
                 .join(",");
             let query = format!(
-                "SELECT id, content, source, created_at FROM memory_log
+                "SELECT id, content, source, created_at, kind, expires_at, scope, project_id FROM memory_log
                   WHERE scope = 'project' AND project_id IN ({}) AND (expires_at IS NULL OR expires_at > ?)
                   ORDER BY created_at DESC, rowid DESC LIMIT ?",
                 placeholders
@@ -295,6 +335,10 @@ pub fn scoped_entries(
                         content: row.get(1)?,
                         source: row.get(2)?,
                         created_at: row.get(3)?,
+                        kind: row.get(4)?,
+                        expires_at: row.get(5)?,
+                        scope: row.get(6)?,
+                        project_id: row.get(7)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -302,7 +346,7 @@ pub fn scoped_entries(
         }
         Scope::Shared => {
             let mut stmt = db.conn().prepare(
-                "SELECT id, content, source, created_at FROM memory_log
+                "SELECT id, content, source, created_at, kind, expires_at, scope, project_id FROM memory_log
                   WHERE scope = 'shared' AND (expires_at IS NULL OR expires_at > ?1)
                   ORDER BY created_at DESC, rowid DESC LIMIT ?2",
             )?;
@@ -313,6 +357,10 @@ pub fn scoped_entries(
                         content: row.get(1)?,
                         source: row.get(2)?,
                         created_at: row.get(3)?,
+                        kind: row.get(4)?,
+                        expires_at: row.get(5)?,
+                        scope: row.get(6)?,
+                        project_id: row.get(7)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -490,7 +538,7 @@ pub fn search_log(
         // Only own scope: simple filter
         filters.push("(l.bot_id = ? AND l.scope = 'own')".to_string());
         let query_str = format!(
-            "SELECT l.id, l.content, l.source, l.created_at
+            "SELECT l.id, l.content, l.source, l.created_at, l.kind, l.expires_at, l.scope, l.project_id
                FROM memory_fts f
                JOIN memory_log l ON l.rowid = f.rowid
               WHERE memory_fts MATCH ?
@@ -507,6 +555,10 @@ pub fn search_log(
                     content: row.get(1)?,
                     source: row.get(2)?,
                     created_at: row.get(3)?,
+                    kind: row.get(4)?,
+                    expires_at: row.get(5)?,
+                    scope: row.get(6)?,
+                    project_id: row.get(7)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -523,7 +575,7 @@ pub fn search_log(
             project_placeholders
         ));
         let query_str = format!(
-            "SELECT l.id, l.content, l.source, l.created_at
+            "SELECT l.id, l.content, l.source, l.created_at, l.kind, l.expires_at, l.scope, l.project_id
                FROM memory_fts f
                JOIN memory_log l ON l.rowid = f.rowid
               WHERE memory_fts MATCH ?
@@ -545,6 +597,10 @@ pub fn search_log(
                     content: row.get(1)?,
                     source: row.get(2)?,
                     created_at: row.get(3)?,
+                    kind: row.get(4)?,
+                    expires_at: row.get(5)?,
+                    scope: row.get(6)?,
+                    project_id: row.get(7)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -553,7 +609,7 @@ pub fn search_log(
         // Only shared scope
         filters.push("l.scope = 'shared'".to_string());
         let query_str = format!(
-            "SELECT l.id, l.content, l.source, l.created_at
+            "SELECT l.id, l.content, l.source, l.created_at, l.kind, l.expires_at, l.scope, l.project_id
                FROM memory_fts f
                JOIN memory_log l ON l.rowid = f.rowid
               WHERE memory_fts MATCH ?
@@ -570,6 +626,10 @@ pub fn search_log(
                     content: row.get(1)?,
                     source: row.get(2)?,
                     created_at: row.get(3)?,
+                    kind: row.get(4)?,
+                    expires_at: row.get(5)?,
+                    scope: row.get(6)?,
+                    project_id: row.get(7)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -612,7 +672,7 @@ pub fn search_log(
 
         let scope_filter = format!("({})", scope_conditions.join(" OR "));
         let query_str = format!(
-            "SELECT l.id, l.content, l.source, l.created_at
+            "SELECT l.id, l.content, l.source, l.created_at, l.kind, l.expires_at, l.scope, l.project_id
                FROM memory_fts f
                JOIN memory_log l ON l.rowid = f.rowid
               WHERE memory_fts MATCH ?
@@ -638,6 +698,10 @@ pub fn search_log(
                     content: row.get(1)?,
                     source: row.get(2)?,
                     created_at: row.get(3)?,
+                    kind: row.get(4)?,
+                    expires_at: row.get(5)?,
+                    scope: row.get(6)?,
+                    project_id: row.get(7)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -684,7 +748,7 @@ pub fn set_shared_core(db: &Db, core: &str) -> rusqlite::Result<()> {
 pub fn recent_shared_log(db: &Db, limit: i64) -> rusqlite::Result<Vec<LogEntry>> {
     let now = now_iso();
     let mut stmt = db.conn().prepare(
-        "SELECT id, content, source, created_at FROM memory_log
+        "SELECT id, content, source, created_at, kind, expires_at, scope, project_id FROM memory_log
           WHERE scope = 'shared' AND (expires_at IS NULL OR expires_at > ?)
           ORDER BY created_at DESC, rowid DESC LIMIT ?",
     )?;
@@ -695,6 +759,10 @@ pub fn recent_shared_log(db: &Db, limit: i64) -> rusqlite::Result<Vec<LogEntry>>
                 content: row.get(1)?,
                 source: row.get(2)?,
                 created_at: row.get(3)?,
+                kind: row.get(4)?,
+                expires_at: row.get(5)?,
+                scope: row.get(6)?,
+                project_id: row.get(7)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -774,5 +842,19 @@ mod tests {
         assert!(!recall.entries.is_empty());
         assert!(recall.older > 0);
         assert_eq!(recall.entries.len() as i64 + recall.older, 30);
+    }
+
+    #[test]
+    fn remember_scoped_with_source_works() {
+        let db = Db::open(":memory:").unwrap();
+        seed_bot(&db, "t");
+        seed_bot(&db, "josh");
+        let entry =
+            remember_scoped_with_source(&db, "josh", "Shared fact", Scope::Shared, None, "josh")
+                .unwrap();
+        assert_eq!(entry.kind, "log");
+        assert_eq!(entry.scope, "shared");
+        assert_eq!(entry.source, "josh");
+        assert_eq!(entry.content, "Shared fact");
     }
 }

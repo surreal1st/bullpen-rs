@@ -29,6 +29,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/projects", post(post_project))
         .route("/api/projects/{id}/members", post(post_project_member))
         .route("/api/memory/shared", get(get_shared_memory))
+        .route("/api/memory/shared", post(post_shared_memory))
         .route(
             "/api/memory/shared/{entryId}",
             delete(delete_shared_memory_entry),
@@ -53,6 +54,10 @@ struct LogEntryResponse {
     source: String,
     #[serde(rename = "createdAt")]
     created_at: String,
+    kind: String,
+    expires_at: Option<String>,
+    scope: String,
+    project_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -109,6 +114,10 @@ async fn get_bot_memory(
                 content: e.content,
                 source: e.source,
                 created_at: e.created_at,
+                kind: e.kind,
+                expires_at: e.expires_at,
+                scope: e.scope,
+                project_id: e.project_id,
             })
             .collect()
     } else {
@@ -119,6 +128,10 @@ async fn get_bot_memory(
                 content: e.content,
                 source: e.source,
                 created_at: e.created_at,
+                kind: e.kind,
+                expires_at: e.expires_at,
+                scope: e.scope,
+                project_id: e.project_id,
             })
             .collect()
     };
@@ -439,6 +452,10 @@ async fn get_shared_memory(State(state): State<AppState>) -> ApiResult<impl Into
             content: e.content,
             source: e.source,
             created_at: e.created_at,
+            kind: e.kind,
+            expires_at: e.expires_at,
+            scope: e.scope,
+            project_id: e.project_id,
         })
         .collect::<Vec<_>>();
 
@@ -446,6 +463,60 @@ async fn get_shared_memory(State(state): State<AppState>) -> ApiResult<impl Into
         StatusCode::OK,
         axum::Json(json!({
             "log": entries,
+        })),
+    )
+        .into_response())
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct SharedMemoryRequest {
+    content: Option<String>,
+    bot_id: Option<String>,
+}
+
+/// POST /api/memory/shared
+/// Creates a shared-scope memory entry. Accepts an optional `botId`; defaults to "josh".
+async fn post_shared_memory(
+    State(state): State<AppState>,
+    body: axum::body::Bytes,
+) -> ApiResult<impl IntoResponse> {
+    let db = state.db();
+    let req = super::parse_body::<SharedMemoryRequest>(&body)?;
+    let content = req.content.unwrap_or_default().trim().to_string();
+
+    if content.is_empty() {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({ "error": "content is required" })),
+        )
+            .into_response());
+    }
+
+    let bot_id = req.bot_id.unwrap_or_else(|| "josh".to_string());
+    let entry = store::memory::remember_scoped_with_source(
+        &db,
+        &bot_id,
+        &content,
+        store::memory::Scope::Shared,
+        None,
+        &bot_id,
+    )?;
+    state.runs.changes.touch(crate::changes::ChangeKind::Memory);
+
+    Ok((
+        StatusCode::CREATED,
+        axum::Json(json!({
+            "entry": {
+                "id": entry.id,
+                "source": entry.source,
+                "content": entry.content,
+                "createdAt": entry.created_at,
+                "kind": entry.kind,
+                "expiresAt": entry.expires_at,
+                "scope": entry.scope,
+                "projectId": entry.project_id,
+            }
         })),
     )
         .into_response())
