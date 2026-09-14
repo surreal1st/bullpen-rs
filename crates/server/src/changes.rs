@@ -22,6 +22,7 @@ pub enum ChangeKind {
     Approvals,
     Questions,
     Working,
+    Memory,
 }
 
 impl ChangeKind {
@@ -33,6 +34,7 @@ impl ChangeKind {
             ChangeKind::Approvals => "approvals",
             ChangeKind::Questions => "questions",
             ChangeKind::Working => "working",
+            ChangeKind::Memory => "memory",
         }
     }
 }

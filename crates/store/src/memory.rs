@@ -215,9 +215,8 @@ pub fn projects_for(db: &Db, bot_id: &str) -> rusqlite::Result<Vec<Project>> {
 }
 
 /// The most recent `limit` entries for a bot, newest first. Mirrors the TS
-/// `recentLog`. (No longer used directly - replaced by scoped_entries.)
-#[allow(dead_code)]
-fn recent_log(db: &Db, bot_id: &str, limit: i64) -> rusqlite::Result<Vec<LogEntry>> {
+/// `recentLog`.
+pub fn recent_log(db: &Db, bot_id: &str, limit: i64) -> rusqlite::Result<Vec<LogEntry>> {
     let mut stmt = db.conn().prepare(
         "SELECT id, content, source, created_at FROM memory_log
           WHERE bot_id = ?1 ORDER BY created_at DESC, rowid DESC LIMIT ?2",
@@ -590,6 +589,62 @@ pub fn search_log(
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
+}
+
+/// Deletes a log entry by ID for a given bot. Returns true if an entry was deleted,
+/// false if the entry does not exist or belongs to a different bot.
+pub fn forget(db: &Db, bot_id: &str, entry_id: &str) -> rusqlite::Result<bool> {
+    let changes = db.conn().execute(
+        "DELETE FROM memory_log WHERE id = ?1 AND bot_id = ?2",
+        params![entry_id, bot_id],
+    )?;
+    Ok(changes > 0)
+}
+
+/// Gets the shared core text from settings. Empty string if not set.
+pub fn get_shared_core(db: &Db) -> rusqlite::Result<String> {
+    const SHARED_CORE_KEY: &str = "memory.shared_core";
+    let core: Option<String> = db
+        .conn()
+        .query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            params![SHARED_CORE_KEY],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(core.unwrap_or_default())
+}
+
+/// Sets the shared core text in settings.
+pub fn set_shared_core(db: &Db, core: &str) -> rusqlite::Result<()> {
+    const SHARED_CORE_KEY: &str = "memory.shared_core";
+    db.conn().execute(
+        "INSERT INTO settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![SHARED_CORE_KEY, core],
+    )?;
+    Ok(())
+}
+
+/// Gets the most recent entries from the shared scope (newest first).
+pub fn recent_shared_log(db: &Db, limit: i64) -> rusqlite::Result<Vec<LogEntry>> {
+    let now = now_iso();
+    let mut stmt = db.conn().prepare(
+        "SELECT id, content, source, created_at FROM memory_log
+          WHERE scope = 'shared' AND (expires_at IS NULL OR expires_at > ?)
+          ORDER BY created_at DESC, rowid DESC LIMIT ?",
+    )?;
+    let rows = stmt
+        .query_map(params![now, limit], |row| {
+            Ok(LogEntry {
+                id: row.get(0)?,
+                content: row.get(1)?,
+                source: row.get(2)?,
+                created_at: row.get(3)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
 }
 
 #[cfg(test)]

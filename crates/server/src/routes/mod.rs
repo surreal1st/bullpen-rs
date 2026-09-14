@@ -11,6 +11,7 @@ mod auth;
 mod bots;
 mod conversations;
 mod events;
+mod memory;
 mod messages;
 mod permissions;
 mod questions;
@@ -50,7 +51,8 @@ pub fn router() -> Router<AppState> {
         .merge(events::router())
         .merge(runs::router())
         .merge(spend::router())
-        .merge(settings::router());
+        .merge(settings::router())
+        .merge(memory::router());
 
     // B2: exists only so `tests/errors.rs` can prove the db mutex recovers
     // from a poison instead of panicking every request after the first -
