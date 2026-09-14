@@ -37,7 +37,12 @@ need his answer to continue."
     }
 }
 
-pub fn run(db: &Arc<std::sync::Mutex<Db>>, bot_id: &str, args: &str) -> String {
+pub fn run(
+    db: &Arc<std::sync::Mutex<Db>>,
+    bot_id: &str,
+    args: &str,
+    changes: crate::changes::ChangeBus,
+) -> String {
     let parsed = parse_ask_josh(args);
     let question = parsed.question.trim();
     if question.is_empty() {
@@ -84,6 +89,10 @@ pub fn run(db: &Arc<std::sync::Mutex<Db>>, bot_id: &str, args: &str) -> String {
         &parsed.options,
     ) {
         eprintln!("Failed to insert question row: {e}");
+    } else {
+        // Touch the change bus after successfully writing the row
+        changes.touch(crate::changes::ChangeKind::Questions);
+        changes.touch(crate::changes::ChangeKind::Roster);
     }
 
     "Asked. Josh has the question and has NOT answered it yet. Do not wait and do not guess the answer. \

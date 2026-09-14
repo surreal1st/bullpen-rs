@@ -77,6 +77,19 @@ impl ToolBox {
     }
 }
 
+/// Parameters for building a toolbox. Reduces parameter count to avoid
+/// clippy's `too_many_arguments` lint.
+pub struct BuildParams {
+    pub db: Arc<Mutex<Db>>,
+    pub port: Arc<dyn ModelPort>,
+    pub bot_id: String,
+    pub room_hook: RoomHook,
+    pub trigger: Trigger,
+    pub room: bool,
+    pub initial_model: String,
+    pub changes: crate::changes::ChangeBus,
+}
+
 /// Builds the S1 toolbox for one bot's run. F2: `trigger`/`room` are the
 /// CALLER's, forwarded only to `message_bot`'s bot branch so a nested
 /// delegated call is floored the same way the caller's own model choice is.
@@ -84,15 +97,15 @@ impl ToolBox {
 /// reads or writes - "what model is THIS run on right now", so an escalate
 /// tier is computed from wherever a previous climb (this same turn) left
 /// it, not from the run's starting model every time.
-pub fn build(
-    db: Arc<Mutex<Db>>,
-    port: Arc<dyn ModelPort>,
-    bot_id: String,
-    room_hook: RoomHook,
-    trigger: Trigger,
-    room: bool,
-    initial_model: &str,
-) -> ToolBox {
+pub fn build(params: BuildParams) -> ToolBox {
+    let db = params.db;
+    let port = params.port;
+    let bot_id = params.bot_id;
+    let room_hook = params.room_hook;
+    let trigger = params.trigger;
+    let room = params.room;
+    let initial_model = params.initial_model;
+    let changes = params.changes;
     let specs = vec![
         say::spec(),
         ask_josh::spec(),
@@ -117,10 +130,11 @@ pub fn build(
             let room_hook = Arc::clone(&room_hook);
             let current_model = Arc::clone(&current_model);
             let escalated = Arc::clone(&escalated);
+            let changes = changes.clone();
             Box::pin(async move {
                 match name.as_str() {
                     "say" => (say::run(&db, &bot_id, &args), None),
-                    "ask_josh" => (ask_josh::run(&db, &bot_id, &args), None),
+                    "ask_josh" => (ask_josh::run(&db, &bot_id, &args, changes), None),
                     "remember" => (remember::run(&db, &bot_id, &args), None),
                     "create_room" => (create_room::run(&db, &bot_id, &args), None),
                     "add_to_room" => (add_to_room::run(&db, &args), None),

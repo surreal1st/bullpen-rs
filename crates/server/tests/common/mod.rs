@@ -128,3 +128,63 @@ impl ModelPort for GatedPort {
 pub fn as_port(port: impl ModelPort + 'static) -> Arc<dyn ModelPort> {
     Arc::new(port)
 }
+
+/// Drains a run's events until `Done`/`Error`, returning everything seen.
+pub async fn drain(
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<server::runs::RunEvent>,
+) -> Vec<server::runs::RunEvent> {
+    let mut seen = Vec::new();
+    while let Some(event) = rx.recv().await {
+        let done = matches!(
+            event,
+            server::runs::RunEvent::Done { .. } | server::runs::RunEvent::Error { .. }
+        );
+        seen.push(event);
+        if done {
+            break;
+        }
+    }
+    seen
+}
+
+/// Seed a bot into the database.
+pub fn seed_bot(db: &Arc<std::sync::Mutex<store::Db>>, id: &str, name: &str) {
+    let db = db.lock().expect("db mutex poisoned");
+    db.conn()
+        .execute(
+            "INSERT INTO bots (id, name, purpose, instructions, model, created_at) VALUES (?1, ?2, '', ?3, NULL, '2026-01-01T00:00:00Z')",
+            rusqlite::params![id, name, format!("You are {name}.")],
+        )
+        .expect("seed bot");
+}
+
+/// Get or create the bot's own 1:1 conversation.
+pub fn own_conversation(db: &Arc<std::sync::Mutex<store::Db>>, bot_id: &str) -> String {
+    let db = db.lock().expect("db mutex poisoned");
+    store::get_or_create_conversation(&db, bot_id).expect("get_or_create_conversation")
+}
+
+/// Append a user message to a conversation.
+pub fn seed_user_message(db: &Arc<std::sync::Mutex<store::Db>>, conversation_id: &str, text: &str) {
+    let db = db.lock().expect("db mutex poisoned");
+    store::append_message(
+        &db,
+        conversation_id,
+        "user",
+        text,
+        store::NewMessage::default(),
+    )
+    .expect("append user message");
+}
+
+/// Read the status and error of a run from the database.
+pub fn run_row(db: &Arc<std::sync::Mutex<store::Db>>, run_id: &str) -> (String, Option<String>) {
+    let db = db.lock().expect("db mutex poisoned");
+    db.conn()
+        .query_row(
+            "SELECT status, error FROM runs WHERE id = ?1",
+            rusqlite::params![run_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read run row")
+}

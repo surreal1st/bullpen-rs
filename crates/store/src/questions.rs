@@ -156,11 +156,12 @@ pub fn list_all_open(db: &Db) -> rusqlite::Result<Vec<OpenQuestion>> {
         .collect::<Result<Vec<_>, _>>()
 }
 
-/// Record an answer to a question.
-pub fn answer_question(db: &Db, id: &str, answer: &str) -> rusqlite::Result<()> {
-    db.conn().execute(
-        "UPDATE questions SET answer = ?, answered_at = ? WHERE id = ?",
+/// Record an answer to a question. Returns Ok(true) if a row was updated,
+/// Ok(false) if the question was already answered or doesn't exist.
+pub fn answer_question(db: &Db, id: &str, answer: &str) -> rusqlite::Result<bool> {
+    let rows = db.conn().execute(
+        "UPDATE questions SET answer = ?, answered_at = ? WHERE id = ? AND answered_at IS NULL",
         params![answer, now_iso(), id],
     )?;
-    Ok(())
+    Ok(rows > 0)
 }

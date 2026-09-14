@@ -28,6 +28,14 @@ impl AppError {
             message: message.into(),
         }
     }
+
+    /// A 404 for a resource that doesn't exist.
+    pub fn not_found(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            message: message.into(),
+        }
+    }
 }
 
 impl IntoResponse for AppError {

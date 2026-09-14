@@ -4,7 +4,6 @@
 use crate::{ApiResult, AppState};
 use axum::Router;
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use serde::Deserialize;
@@ -56,7 +55,11 @@ async fn answer_question(
     }
 
     // Record the answer in the questions table.
-    store::answer_question(&db, &id, answer)?;
+    let answered = store::answer_question(&db, &id, answer)?;
+
+    if !answered {
+        return Err(crate::AppError::not_found("no such open question"));
+    }
 
     // Find the question to get bot_id and conversation_id.
     // Read directly from the questions table.
@@ -67,7 +70,7 @@ async fn answer_question(
             rusqlite::params![&id],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )
-        .map_err(|_| crate::AppError::bad_request("question not found"))?;
+        .map_err(|_| crate::AppError::not_found("no such open question"))?;
 
     // Post Josh's answer as an ordinary user message into the conversation.
     store::append_message(
@@ -84,5 +87,5 @@ async fn answer_question(
         .changes
         .touch(crate::changes::ChangeKind::Questions);
 
-    Ok(StatusCode::NO_CONTENT)
+    Ok(axum::Json(json!({ "ok": true })))
 }

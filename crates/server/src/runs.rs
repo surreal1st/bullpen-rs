@@ -489,15 +489,16 @@ impl RunManager {
         room: bool,
         model: &str,
     ) -> ToolBox {
-        tools::build(
-            Arc::clone(&self.db),
-            Arc::clone(&self.port),
-            bot_id.to_string(),
-            Arc::clone(&self.start_room_turn),
+        tools::build(tools::BuildParams {
+            db: Arc::clone(&self.db),
+            port: Arc::clone(&self.port),
+            bot_id: bot_id.to_string(),
+            room_hook: Arc::clone(&self.start_room_turn),
             trigger,
             room,
-            model,
-        )
+            initial_model: model.to_string(),
+            changes: self.changes.clone(),
+        })
     }
 
     async fn drive(
@@ -526,13 +527,16 @@ impl RunManager {
         // future non-`Send`. The db is locked only for the synchronous
         // settings/tier reads and the model write below; `classify_turn`
         // itself (the only network call) runs with no lock held at all.
-        // 🔴 One thing this narrowing drops versus calling `maybe_route`
-        // whole: the `routing_log` row `record_log` writes is private to
-        // the model crate and reachable only through `maybe_route` -
-        // S2-01's own tests already prove that logging directly against a
-        // synchronous call, so it is not re-proven here. Never the reason a
-        // run fails to start: a disabled setting, a non-candidate turn, or
-        // a classifier error all leave `model` exactly as `start` wrote it.
+        // F3: this narrowing used to also drop the `routing_log` row
+        // `maybe_route` writes - `record_log` was private to the model
+        // crate, reachable only through `maybe_route`, and this hand-rolled
+        // block called `classify_turn` directly instead, so the settings
+        // card's "Last 20 routings" list was permanently empty while routing
+        // itself worked. `record_log` is now `pub` and called explicitly
+        // below, computed the same way `maybe_route` computes it. Logging
+        // failure is never the reason a run fails to start: a disabled
+        // setting, a non-candidate turn, or a classifier error all leave
+        // `model` exactly as `start` wrote it.
         let mut model = model;
         let mut routing_usage: Option<ModelUsage> = None;
         let is_routing_candidate = trigger == Trigger::Chat
@@ -558,7 +562,28 @@ impl RunManager {
                 let result =
                     model::routing::classify_turn(self.port.as_ref(), &rule_text, &messages).await;
                 routing_usage = result.usage;
-                if result.verdict == model::routing::RoutingVerdict::Work && reason_model != model {
+                let verdict = result.verdict;
+
+                // F3: write the same `routing_log` row `maybe_route` would
+                // have written, computed the same way it does - "work"
+                // verdicts log the reason model, everything else logs the
+                // model this turn was already on. This has to happen
+                // whatever the `reason_model != model` check below decides,
+                // or the settings card's "Last 20 routings" list stays
+                // permanently empty even while routing itself works.
+                let logged_model = if verdict == model::routing::RoutingVerdict::Work {
+                    reason_model.clone()
+                } else {
+                    model.clone()
+                };
+                {
+                    let db = self.db();
+                    if let Err(err) = model::routing::record_log(&db, verdict, &logged_model) {
+                        tracing::error!("run {run_id}: failed to record routing verdict: {err}");
+                    }
+                }
+
+                if verdict == model::routing::RoutingVerdict::Work && reason_model != model {
                     model = reason_model;
                     {
                         let db = self.db();
@@ -767,18 +792,20 @@ were doing unless he changed it."
             // queued behind it are handed to `Outcome::Paused` rather than
             // run without a decision of its own.
             for (idx, call) in calls.iter().enumerate() {
-                // 🔴 A tool name absent from the permission map entirely -
-                // today only `create_room`/`add_to_room`, the two Grok gaps
-                // this Rust port added ahead of TS's own gated roster (see
-                // `tools/mod.rs`'s doc) - is not one of S2-02's gated tools.
-                // Falling to `Decision::Ask` for an unknown name (as
-                // `permissions::decide` does for a single lookup) would park
-                // every run that ever made a room, over a tool nobody has
-                // ever asked Josh to gate; this documented narrowing runs it
-                // free instead, same as before S2-03 existed.
+                // F4: a tool name absent from the permission map parks the
+                // run, same as `permissions::decide` does for a single
+                // lookup (`permissions.rs`'s own `unwrap_or(Decision::Ask)`)
+                // and the module doc's "these rules are the only authority".
+                // `create_room`/`add_to_room` now carry explicit `Allow` rows
+                // in `default_decisions()`, so this arm is no longer their
+                // path - it exists for whatever S3+ tool gets added to
+                // `tools/mod.rs`'s `build` without a matching permission row,
+                // and it has to fail closed: an unrecognised tool running
+                // free, unattended, with no log line and no test that would
+                // go red, is the failure this closes.
                 let mut decision = match perms.get(call.name.as_str()).copied() {
                     Some(base) => permissions::decide_call(base, &call.name, &call.arguments),
-                    None => Decision::Allow,
+                    None => Decision::Ask,
                 };
 
                 // S2-07: a call the grid says "ask" to is checked against
