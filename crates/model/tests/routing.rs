@@ -1,6 +1,6 @@
+use model::ladder::{DEFAULT_TIER1, Trigger};
 use model::port::{EventStream, ModelEvent, ModelMessage, ModelPort, ModelRequest, ModelUsage};
 use model::routing::*;
-use model::ladder::{Trigger, DEFAULT_TIER1};
 use std::sync::{Arc, Mutex};
 use store::Db;
 
@@ -23,19 +23,13 @@ impl MockPort {
     }
 
     fn requests(&self) -> Vec<ModelRequest> {
-        self.requests
-            .lock()
-            .expect("lock poisoned")
-            .clone()
+        self.requests.lock().expect("lock poisoned").clone()
     }
 }
 
 impl ModelPort for MockPort {
     fn stream(&self, request: ModelRequest) -> EventStream {
-        self.requests
-            .lock()
-            .expect("lock poisoned")
-            .push(request);
+        self.requests.lock().expect("lock poisoned").push(request);
         Box::pin(futures::stream::iter(self.events.clone()))
     }
 }
@@ -127,9 +121,16 @@ async fn routine_run_never_classified() {
     let messages = vec![ModelMessage::user("some message")];
 
     // Routine trigger should bypass routing entirely
-    let result = maybe_route(&db, &port, Trigger::Routine, "google/gemini-2.5-flash-lite", &messages, false)
-        .await
-        .expect("routing failed");
+    let result = maybe_route(
+        &db,
+        &port,
+        Trigger::Routine,
+        "google/gemini-2.5-flash-lite",
+        &messages,
+        false,
+    )
+    .await
+    .expect("routing failed");
 
     assert!(result.is_none());
     // No classifier call was made, so the port should have no requests
@@ -182,9 +183,16 @@ async fn routing_disabled_never_classifies() {
     ]);
     let messages = vec![ModelMessage::user("write me something")];
 
-    let result = maybe_route(&db, &port, Trigger::Chat, "google/gemini-2.5-flash-lite", &messages, false)
-        .await
-        .expect("routing failed");
+    let result = maybe_route(
+        &db,
+        &port,
+        Trigger::Chat,
+        "google/gemini-2.5-flash-lite",
+        &messages,
+        false,
+    )
+    .await
+    .expect("routing failed");
 
     assert!(result.is_none());
     assert_eq!(port.requests().len(), 0);
@@ -209,9 +217,16 @@ async fn log_records_verdict_and_model() {
     let port = MockPort::new(events);
     let messages = vec![ModelMessage::user("run the backup")];
 
-    maybe_route(&db, &port, Trigger::Chat, "google/gemini-2.5-flash-lite", &messages, false)
-        .await
-        .ok();
+    maybe_route(
+        &db,
+        &port,
+        Trigger::Chat,
+        "google/gemini-2.5-flash-lite",
+        &messages,
+        false,
+    )
+    .await
+    .ok();
 
     let log = list_routing_log(&db, 20).expect("failed to read log");
     assert_eq!(log.len(), 1);
@@ -232,9 +247,16 @@ async fn classifier_error_defaults_to_lookup() {
     let port = MockPort::new(events);
     let messages = vec![ModelMessage::user("write me something new")];
 
-    let result = maybe_route(&db, &port, Trigger::Chat, "google/gemini-2.5-flash-lite", &messages, false)
-        .await
-        .expect("routing failed");
+    let result = maybe_route(
+        &db,
+        &port,
+        Trigger::Chat,
+        "google/gemini-2.5-flash-lite",
+        &messages,
+        false,
+    )
+    .await
+    .expect("routing failed");
 
     let result = result.expect("should route even on error");
     assert_eq!(result.verdict, RoutingVerdict::Lookup);
@@ -257,9 +279,16 @@ async fn room_members_never_routed() {
     ]);
     let messages = vec![ModelMessage::user("plan out the rebuild")];
 
-    let result = maybe_route(&db, &port, Trigger::Chat, "google/gemini-2.5-flash-lite", &messages, true)
-        .await
-        .expect("routing failed");
+    let result = maybe_route(
+        &db,
+        &port,
+        Trigger::Chat,
+        "google/gemini-2.5-flash-lite",
+        &messages,
+        true,
+    )
+    .await
+    .expect("routing failed");
 
     assert!(result.is_none());
     assert_eq!(port.requests().len(), 0);
@@ -318,9 +347,16 @@ async fn classifier_includes_usage_in_result() {
     let port = MockPort::new(events);
     let messages = vec![ModelMessage::user("write something")];
 
-    let result = maybe_route(&db, &port, Trigger::Chat, "google/gemini-2.5-flash-lite", &messages, false)
-        .await
-        .expect("routing failed");
+    let result = maybe_route(
+        &db,
+        &port,
+        Trigger::Chat,
+        "google/gemini-2.5-flash-lite",
+        &messages,
+        false,
+    )
+    .await
+    .expect("routing failed");
 
     let result = result.expect("should route");
     assert!(result.usage.is_some());
