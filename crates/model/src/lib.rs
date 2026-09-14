@@ -9,6 +9,7 @@
 
 pub mod port;
 pub mod secrets;
+pub mod ladder;
 
 #[cfg(any(test, feature = "fake"))]
 pub mod fake;
