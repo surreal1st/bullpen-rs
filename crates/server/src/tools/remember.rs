@@ -1,12 +1,14 @@
 //! `remember`: write one fact to a bot's own memory log. Port of the
 //! `remember` tool over `src/server/memory.ts`'s `remember`.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use model::ToolSpec;
 use serde::Deserialize;
 use serde_json::json;
 use store::Db;
+
+use super::lock_db;
 
 pub fn spec() -> ToolSpec {
     ToolSpec {
@@ -29,7 +31,7 @@ struct Args {
     fact: String,
 }
 
-pub fn run(db: &Arc<Mutex<Db>>, bot_id: &str, args: &str) -> String {
+pub fn run(db: &Arc<std::sync::Mutex<Db>>, bot_id: &str, args: &str) -> String {
     let Ok(parsed) = serde_json::from_str::<Args>(args) else {
         return "Could not read `fact`.".to_string();
     };
@@ -38,7 +40,7 @@ pub fn run(db: &Arc<Mutex<Db>>, bot_id: &str, args: &str) -> String {
         return "Nothing to remember: the fact was empty.".to_string();
     }
 
-    let db = db.lock().expect("db mutex poisoned");
+    let db = lock_db(db);
     store::remember(&db, bot_id, fact, "bot").expect("remember");
 
     "Remembered.".to_string()

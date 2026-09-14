@@ -47,8 +47,43 @@ fn effort_description(effort: &str) -> &'static str {
     }
 }
 
-const BOLT_ICON: &str = r##"<svg viewBox="0 0 16 16" width="13" height="13" fill="currentColor" aria-hidden="true"><path d="M8.6 1 3 9.2h3.4L6.2 15 13 6.4H9.4L8.6 1Z" /></svg>"##;
-const RESET_ICON: &str = r##"<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M13 8A5 5 0 1 1 11.2 4.2" stroke-linecap="round" /><path d="M13 2.5V5.5H10" stroke-linecap="round" stroke-linejoin="round" /></svg>"##;
+fn bolt_icon() -> Element {
+    rsx! {
+        svg {
+            view_box: "0 0 16 16",
+            width: "13",
+            height: "13",
+            fill: "currentColor",
+            "aria-hidden": "true",
+            path {
+                d: "M8.6 1 3 9.2h3.4L6.2 15 13 6.4H9.4L8.6 1Z"
+            }
+        }
+    }
+}
+
+fn reset_icon() -> Element {
+    rsx! {
+        svg {
+            view_box: "0 0 16 16",
+            width: "13",
+            height: "13",
+            fill: "none",
+            stroke: "currentColor",
+            stroke_width: "1.4",
+            "aria-hidden": "true",
+            path {
+                d: "M13 8A5 5 0 1 1 11.2 4.2",
+                stroke_linecap: "round"
+            }
+            path {
+                d: "M13 2.5V5.5H10",
+                stroke_linecap: "round",
+                stroke_linejoin: "round"
+            }
+        }
+    }
+}
 
 /// Applies one PATCH and reflects the result (or rolls a refusal back to
 /// what the server actually holds) - a plain function rather than a shared
@@ -205,7 +240,9 @@ pub fn ModelChip(bot: Bot, on_saved: EventHandler<Bot>) -> Element {
                 }
                 div { class: "effort-pop", role: "dialog", "aria-label": "Model and reasoning effort",
                     div { class: "effort-pop-head",
-                        span { class: "effort-glyph effort-glyph-bolt", "aria-hidden": "true", dangerous_inner_html: "{BOLT_ICON}" }
+                        span { class: "effort-glyph effort-glyph-bolt",
+                            {bolt_icon()}
+                        }
                         div { class: "effort-pop-title",
                             h3 { "{effort_label(&effort.read())}" }
                             p { class: "mono muted", "{short_model(&shown_model)}" }
@@ -216,7 +253,7 @@ pub fn ModelChip(bot: Bot, on_saved: EventHandler<Bot>) -> Element {
                             title: "Reset to Medium and the platform default model",
                             "aria-label": "Reset to Medium and the platform default model",
                             onclick: reset,
-                            dangerous_inner_html: "{RESET_ICON}",
+                            {reset_icon()}
                         }
                     }
 

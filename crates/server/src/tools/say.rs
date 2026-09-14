@@ -1,12 +1,14 @@
 //! `say`: talk in your own 1:1 thread with Josh without ending your turn.
 //! Port of `src/server/conversing.ts`'s `sayToJosh`.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use model::ToolSpec;
 use serde::Deserialize;
 use serde_json::json;
 use store::{Db, NewMessage};
+
+use super::lock_db;
 
 pub fn spec() -> ToolSpec {
     ToolSpec {
@@ -29,7 +31,7 @@ struct Args {
     text: String,
 }
 
-pub fn run(db: &Arc<Mutex<Db>>, bot_id: &str, args: &str) -> String {
+pub fn run(db: &Arc<std::sync::Mutex<Db>>, bot_id: &str, args: &str) -> String {
     let Ok(parsed) = serde_json::from_str::<Args>(args) else {
         return "Could not read `text`.".to_string();
     };
@@ -38,7 +40,7 @@ pub fn run(db: &Arc<Mutex<Db>>, bot_id: &str, args: &str) -> String {
         return "Nothing was said: the text was empty.".to_string();
     }
 
-    let db = db.lock().expect("db mutex poisoned");
+    let db = lock_db(db);
     let conversation_id =
         store::get_or_create_conversation(&db, bot_id).expect("get_or_create_conversation");
     store::append_message(

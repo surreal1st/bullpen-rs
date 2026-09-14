@@ -20,6 +20,7 @@ use store::Db;
 
 use crate::prompt::{self, HistoryTurn};
 use crate::runs::{RunManager, StartOptions};
+use crate::tools::lock_db;
 
 /// One room round still in flight, keyed by the conversation it is chaining
 /// through (see `register`'s doc for why the key is the conversation id and
@@ -111,7 +112,7 @@ impl RoomEngine {
             return false;
         }
         let started = {
-            let db = self.db.lock().expect("db mutex poisoned");
+            let db = lock_db(&self.db);
             let Some(conversation) =
                 store::get_conversation(&db, conversation_id).expect("get_conversation")
             else {
@@ -172,7 +173,7 @@ impl RoomEngine {
         // message removed rather than left standing - a round where every
         // member stays quiet just ends with nothing posted, never an error.
         {
-            let db = self.db.lock().expect("db mutex poisoned");
+            let db = lock_db(&self.db);
             if let Some((status, text)) = run_outcome(&db, run_id)
                 && status == "done"
                 && declared_nothing_new(&text)
@@ -194,7 +195,7 @@ impl RoomEngine {
         let next_bot_id = remaining.remove(0);
 
         let started = {
-            let db = self.db.lock().expect("db mutex poisoned");
+            let db = lock_db(&self.db);
             // A member archived mid-round has nothing to say; the round
             // simply ends one bot short rather than failing the rest of it.
             let Some(member) = store::get_bot(&db, &next_bot_id).expect("get_bot") else {

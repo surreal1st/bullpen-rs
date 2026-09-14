@@ -1,12 +1,14 @@
 //! `add_to_room`: add a bot to an existing group chat. The second Grok gap.
 //! Port over `store::update_room`.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use model::ToolSpec;
 use serde::Deserialize;
 use serde_json::json;
 use store::Db;
+
+use super::lock_db;
 
 pub fn spec() -> ToolSpec {
     ToolSpec {
@@ -29,12 +31,12 @@ struct Args {
     bot: String,
 }
 
-pub fn run(db: &Arc<Mutex<Db>>, args: &str) -> String {
+pub fn run(db: &Arc<std::sync::Mutex<Db>>, args: &str) -> String {
     let Ok(parsed) = serde_json::from_str::<Args>(args) else {
         return "Could not read `room`/`bot`.".to_string();
     };
 
-    let db = db.lock().expect("db mutex poisoned");
+    let db = lock_db(db);
 
     let rooms = store::list_rooms(&db).expect("list_rooms");
     let Some(room) = rooms

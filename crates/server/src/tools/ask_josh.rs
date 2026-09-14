@@ -2,12 +2,14 @@
 //! your own 1:1 thread. Port of `src/server/conversing.ts`'s `askAsync` -
 //! the non-waiting form. S2: writes a `questions` row and posts the message.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use model::ToolSpec;
 use serde_json::json;
 use shared::ask_josh::{MAX_QUESTION_CHARS, parse_ask_josh};
 use store::{Db, NewMessage};
+
+use super::lock_db;
 
 pub fn spec() -> ToolSpec {
     ToolSpec {
@@ -35,7 +37,7 @@ need his answer to continue."
     }
 }
 
-pub fn run(db: &Arc<Mutex<Db>>, bot_id: &str, args: &str) -> String {
+pub fn run(db: &Arc<std::sync::Mutex<Db>>, bot_id: &str, args: &str) -> String {
     let parsed = parse_ask_josh(args);
     let question = parsed.question.trim();
     if question.is_empty() {
@@ -56,7 +58,7 @@ pub fn run(db: &Arc<Mutex<Db>>, bot_id: &str, args: &str) -> String {
     }
     let content = lines.join("\n");
 
-    let db = db.lock().expect("db mutex poisoned");
+    let db = lock_db(db);
     let conversation_id =
         store::get_or_create_conversation(&db, bot_id).expect("get_or_create_conversation");
 

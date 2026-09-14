@@ -11,7 +11,7 @@
 //! Asking a colleague a quick question - the common case - only ever needed
 //! one model call anyway.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use futures::StreamExt;
 use model::ladder::{Trigger, default_model, model_for_run};
@@ -21,7 +21,7 @@ use serde_json::json;
 use store::{Db, NewMessage};
 
 use crate::prompt::{self, HistoryTurn};
-use crate::tools::RoomHook;
+use crate::tools::{RoomHook, lock_db};
 
 pub fn spec() -> ToolSpec {
     ToolSpec {
@@ -54,7 +54,7 @@ struct Args {
 /// `tools::build` so the colleague's call is floored the same way the
 /// caller's own would be.
 pub async fn run(
-    db: &Arc<Mutex<Db>>,
+    db: &Arc<std::sync::Mutex<Db>>,
     port: &Arc<dyn ModelPort>,
     caller_bot_id: &str,
     room_hook: &RoomHook,
@@ -76,7 +76,7 @@ pub async fn run(
 
     // 1. A room, matched by title.
     let room_match = {
-        let db = db.lock().expect("db mutex poisoned");
+        let db = lock_db(db);
         store::list_rooms(&db)
             .expect("list_rooms")
             .into_iter()
@@ -84,13 +84,13 @@ pub async fn run(
     };
     if let Some(room_summary) = room_match {
         let caller_name = {
-            let db = db.lock().expect("db mutex poisoned");
+            let db = lock_db(db);
             store::get_bot(&db, caller_bot_id)
                 .expect("get_bot")
                 .map(|b| b.name)
         };
         {
-            let db = db.lock().expect("db mutex poisoned");
+            let db = lock_db(db);
             // Guest-attributed unless the caller is the room's own database
             // owner - the same rule an @mention reply uses.
             let owner_is_caller =
@@ -145,7 +145,7 @@ pub async fn run(
 
     // 2. A bot, matched by id or name.
     let bots = {
-        let db = db.lock().expect("db mutex poisoned");
+        let db = lock_db(db);
         store::list_bots(&db).expect("list_bots")
     };
     let target = bots
@@ -179,7 +179,7 @@ briefly. If it is not your area, say whose it is rather than guessing."
     // floor - `model_for_run` is the only place a run's model is settled,
     // same as the TS `askBot` (`delegate.ts:105`).
     let request_model = {
-        let db_guard = db.lock().expect("db mutex poisoned");
+        let db_guard = lock_db(db);
         let raw = bot
             .model
             .clone()
@@ -187,7 +187,7 @@ briefly. If it is not your area, say whose it is rather than guessing."
         model_for_run(&db_guard, trigger, &raw, room)
     };
     let messages = {
-        let db = db.lock().expect("db mutex poisoned");
+        let db = lock_db(db);
         prompt::build_prompt(&db, &bot, &[HistoryTurn::user(framed)])
     };
 

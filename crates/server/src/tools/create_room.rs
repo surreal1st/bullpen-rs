@@ -1,12 +1,14 @@
 //! `create_room`: start a group chat. One of the two Grok gaps - Grok Bot
 //! has no group chats at all. Port over `store::create_room`.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use model::ToolSpec;
 use serde::Deserialize;
 use serde_json::json;
 use store::Db;
+
+use super::lock_db;
 
 pub fn spec() -> ToolSpec {
     ToolSpec {
@@ -39,7 +41,7 @@ struct Args {
 /// Always puts the caller first (the owner), whether or not the model
 /// remembered to include itself - a model that forgot itself should not end
 /// up a guest in the room it just asked to create.
-pub fn run(db: &Arc<Mutex<Db>>, caller_bot_id: &str, args: &str) -> String {
+pub fn run(db: &Arc<std::sync::Mutex<Db>>, caller_bot_id: &str, args: &str) -> String {
     let Ok(parsed) = serde_json::from_str::<Args>(args) else {
         return "Could not read `title`/`member_ids`.".to_string();
     };
@@ -51,7 +53,7 @@ pub fn run(db: &Arc<Mutex<Db>>, caller_bot_id: &str, args: &str) -> String {
         }
     }
 
-    let db = db.lock().expect("db mutex poisoned");
+    let db = lock_db(db);
     match store::create_room(&db, &parsed.title, &ids) {
         Ok(room) => format!("Created \"{}\" (room {}).", room.title, room.id),
         Err(message) => message,

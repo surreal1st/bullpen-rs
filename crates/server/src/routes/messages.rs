@@ -280,11 +280,6 @@ async fn post_message(
     // returns (an instant `ModelEvent::Error` - no key configured, for one)
     // cannot fire `on_run_done` before this entry exists to chain past the
     // owner's leg.
-    // B9: registered (keyed by `conversation_id` - see `RoomEngine::register`'s
-    // doc) BEFORE `runs.start`, so a run that settles before `start` even
-    // returns (an instant `ModelEvent::Error` - no key configured, for one)
-    // cannot fire `on_run_done` before this entry exists to chain past the
-    // owner's leg.
     let is_room_round = !round.is_empty();
     if is_room_round {
         state

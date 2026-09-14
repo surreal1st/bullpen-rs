@@ -18,11 +18,20 @@ mod shell;
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use model::ladder::Trigger;
 use model::{ModelPort, ModelUsage, ToolSpec};
 use store::Db;
+
+/// B2: the one guard every tool uses to lock the db. A poisoned `Mutex`
+/// (left behind by a panic under the lock elsewhere) used to mean every
+/// later `.expect("db mutex poisoned")` panicked too, turning one bad
+/// request into a dead server that only a restart fixed -
+/// `unwrap_or_else(PoisonError::into_inner)` recovers the guard instead.
+pub(crate) fn lock_db(db: &Arc<Mutex<Db>>) -> MutexGuard<'_, Db> {
+    db.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 /// The hook `message_bot` calls when it posts into a ROOM: `(conversation_id,
 /// mandatory) -> bool`. `None` until S1-06 wires room rounds in - a
@@ -122,7 +131,7 @@ pub fn build(
                             .expect("current model mutex poisoned")
                             .clone();
                         let (text, climb) = {
-                            let db = db.lock().expect("db mutex poisoned");
+                            let db = lock_db(&db);
                             escalate::run(&db, trigger, &model_now, &args)
                         };
                         if let Some(step) = &climb {

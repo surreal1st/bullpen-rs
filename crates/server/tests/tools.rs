@@ -418,3 +418,45 @@ async fn add_to_room_reports_an_existing_member() {
         "got {events:?}"
     );
 }
+
+// F13: mutex poison recovery - a panic holding the db lock should not kill
+// every later request. The helper `lock_db` uses `unwrap_or_else(PoisonError::into_inner)`
+// to recover the guard instead of `.expect()` panicking again.
+#[tokio::test]
+async fn say_tool_recovers_from_poisoned_mutex() {
+    let db = open_db();
+    seed_bot(&db, "arthur", "Arthur");
+    let conversation_id = own_conversation(&db, "arthur");
+    seed_user_message(&db, &conversation_id, "say after panic");
+
+    // Poison the mutex: spawn a thread, grab the lock, and panic while holding it
+    let db_clone = Arc::clone(&db);
+    let handle = std::thread::spawn(move || {
+        let _guard = db_clone.lock().unwrap();
+        panic!("Poison the mutex");
+    });
+    // Join and ignore the panic error
+    let _ = handle.join();
+
+    // Now the mutex is poisoned. The `say` tool should recover and succeed.
+    let say_call = json!({"text": "Still works after poison"}).to_string();
+    let port = ScriptedPort::new(vec![tool_call("c1", "say", say_call), text_script("noted")]);
+    let manager = Arc::new(RunManager::new(Arc::clone(&db), as_port(port)));
+    let run_id = manager.start(StartOptions {
+        bot_id: "arthur".to_string(),
+        conversation_id: conversation_id.clone(),
+        model: "test/model".to_string(),
+        messages: vec![ModelMessage::user("say after panic")],
+        trigger: Trigger::Chat,
+        room: false,
+    });
+
+    let events = drain(manager.subscribe(&run_id)).await;
+    // If the helper was broken (using .expect), this would panic and the test would fail.
+    // With the helper, the tool succeeds.
+    assert_eq!(
+        tool_result(&events, "say"),
+        Some("Said. Josh can see that now. Carry on - this did not end your turn."),
+        "got {events:?}"
+    );
+}
