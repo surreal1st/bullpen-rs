@@ -4,11 +4,14 @@
 mod auth;
 mod routes;
 
+use axum::extract::{Request, State};
 use axum::response::{IntoResponse, Response};
-use axum::{http::StatusCode, Router};
-use std::path::PathBuf;
+use axum::{Router, http::StatusCode};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use store::Db;
+use tower::Service;
+use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 
 /// Shared state handed to every route: one guarded connection to `bullpen.db`.
@@ -23,8 +26,8 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(db: Db) -> Self {
-        let client_root = std::env::var("BULLPEN_CLIENT_ROOT")
-            .unwrap_or_else(|_| "./dist/client".to_string());
+        let client_root =
+            std::env::var("BULLPEN_CLIENT_ROOT").unwrap_or_else(|_| "./dist/client".to_string());
         AppState {
             db: Arc::new(Mutex::new(db)),
             client_root: Arc::new(client_root),
@@ -39,33 +42,32 @@ impl AppState {
     }
 }
 
-/// A fallback handler for SPA routing: serves index.html for any non-/api path
-/// that doesn't exist as a file. This allows the SPA to handle client-side
-/// routing.
-async fn spa_fallback(
-    uri: axum::http::Uri,
-    axum::extract::State(state): axum::extract::State<AppState>,
-) -> Response {
-    // Never fall through to SPA for /api/* paths
-    if uri.path().starts_with("/api") {
+/// Fallback for anything the API router didn't match: `/api/*` gets a plain
+/// 404 (never SPA html); a path with a file extension (`/assets/a.js`,
+/// `/favicon.ico`) is handed to `ServeDir`, which serves it with a real MIME
+/// type via `mime_guess` and answers a missing file with a real 404; an
+/// extensionless path (an SPA route like `/settings`) gets `index.html` so
+/// the client can handle routing.
+async fn static_or_spa(State(state): State<AppState>, req: Request) -> Response {
+    let path = req.uri().path().to_string();
+
+    // Never fall through to static files or SPA for /api/* paths.
+    if path.starts_with("/api") {
         return (StatusCode::NOT_FOUND, "Not Found").into_response();
     }
 
-    let client_root = state.client_root.as_str();
-    let requested_path = uri.path();
-
-    // Try to serve the requested file first (if it's not /)
-    if requested_path != "/" {
-        let file_path = PathBuf::from(&client_root).join(requested_path.trim_start_matches('/'));
-        if file_path.exists() && file_path.is_file() {
-            if let Ok(content) = tokio::fs::read(&file_path).await {
-                return (StatusCode::OK, content).into_response();
-            }
-        }
+    let has_extension = Path::new(&path).extension().is_some();
+    if has_extension {
+        let mut serve_dir = ServeDir::new(state.client_root.as_str());
+        return serve_dir
+            .call(req)
+            .await
+            .expect("ServeDir::call is infallible")
+            .into_response();
     }
 
-    // Otherwise, serve index.html for SPA routing
-    let index_path = PathBuf::from(&client_root).join("index.html");
+    // Extensionless path: serve index.html for SPA routing.
+    let index_path = PathBuf::from(state.client_root.as_str()).join("index.html");
 
     match tokio::fs::read_to_string(&index_path).await {
         Ok(html) => axum::response::Html(html).into_response(),
@@ -87,7 +89,7 @@ pub fn build_app(state: AppState) -> Router {
     // Then a fallback handler that serves static files and index.html for SPA routing
     Router::new()
         .merge(routes::router())
-        .fallback(spa_fallback)
+        .fallback(static_or_spa)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
