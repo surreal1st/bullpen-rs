@@ -9,7 +9,13 @@ store = { workspace = true }
 reqwest = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
+async-stream = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+
+[features]
+# Exposes `fake` (the scripted ModelPort test double) to other crates that
+# need it outside `cfg(test)`, e.g. a later slice's own test suite.
+fake = []

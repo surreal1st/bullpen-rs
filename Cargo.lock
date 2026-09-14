@@ -3250,6 +3250,7 @@ dependencies = [
 name = "model"
 version = "0.1.0"
 dependencies = [
+ "async-stream",
  "futures",
  "reqwest",
  "serde",
@@ -4859,6 +4860,7 @@ dependencies = [
  "serde_json",
  "shared",
  "store",
+ "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "tokio-stream",
