@@ -13,6 +13,11 @@
  * not the hostname: Chrome force-upgrades http on a .ts.net name (HSTS preload)
  * and the handshake against the plain port hangs.
  *
+ * 🔴 Shots that need the fake port (BULLPEN_FAKE_PORT=1) require a DEBUG server
+ * build: `cargo build -p server` produces the binary at `target/debug/bullpen.exe`.
+ * Release builds (`cargo build --release`) strip the fake port entirely and will
+ * ignore the environment variable.
+ *
  * 🔴 Driven over the DevTools protocol with a REAL wait, not `--screenshot`.
  * The one-shot flags take the picture at the load event, before the app has
  * fetched its roster and conversation, and `--virtual-time-budget` waits for

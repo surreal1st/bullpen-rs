@@ -13,11 +13,13 @@ use model::{EventStream, ModelEvent, ModelPort, ModelRequest};
 /// `scripts/mock-roster.mjs`. A local type rather than `model::fake`, whose
 /// `FakePort` replays instantly with no delay and is `cfg(test)`-gated -
 /// this touches only this one file, nothing in `crates/model`.
+#[cfg(debug_assertions)]
 struct DelayedFakePort {
     reply: &'static str,
     delay: Duration,
 }
 
+#[cfg(debug_assertions)]
 impl ModelPort for DelayedFakePort {
     fn stream(&self, _request: ModelRequest) -> EventStream {
         let reply = self.reply;
@@ -52,6 +54,7 @@ async fn main() {
     // Says whether the dir is there, never anything from inside the db.
     tracing::info!(%data_dir, "bullpen data dir");
 
+    #[cfg(debug_assertions)]
     let app = if std::env::var("BULLPEN_FAKE_PORT").as_deref() == Ok("1") {
         tracing::info!("BULLPEN_FAKE_PORT=1: model calls are scripted, no OpenRouter key needed");
         let fake_port: Arc<dyn ModelPort> = Arc::new(DelayedFakePort {
@@ -62,6 +65,9 @@ async fn main() {
     } else {
         server::build_app(server::AppState::new(db))
     };
+
+    #[cfg(not(debug_assertions))]
+    let app = server::build_app(server::AppState::new(db));
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = tokio::net::TcpListener::bind(addr)
