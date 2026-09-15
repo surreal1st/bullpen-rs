@@ -12,6 +12,7 @@ mod auto_review;
 mod bots;
 mod conversations;
 mod events;
+mod goals;
 mod memory;
 mod messages;
 mod permissions;
@@ -47,6 +48,7 @@ pub fn router() -> Router<AppState> {
         .merge(auto_review::router())
         .merge(bots::router())
         .merge(conversations::router())
+        .merge(goals::router())
         .merge(permissions::router())
         .merge(questions::router())
         .merge(rooms::router())
