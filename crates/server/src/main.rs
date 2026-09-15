@@ -76,6 +76,10 @@ async fn main() {
     let _scheduler = server::routines::start_scheduler(state.clone());
     let _goal_scheduler = server::goals::start_goal_scheduler(state.clone());
 
+    // S6-07: `vm_proxy::serve` needs its own handle on the same db every
+    // route shares, taken before `build_app` consumes `state` below.
+    let db_handle = state.db_handle();
+
     let app = server::build_app(state);
 
     // B7: was `0.0.0.0` - every route was unauthenticated (before this
@@ -93,5 +97,11 @@ async fn main() {
         .await
         .expect("bind port");
     tracing::info!(%addr, "listening");
-    axum::serve(listener, app).await.expect("serve");
+    // S6-07: `vm_proxy::serve` replaces `axum::serve` so a bot-screen
+    // upgrade can be claimed before any HTTP response is written - see
+    // `vm_proxy.rs`'s own doc for why `axum::serve` alone has no hook for
+    // that.
+    server::vm_proxy::serve(listener, app, db_handle, true)
+        .await
+        .expect("serve");
 }

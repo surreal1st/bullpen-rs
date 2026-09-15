@@ -415,6 +415,14 @@ impl AppState {
         self.db.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    // S6-07: `vm_proxy::serve` needs the `Arc<Mutex<Db>>` itself, not a
+    // guard, so it can clone one per accepted connection. `pub` rather than
+    // `pub(crate)` like `db()` above because `main.rs` is a separate crate
+    // and is the only caller.
+    pub fn db_handle(&self) -> Arc<Mutex<Db>> {
+        Arc::clone(&self.db)
+    }
+
     /// S5c-03: registers what `routes/slack.rs`'s DM/mention branch should
     /// post back to Slack once `run_id` settles. See the `add_on_run_done`
     /// hook above (in `build`) for why this is called immediately after
