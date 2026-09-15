@@ -86,9 +86,12 @@ pub(crate) fn ensure_goal_tables(db: &Db) -> rusqlite::Result<()> {
     // read window (S5b-03 owns `goals.ts` only). `goal_runs` below needs the
     // column to exist on every db this crate opens - TS-made or fresh - so
     // it is added here as the same kind of self-creating column
-    // `ensure_routine_columns` adds to `routines`. Flagged for the reviewer:
-    // confirm the DDL/index name against `runs.ts`'s `ensureGoalIdColumn`
-    // once that file is in a builder's read window.
+    // `ensure_routine_columns` adds to `routines`. Checked against the TS by
+    // the orchestrator: `runs.ts:166-167` is `ALTER TABLE runs ADD COLUMN
+    // goal_id TEXT` and nothing more, so there is NO index on it here either -
+    // an `idx_runs_goal` was added by S5b-03 and removed again, because
+    // `tests/migrations.rs` guards this schema against exactly that kind of
+    // invention and TS has no such index.
     let has_goal_id = {
         let mut stmt = db.conn().prepare("PRAGMA table_info(runs)")?;
         stmt.query_map([], |row| row.get::<_, String>(1))?
@@ -99,10 +102,6 @@ pub(crate) fn ensure_goal_tables(db: &Db) -> rusqlite::Result<()> {
         db.conn()
             .execute("ALTER TABLE runs ADD COLUMN goal_id TEXT", [])?;
     }
-    db.conn().execute_batch(
-        "CREATE INDEX IF NOT EXISTS idx_runs_goal ON runs(goal_id, created_at DESC);",
-    )?;
-
     Ok(())
 }
 

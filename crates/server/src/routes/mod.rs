@@ -13,6 +13,7 @@ mod bots;
 mod conversations;
 mod events;
 mod goals;
+mod hooks;
 mod memory;
 mod messages;
 mod permissions;
@@ -49,6 +50,7 @@ pub fn router() -> Router<AppState> {
         .merge(bots::router())
         .merge(conversations::router())
         .merge(goals::router())
+        .merge(hooks::router())
         .merge(permissions::router())
         .merge(questions::router())
         .merge(rooms::router())

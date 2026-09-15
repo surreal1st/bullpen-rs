@@ -85,6 +85,16 @@ fn fixture_db_opens_unchanged() {
     // one sqlite_autoindex too).
     expected_new.insert("auto_review_log".to_string());
     expected_new.insert("sqlite_autoindex_auto_review_log_1".to_string());
+    // S5b-03: the goals tables are NOT a numbered migration - they are
+    // self-creating, exactly as the TS `ensureGoalTables` (`goals.ts:34-65`)
+    // creates them, so a db either side wrote still opens on the other. The
+    // DDL here is byte-equal to that function's, indexes included; `runs`
+    // also gains a `goal_id` COLUMN (`runs.ts:166-167`), which adds no schema
+    // name and so does not appear in this set.
+    expected_new.insert("goals".to_string());
+    expected_new.insert("sqlite_autoindex_goals_1".to_string());
+    expected_new.insert("idx_goals_due".to_string());
+    expected_new.insert("idx_goals_bot".to_string());
 
     // After must equal before plus the new objects.
     let expected_after = {
