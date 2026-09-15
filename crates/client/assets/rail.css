@@ -52,7 +52,15 @@
   background: #0a0e13;
   border-right: 1px solid var(--line);
   display: grid;
-  grid-template-rows: auto 1fr;
+  /* S4-F-02 F1 fix: an explicit `auto 1fr` template only has two tracks, but
+     `.roster` has many children (group head, N room rows, N bot rows) - the
+     rest auto-place into implicit `auto` rows, so once `.roster` fills the
+     rail's full height (S4-03's fix) the FIRST explicit row (the first group
+     row) absorbed all the free space and pushed everything after it down.
+     `align-content: start` keeps every row implicit and packed at the top
+     regardless of how much of the rail's height they fill, short roster or
+     long. */
+  align-content: start;
   min-height: 0;
   overflow-y: auto;
 }
