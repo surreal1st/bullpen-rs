@@ -25,6 +25,7 @@ use server::slack::{
 
 fn open_db() -> Db {
     let db = Db::open(":memory:").expect("open :memory: db");
+    store::set_password(&db, "test").expect("set password");
     model::routing::set_routing_settings(&db, Some(false), None)
         .expect("disable routing classifier");
     server::judge::set_judge_enabled(&db, false).expect("disable judge");
@@ -566,5 +567,210 @@ async fn in_flight_guard_refuses_a_second_trigger_for_the_same_routine() {
         hanging.request_count(),
         1,
         "the in-flight guard should have refused the second delivery"
+    );
+}
+
+/// BITE (F6): an event with `bot_id` set, or with `subtype: "bot_message"`,
+/// starts no run and posts nothing - the loop guard that skips these is the
+/// first thing to get wrong here, and the failure mode is infinite replies
+/// on paid model calls.
+#[tokio::test]
+async fn bot_id_and_bot_message_events_start_no_run() {
+    let db = open_db();
+    seed_bot(&db, "arthur", "Arthur");
+
+    let fake_slack = Arc::new(FakeSlackApi::new("UBOT1"));
+    configure_slack(&db, &fake_slack).await;
+    set_slack_answer_bot_id(&db, "arthur").expect("set answer bot");
+
+    let scripted = Arc::new(ScriptedPort::new(vec![common::text_script(
+        "should not run",
+    )]));
+    let port: Arc<dyn model::ModelPort> = scripted.clone();
+    let slack_api: Arc<dyn SlackApi + Send + Sync> = fake_slack.clone();
+    let state = server::AppState::with_port_and_slack_api(db, port, slack_api);
+    let router = server::build_app(state);
+
+    let timestamp = now_unix().to_string();
+
+    // First: event with bot_id set - should be ignored.
+    let bot_id_event = json!({
+        "type": "event_callback",
+        "event": {
+            "type": "message",
+            "channel_type": "im",
+            "channel": "D123",
+            "bot_id": "BBOT123",
+            "text": "help me please",
+            "ts": "1700000000.000100",
+        }
+    })
+    .to_string();
+    let bot_id_signature = slack_signature(SIGNING_SECRET, &timestamp, &bot_id_event);
+    let (status, _) = send(
+        post_events_request(&bot_id_event, &timestamp, &bot_id_signature),
+        router.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // Second: event with subtype: "bot_message" - should also be ignored.
+    let bot_message_event = json!({
+        "type": "event_callback",
+        "event": {
+            "type": "message",
+            "channel_type": "im",
+            "channel": "D123",
+            "subtype": "bot_message",
+            "text": "help me please",
+            "ts": "1700000000.000101",
+        }
+    })
+    .to_string();
+    let bot_message_signature = slack_signature(SIGNING_SECRET, &timestamp, &bot_message_event);
+    let (status, _) = send(
+        post_events_request(&bot_message_event, &timestamp, &bot_message_signature),
+        router,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // Give either wrongly-started run a fair chance to reach the model.
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    assert!(
+        scripted.requests().is_empty(),
+        "neither bot_id nor bot_message events should start a run, got {} requests",
+        scripted.requests().len()
+    );
+    assert!(
+        fake_slack.posts().is_empty(),
+        "neither bot_id nor bot_message events should post a reply, got {:?}",
+        fake_slack.posts()
+    );
+}
+
+/// BITE (F7): a correctly signed `url_verification` payload (Slack's handshake
+/// when the Events URL is first saved in their console) returns 200 with the
+/// challenge echoed back. If this route breaks, Slack refuses to save the
+/// Events Request URL and the entire feature cannot be switched on.
+#[tokio::test]
+async fn url_verification_challenge_is_echoed_back() {
+    let db = open_db();
+
+    let fake_slack = Arc::new(FakeSlackApi::new("UBOT1"));
+    configure_slack(&db, &fake_slack).await;
+
+    let port: Arc<dyn model::ModelPort> = Arc::new(ScriptedPort::new(vec![common::text_script(
+        "should not run",
+    )]));
+    let slack_api: Arc<dyn SlackApi + Send + Sync> = fake_slack.clone();
+    let state = server::AppState::with_port_and_slack_api(db, port, slack_api);
+    let router = server::build_app(state);
+
+    let timestamp = now_unix().to_string();
+    let challenge = "3eZbrw1aBrT2XpPALMrx8aO2vV3eiSwsQeigH7cstO2G6E3T5w";
+    let body = json!({
+        "type": "url_verification",
+        "challenge": challenge,
+    })
+    .to_string();
+    let signature = slack_signature(SIGNING_SECRET, &timestamp, &body);
+
+    let (status, response_body) =
+        send(post_events_request(&body, &timestamp, &signature), router).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response_body["challenge"].as_str(), Some(challenge));
+}
+
+/// BITE (F8, F9 combined): `PUT /api/slack` over HTTP returns 200 with a body
+/// whose raw bytes contain neither the bot token nor the signing secret.
+/// Also: `GET /api/slack` without a session cookie is 401, while
+/// `POST /api/slack/events` without a session cookie is not.
+#[tokio::test]
+async fn put_slack_hides_secrets_and_routes_are_session_gated_correctly() {
+    let db = open_db();
+    let session_cookie = common::seed_session(&db);
+    seed_bot(&db, "arthur", "Arthur");
+
+    let fake_slack = Arc::new(FakeSlackApi::new("UBOT1"));
+    let port: Arc<dyn model::ModelPort> =
+        Arc::new(ScriptedPort::new(vec![common::text_script("ok")]));
+    let slack_api: Arc<dyn SlackApi + Send + Sync> = fake_slack.clone();
+    let state = server::AppState::with_port_and_slack_api(db, port, slack_api);
+    let router = server::build_app(state);
+
+    // PUT /api/slack to connect Slack (requires session cookie).
+    let connect_body = axum::body::Bytes::from(
+        serde_json::to_string(&serde_json::json!({
+            "botToken": "xoxb-test-token",
+            "signingSecret": SIGNING_SECRET,
+        }))
+        .expect("serialize"),
+    );
+    let put_req = Request::builder()
+        .method("PUT")
+        .uri("/api/slack")
+        .header("Content-Type", "application/json")
+        .header("cookie", &session_cookie)
+        .body(Body::from(connect_body))
+        .expect("build PUT request");
+    let (status, response_body) = send(put_req, router.clone()).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "PUT /api/slack should succeed, got {}: {:?}",
+        status,
+        response_body
+    );
+
+    // The response body should NOT contain the raw token or secret as strings.
+    let response_bytes = serde_json::to_string(&response_body)
+        .expect("serialize response")
+        .into_bytes();
+    assert!(
+        !String::from_utf8_lossy(&response_bytes).contains("xoxb-test-token"),
+        "response body must not contain the bot token"
+    );
+    assert!(
+        !String::from_utf8_lossy(&response_bytes).contains(SIGNING_SECRET),
+        "response body must not contain the signing secret"
+    );
+
+    // GET /api/slack without a session cookie should be 401.
+    let get_req = Request::builder()
+        .method("GET")
+        .uri("/api/slack")
+        .body(Body::empty())
+        .expect("build GET request");
+    let (status, _) = send(get_req, router.clone()).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "GET /api/slack without session should be 401"
+    );
+
+    // POST /api/slack/events without a session cookie should NOT be 401.
+    let timestamp = now_unix().to_string();
+    let event_body = json!({
+        "type": "event_callback",
+        "event": {
+            "type": "message",
+            "channel_type": "im",
+            "channel": "D123",
+            "text": "help",
+            "ts": "1700000000.000100",
+        }
+    })
+    .to_string();
+    let signature = slack_signature(SIGNING_SECRET, &timestamp, &event_body);
+    let (status, _) = send(
+        post_events_request(&event_body, &timestamp, &signature),
+        router,
+    )
+    .await;
+    assert_ne!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "POST /api/slack/events should not be 401 without session cookie"
     );
 }
