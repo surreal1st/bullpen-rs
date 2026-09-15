@@ -31,6 +31,7 @@ use async_trait::async_trait;
 use reqwest::Url;
 use rusqlite::OptionalExtension;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 use store::Db;
 
@@ -225,15 +226,7 @@ pub fn ensure_desk_tables(db: &Db) -> rusqlite::Result<()> {
 /// would lose track of them and open a new window on every restart until
 /// the desktop was buried in them.
 pub async fn window_for(db: &Db, cdp: &dyn Cdp, bot_id: &str) -> Result<String, String> {
-    let existing: Option<String> = db
-        .conn()
-        .query_row(
-            "SELECT target_id FROM desk_windows WHERE bot_id = ?1",
-            rusqlite::params![bot_id],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|e| e.to_string())?;
+    let existing = existing_window(db, bot_id)?;
 
     if let Some(target_id) = existing
         && cdp.has_target(&target_id).await
@@ -242,6 +235,38 @@ pub async fn window_for(db: &Db, cdp: &dyn Cdp, bot_id: &str) -> Result<String, 
     }
 
     let target_id = cdp.create_window("about:blank").await?;
+    save_window(db, bot_id, &target_id)?;
+
+    Ok(target_id)
+}
+
+/// The sync half of `window_for`'s DB read - split out so a caller stuck
+/// with an `Arc<Mutex<Db>>` (the `browse`/`read_page` TOOLS, `tools::
+/// browse`) can lock, read, and drop the guard before ever awaiting a
+/// `Cdp` call, instead of holding it across one the way `window_for`
+/// itself does.
+///
+/// 🔴 `std::sync::MutexGuard` is never `Send`, so a guard held across an
+/// `.await` makes the enclosing future `!Send` - exactly the constraint
+/// `vm.rs`'s `start_vm_reaper` hit and documented for `hibernate_idle`.
+/// `window_for` itself is fine taking `&Db` across its own awaits because
+/// every caller of `window_for` directly (every test in this module, an
+/// owned `Db`) already holds it for the whole call; `tools::browse`'s
+/// callers hold an `Arc<Mutex<Db>>` instead, so it reuses this and
+/// `save_window` around its own awaits rather than `window_for` itself.
+pub(crate) fn existing_window(db: &Db, bot_id: &str) -> Result<Option<String>, String> {
+    db.conn()
+        .query_row(
+            "SELECT target_id FROM desk_windows WHERE bot_id = ?1",
+            rusqlite::params![bot_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())
+}
+
+/// The sync half of `window_for`'s DB write - see `existing_window`'s doc.
+pub(crate) fn save_window(db: &Db, bot_id: &str, target_id: &str) -> Result<(), String> {
     db.conn()
         .execute(
             "INSERT INTO desk_windows (bot_id, target_id, opened_at) VALUES (?1, ?2, ?3)
@@ -254,8 +279,7 @@ pub async fn window_for(db: &Db, cdp: &dyn Cdp, bot_id: &str) -> Result<String, 
             ],
         )
         .map_err(|e| e.to_string())?;
-
-    Ok(target_id)
+    Ok(())
 }
 
 /* --------------------------------------------------------------- the tools */
@@ -442,19 +466,176 @@ pub async fn screenshot(cdp: &dyn Cdp, target_id: &str) -> Result<String, String
         .to_string())
 }
 
+/* --------------------------------------------------------- the production Cdp */
+
+/// A `Cdp` that refuses everything with one fixed reason - used when
+/// `BULLPEN_DESK` is off, mirroring `sandbox::UnavailableSandbox` exactly
+/// (same shape, same reasoning: a caller never has to special-case "no
+/// browser configured here" against "a browser call actually failed").
+pub struct UnavailableCdp {
+    reason: String,
+}
+
+impl UnavailableCdp {
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl Cdp for UnavailableCdp {
+    async fn create_window(&self, _url: &str) -> Result<String, String> {
+        Err(self.reason.clone())
+    }
+    async fn has_target(&self, _target_id: &str) -> bool {
+        false
+    }
+    async fn call(
+        &self,
+        _target_id: &str,
+        _method: &str,
+        _params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        Err(self.reason.clone())
+    }
+    async fn close_target(&self, _target_id: &str) {}
+}
+
+/// S6-W-03: port of TS `httpCdp` (`desk.ts:149-204`) - HALF of it. What TS
+/// does over plain HTTP ports for real below (`has_target`/`close_target`).
+/// What TS does over a raw WebSocket (`create_window`'s
+/// `Target.createTarget` call, and every `call()`) does NOT - see
+/// `NO_WEBSOCKET_CLIENT`'s own doc for exactly why, checked rather than
+/// assumed. This is a narrower, more honest version of S6-04's cut: that
+/// ticket skipped `httpCdp` entirely; this one ships the half that needed
+/// no new dependency and refuses loudly, per-call, on the half that does -
+/// never a silent no-op, never a guess dressed as success.
+pub struct HttpCdp {
+    config: DeskConfig,
+    http: reqwest::Client,
+}
+
+impl HttpCdp {
+    pub fn new(config: DeskConfig) -> Self {
+        Self {
+            config,
+            http: reqwest::Client::new(),
+        }
+    }
+}
+
+/// Why `HttpCdp::create_window`/`call` refuse instead of connecting.
+///
+/// 🔴 Checked, not assumed: `cargo tree -p server` (this crate's OWN
+/// resolved dependency graph, not the workspace-wide `Cargo.lock`) has no
+/// `tungstenite` anywhere in it. `tungstenite` DOES appear in `Cargo.lock`,
+/// but only as a transitive dependency of `crates/client`'s `dioxus`
+/// desktop feature, a different crate entirely; `server` cannot reach it
+/// without its own `Cargo.toml` entry. That is a real new dependency
+/// (`tokio-tungstenite`, to match the `tungstenite 0.27` already resolved
+/// workspace-wide), `Cargo.toml` is not a file this ticket owns, and the
+/// ticket's own instructions are to ask before adding one rather than add
+/// it and mention it afterward - see this ticket's Results for the ask.
+const NO_WEBSOCKET_CLIENT: &str = "The production browser client needs a WebSocket dependency \
+this crate does not have yet (tokio-tungstenite - not yet approved, see S6-W-03's Results). \
+Nothing was attempted.";
+
+#[async_trait]
+impl Cdp for HttpCdp {
+    /// 🔴 UNFINISHED, on purpose - see `NO_WEBSOCKET_CLIENT`'s doc. TS
+    /// `createWindow` (`desk.ts:161-180`) opens a WebSocket to the
+    /// browser-scoped endpoint named by `GET /json/version` and sends
+    /// `Target.createTarget` over it; that half is not here.
+    async fn create_window(&self, _url: &str) -> Result<String, String> {
+        Err(NO_WEBSOCKET_CLIENT.to_string())
+    }
+
+    /// The one real surface `httpCdp` needed no socket for: `GET
+    /// /json/list`, matching TS `hasTarget` (`desk.ts:182-189`) exactly,
+    /// including swallowing a transport or parse error into `false` rather
+    /// than propagating it - TS's own `catch { return false }`.
+    async fn has_target(&self, target_id: &str) -> bool {
+        #[derive(serde::Deserialize)]
+        struct ListedTarget {
+            id: String,
+        }
+        let Ok(resp) = self
+            .http
+            .get(format!("{}/json/list", self.config.cdp))
+            .send()
+            .await
+        else {
+            return false;
+        };
+        let Ok(list) = resp.json::<Vec<ListedTarget>>().await else {
+            return false;
+        };
+        list.iter().any(|t| t.id == target_id)
+    }
+
+    /// 🔴 UNFINISHED, on purpose - see `NO_WEBSOCKET_CLIENT`'s doc. This is
+    /// the per-target WebSocket round trip (`desk.ts:191-198`) every one of
+    /// `evaluate`/`read_page`/`browse`/`click_text`/`type_into`/
+    /// `screenshot` depends on.
+    async fn call(
+        &self,
+        _target_id: &str,
+        _method: &str,
+        _params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        Err(NO_WEBSOCKET_CLIENT.to_string())
+    }
+
+    /// `GET /json/close/{id}`, errors swallowed - TS's own `.catch(() =>
+    /// undefined)` (`desk.ts:200-202`).
+    async fn close_target(&self, target_id: &str) {
+        let _ = self
+            .http
+            .get(format!("{}/json/close/{}", self.config.cdp, target_id))
+            .send()
+            .await;
+    }
+}
+
+/// The `Cdp` for driving the shared desk, chosen by `BULLPEN_DESK` at call
+/// time - mirrors `sandbox::default_sandbox`'s `BULLPEN_SANDBOX` gate for
+/// the identical reason: a dev workstation with no browser must get a
+/// clear refusal every time, never an `HttpCdp` quietly trying (and
+/// hanging, or half-working) against a socket nothing is listening on.
+/// Not threaded through `tools::BuildParams` (`sandbox`'s own field there),
+/// because this ticket owns no file that constructs `BuildParams`
+/// (`runs.rs`'s `toolbox_for` is not in its file list), so `tools::browse`
+/// resolves this itself, the same call-time pattern `default_sandbox`
+/// already uses rather than a value threaded in ahead of time.
+pub fn build_cdp() -> Arc<dyn Cdp> {
+    let mode = std::env::var("BULLPEN_DESK").unwrap_or_default();
+    if mode != "on" {
+        return Arc::new(UnavailableCdp::new(
+            "The shared computer is off here. Set BULLPEN_DESK=on where it is wanted.",
+        ));
+    }
+    let env: HashMap<String, String> = std::env::vars().collect();
+    Arc::new(HttpCdp::new(desk_config(&env)))
+}
+
 /* ------------------------------------------------------------- scope cuts */
 //
 // What TS `desk.ts` exports that this file does NOT port, and why - per the
 // S6 header, no ticket in this slice may claim a container/browser/socket
 // actually worked, and this ticket owns no `Cargo.toml`:
 //
-// - `httpCdp` (`desk.ts:149-204`), the real DevTools client. It drives raw
-//   WebSockets (`new WebSocket(...)`), and no WebSocket client is a
-//   dependency of this crate yet - adding one is a `Cargo.toml` change,
-//   which is not a file this ticket owns ("any other file: STOP and tell
-//   the orchestrator"). It also could not be exercised here regardless (no
-//   browser on this workstation). `Cdp` (the trait above) is the seam a
-//   future ticket implements this behind.
+// - `httpCdp` (`desk.ts:149-204`), the real DevTools client's WebSocket
+//   HALF: `create_window`'s `Target.createTarget` call, and every `call()`
+//   (the per-target JSON-RPC round trip `evaluate`/`read_page`/`browse`/
+//   `click_text`/`type_into`/`screenshot` all depend on). `HttpCdp` above
+//   ports the HTTP half for real (`has_target`, `close_target`) and
+//   refuses the WebSocket half loudly rather than silently - see
+//   `NO_WEBSOCKET_CLIENT`'s own doc for why a new dependency is needed and
+//   was not added unilaterally. It also could not be exercised here
+//   regardless (no browser on this workstation) even once the dependency
+//   lands.
 // - `deskShell`/`deskShellStdin`/`deskStatus` ("the terminal"/"status"
 //   sections, `desk.ts:382-461`) and `deskAction`/`DeskAction`
 //   ("coordinate-level input", `desk.ts:463-660`, the `xdotool` computer-use

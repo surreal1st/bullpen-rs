@@ -9,6 +9,22 @@
 
 mod add_to_room;
 mod ask_josh;
+// S6-W-03: `pub`, not `mod`/`pub(crate)` like every sibling tool module -
+// `crates/server/tests/browse_tools.rs` (the bite tests this ticket's own
+// instructions require) is a SEPARATE crate, and Rust visibility is not
+// transitive around a private ancestor: no item below a private `mod` is
+// externally reachable no matter how `pub` it is itself. Every other tool
+// module stays reachable only through `server::runs::RunManager` (see
+// `tests/shell_tool.rs`) because `RunManager` has an injection seam for
+// what it drives (`with_sandbox`); `browse`/`read_page` have no such seam
+// today - adding one is a `runs.rs`/`BuildParams` change, and `runs.rs` is
+// not a file this ticket owns. This is the narrower fix: `pub mod browse`
+// here, plus ONE line this ticket does NOT own or commit - `lib.rs`'s
+// `mod tools;` needs to read `pub mod tools;` for the path to resolve at
+// all from outside the crate. Flagged for the orchestrator in this
+// ticket's Results, exactly the "write the function, tell me the line"
+// pattern S6-W-02 already uses for its own `main.rs` call site.
+pub mod browse;
 mod create_room;
 pub(crate) mod escalate;
 mod goal_tools;
@@ -167,6 +183,13 @@ fn all_specs() -> Vec<ToolSpec> {
         goal_tools::set_goal_spec(),
         goal_tools::update_goal_spec(),
         goal_tools::reflect_spec(),
+        // S6-W-03: `browse`/`read_page` already had rows in
+        // `permissions::default_decisions` (allow, and deliberately out of
+        // `tighten_set`) before this ticket - the exact "permission map
+        // names a tool the toolbox does not have" gap the S5b bug and this
+        // ticket's own instructions warn about. Adding them here closes it.
+        browse::browse_spec(),
+        browse::read_page_spec(),
     ]
 }
 
@@ -283,6 +306,40 @@ pub fn build(params: BuildParams) -> ToolBox {
                     "set_goal" => (goal_tools::run_set_goal(&db, &bot_id, &args), None),
                     "update_goal" => (goal_tools::run_update_goal(&db, &bot_id, &args), None),
                     "reflect" => (goal_tools::run_reflect(&db, &bot_id, &args), None),
+                    // S6-W-03: the `Cdp` is resolved HERE, at call time, by
+                    // `desk::build_cdp` reading `BULLPEN_DESK` itself -
+                    // there is no `cdp` field on `BuildParams` the way
+                    // `sandbox` has one, because threading one in would
+                    // mean changing `runs.rs`'s `toolbox_for` (not a file
+                    // this ticket owns) the same way `sandbox` is threaded
+                    // in today. `desk::build_cdp` mirrors `sandbox::
+                    // default_sandbox`'s own env-gated fallback for the
+                    // identical reason: no browser exists on this
+                    // workstation, so the default must refuse loudly
+                    // rather than try and hang.
+                    "browse" => {
+                        let cdp = crate::desk::build_cdp();
+                        let resolver = crate::desk::RealResolver;
+                        (
+                            crate::tools::browse::run_browse(
+                                &db,
+                                cdp.as_ref(),
+                                &resolver,
+                                &bot_id,
+                                &args,
+                                None,
+                            )
+                            .await,
+                            None,
+                        )
+                    }
+                    "read_page" => {
+                        let cdp = crate::desk::build_cdp();
+                        (
+                            crate::tools::browse::run_read_page(&db, cdp.as_ref(), &bot_id).await,
+                            None,
+                        )
+                    }
                     other => (format!("Unknown tool: {other}"), None),
                 }
             })
