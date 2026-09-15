@@ -180,10 +180,11 @@ async fn create_routine_and_list() {
         "routine id matches"
     );
 
-    // Check that nextRunAt was computed
+    // F10: Check that nextRunAt was computed and is not null
+    // (is_some() returns true for JSON null, so check explicitly)
     assert!(
-        routines[0].get("nextRunAt").is_some(),
-        "nextRunAt should be set"
+        routines[0].get("nextRunAt").is_some_and(|v| !v.is_null()),
+        "nextRunAt should be set and not null"
     );
 }
 
@@ -718,5 +719,116 @@ async fn a_ts_shaped_json_schedule_row_fires() {
         started.iter().filter(|(id, _)| id == &routine_id).count(),
         1,
         "a TS-shaped JSON schedule row must fire, not be skipped forever"
+    );
+}
+
+/// F6: POST with empty prompt returns 400 with TS error text
+#[tokio::test]
+async fn empty_prompt_returns_400() {
+    let db = open_db();
+    let session = seed_session(&db);
+    let bot_id = create_test_bot(&db);
+    let app = app_for(db);
+
+    let (status, body) = post_with_auth(
+        &app,
+        "/api/routines",
+        &session,
+        json!({
+            "botId": &bot_id,
+            "name": "Test",
+            "prompt": "",
+            "schedule": "every 15 minutes",
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "should reject empty prompt"
+    );
+    assert_eq!(
+        body.get("error").and_then(|v| v.as_str()),
+        Some("Give the routine something to do."),
+        "should return TS error text"
+    );
+}
+
+/// F6: POST with empty name returns 400 with TS error text
+#[tokio::test]
+async fn empty_name_returns_400() {
+    let db = open_db();
+    let session = seed_session(&db);
+    let bot_id = create_test_bot(&db);
+    let app = app_for(db);
+
+    let (status, body) = post_with_auth(
+        &app,
+        "/api/routines",
+        &session,
+        json!({
+            "botId": &bot_id,
+            "name": "   ",
+            "prompt": "Do something",
+            "schedule": "every 15 minutes",
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "should reject empty name");
+    assert_eq!(
+        body.get("error").and_then(|v| v.as_str()),
+        Some("Give the routine a name."),
+        "should return TS error text"
+    );
+}
+
+/// F6: POST with bad bot ID returns 400 with "no such bot"
+#[tokio::test]
+async fn bad_bot_id_returns_400() {
+    let db = open_db();
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let (status, body) = post_with_auth(
+        &app,
+        "/api/routines",
+        &session,
+        json!({
+            "botId": "nonexistent-bot-id",
+            "name": "Test",
+            "prompt": "Do something",
+            "schedule": "every 15 minutes",
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "should reject bad bot");
+    assert_eq!(
+        body.get("error").and_then(|v| v.as_str()),
+        Some("no such bot"),
+        "should return bot not found error"
+    );
+}
+
+/// F7: DELETE of a missing routine returns 404
+#[tokio::test]
+async fn delete_missing_routine_returns_404() {
+    let db = open_db();
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let (status, body) = delete_with_auth(&app, "/api/routines/nonexistent-id", &session).await;
+
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "should return 404 for missing routine"
+    );
+    assert_eq!(
+        body.get("error").and_then(|v| v.as_str()),
+        Some("no such routine"),
+        "should return not found error"
     );
 }

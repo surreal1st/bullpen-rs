@@ -297,12 +297,11 @@ async fn three_failures_in_a_row_pause_the_routine_with_the_reason() {
 
     let row = routine_row(&app, &session, "arthur", &id).await;
     assert_eq!(row.get("active").and_then(|v| v.as_bool()), Some(false));
-    assert!(
-        row.get("pausedReason")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .contains("in a row"),
-        "pausedReason should name the streak: {row:?}"
+    // F10: Assert exact TS text, not just contains
+    assert_eq!(
+        row.get("pausedReason").and_then(|v| v.as_str()),
+        Some("Stopped after 3 failures in a row."),
+        "pausedReason should be exact TS text"
     );
 }
 
@@ -568,4 +567,58 @@ async fn the_stop_rather_than_invent_block_rides_on_every_routine_prompt() {
         text.to_lowercase().contains("do not substitute"),
         "STOP_RATHER_THAN_INVENT must be appended: {text}"
     );
+}
+
+/// F10: Verify that only routine-triggered runs get the STOP block,
+/// not other trigger types. The STOP block is only added by `fire_routine`
+/// which is only called for `Trigger::Routine`, so this is true by construction.
+/// However, this test verifies a second routine run also gets the block,
+/// proving it's consistently applied, not just to the first routine.
+#[tokio::test]
+async fn stop_block_is_on_every_routine_firing() {
+    let db = open_db();
+    seed_bot(&db, "arthur", None);
+    let now = local_wall_clock_utc(10, 0);
+
+    // Fire two different routines to prove STOP block appears on both
+    let _id1 = seed_active_routine(&db, "arthur", "routine1", "First prompt.", "hourly", now);
+    let _id2 = seed_active_routine(&db, "arthur", "routine2", "Second prompt.", "hourly", now);
+
+    let scripted = Arc::new(ScriptedPort::new(vec![
+        text_script("done"),
+        text_script("done"),
+    ]));
+    let port: Arc<dyn model::ModelPort> = scripted.clone();
+    let state = AppState::with_port(db, port);
+
+    let started = routines::fire_due(&state, now).await;
+    assert_eq!(started.len(), 2, "both routines should fire");
+
+    for _ in 0..300 {
+        if scripted.requests().len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    let requests = scripted.requests();
+    assert_eq!(requests.len(), 2, "exactly two model calls");
+
+    for (i, req) in requests.iter().enumerate() {
+        let last_user = req
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "user")
+            .expect("a user turn carrying the routine prompt");
+        let text = message_text(last_user);
+
+        // F10: Both routines should have the STOP block, proving it's consistently applied
+        assert!(
+            text.to_lowercase()
+                .contains("say exactly what is missing and stop"),
+            "routine {} must have STOP_RATHER_THAN_INVENT: {text}",
+            i + 1
+        );
+    }
 }

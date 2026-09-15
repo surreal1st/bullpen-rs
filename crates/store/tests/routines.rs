@@ -408,6 +408,7 @@ fn resume_routine_clears_pause() {
 }
 
 /// Test 11: Routine runs list returns limited list.
+/// F10: Test that the 20-run cap actually works by seeding 25 runs.
 #[test]
 fn routine_runs_returns_limited_list() {
     let db = Db::open(":memory:").expect("open memory db");
@@ -431,13 +432,50 @@ fn routine_runs_returns_limited_list() {
     )
     .expect("create routine");
 
-    // Since we can't directly insert runs without going through the server,
-    // we'll just verify the query works with 0 results
+    // F10: Seed 25 runs and verify only 20 are returned
+    // First create a conversation to satisfy the foreign key constraint
+    let conv_id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    db.conn()
+        .execute(
+            "INSERT INTO conversations (id, bot_id, title, created_at) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![&conv_id, &bot_id, "Test", &now],
+        )
+        .expect("create conversation");
+
+    for i in 0..25 {
+        db.conn()
+            .execute(
+                "INSERT INTO runs (id, bot_id, conversation_id, trigger, status, model, messages, text, cost_usd, routine_id, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                rusqlite::params![
+                    uuid::Uuid::new_v4().to_string(),
+                    &bot_id,
+                    &conv_id,
+                    "chat",
+                    "done",
+                    "anthropic/claude-fable-5.1",
+                    "[]",
+                    format!("Run {} result", i),
+                    0.001,
+                    &id,
+                    &now,
+                    &now,
+                ],
+            )
+            .expect("insert run");
+    }
+
     let runs = routine_runs(&db, &id, 20).expect("get routine runs");
-    assert_eq!(runs.len(), 0, "no runs for new routine");
+    assert_eq!(
+        runs.len(),
+        20,
+        "routine_runs should cap at 20, not return all 25"
+    );
 }
 
 /// Test 12: Fixture opens with new columns present.
+/// F9: Assert that the schema is byte-equal with TS: columns exist with correct types.
 #[test]
 fn fixture_db_opens_with_routine_columns() {
     let temp = copy_fixture_to_temp();
@@ -446,8 +484,74 @@ fn fixture_db_opens_with_routine_columns() {
     // List all routines - should work without error
     let routines = list_routines(&db, None).expect("list all routines");
 
-    // The fixture may or may not have routines, but this shouldn't error
-    println!("Found {} routines in fixture", routines.len());
+    // F9: Assert PRAGMA table_info matches expected columns with types
+    let mut stmt = db
+        .conn()
+        .prepare("PRAGMA table_info(routines)")
+        .expect("PRAGMA table_info");
+
+    let columns: Vec<(String, String)> = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(1)?, // column name
+                row.get::<_, String>(2)?, // type
+            ))
+        })
+        .expect("query columns")
+        .filter_map(Result::ok)
+        .collect();
+
+    // Expected columns (name, type) - order doesn't matter for this assertion
+    let expected = vec![
+        ("id", "TEXT"),
+        ("bot_id", "TEXT"),
+        ("name", "TEXT"),
+        ("prompt", "TEXT"),
+        ("schedule", "TEXT"),
+        ("active", "INTEGER"),
+        ("next_run_at", "TEXT"),
+        ("last_run_at", "TEXT"),
+        ("created_at", "TEXT"),
+        ("tools", "TEXT"),
+        ("kind", "TEXT"),
+        ("tool", "TEXT"),
+        ("tool_args", "TEXT"),
+        ("hook_secret", "TEXT"),
+        ("hook_kind", "TEXT"),
+        ("hook_events", "TEXT"),
+        ("hook_match", "TEXT"),
+        ("conditions", "TEXT"),
+        ("second_opinion", "INTEGER"),
+        ("consecutive_failures", "INTEGER"),
+        ("paused_reason", "TEXT"),
+        ("last_error", "TEXT"),
+    ];
+
+    for (name, typ) in expected {
+        let found = columns.iter().any(|(n, t)| n == name && t == typ);
+        assert!(
+            found,
+            "Column {} with type {} not found in routines table. Found: {:?}",
+            name, typ, columns
+        );
+    }
+
+    // Assert PRAGMA user_version is correct (schema version)
+    let version: i32 = db
+        .conn()
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .expect("get user_version");
+    assert_eq!(version, 20, "schema version should be 20");
+
+    // F9: Round-trip one routine if any exist, proving the schema works
+    if !routines.is_empty() {
+        let routine = &routines[0];
+        let fetched = routine_by_id(&db, &routine.id)
+            .expect("fetch routine")
+            .expect("routine exists");
+        assert_eq!(fetched.id, routine.id, "round-trip preserves id");
+        assert_eq!(fetched.name, routine.name, "round-trip preserves name");
+    }
 
     let _ = fs::remove_file(&temp);
 }

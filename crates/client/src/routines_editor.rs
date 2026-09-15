@@ -285,7 +285,7 @@ pub fn RoutinesEditor(bot_id: String) -> Element {
                                         let id = routine.id.clone();
                                         let bot_id = bot_id.clone();
                                         let active = routine.active;
-                                        move |_| { spawn(toggle_active(id.clone(), active, bot_id.clone(), routines)); }
+                                        move |_| { spawn(toggle_active(id.clone(), active, bot_id.clone(), routines, run_status)); }
                                     },
                                     if routine.active { "Pause" } else { "Start" }
                                 }
@@ -297,7 +297,7 @@ pub fn RoutinesEditor(bot_id: String) -> Element {
                                             if is_runs_open {
                                                 runs_open.set(None);
                                             } else {
-                                                spawn(load_runs(id, runs_open, runs));
+                                                spawn(load_runs(id, runs_open, runs, run_status));
                                             }
                                         }
                                     },
@@ -328,7 +328,7 @@ pub fn RoutinesEditor(bot_id: String) -> Element {
                                     onclick: {
                                         let id = routine.id.clone();
                                         let bot_id = bot_id.clone();
-                                        move |_| { spawn(delete_routine_action(id.clone(), bot_id.clone(), routines)); }
+                                        move |_| { spawn(delete_routine_action(id.clone(), bot_id.clone(), routines, run_status)); }
                                     },
                                     "Delete"
                                 }
@@ -507,25 +507,48 @@ async fn toggle_active(
     active: bool,
     bot_id: String,
     routines: Signal<Option<Vec<Routine>>>,
+    mut run_status: Signal<Option<(String, String)>>,
 ) {
-    let _ = api::set_routine_active(&id, !active).await;
-    reload(bot_id, routines).await;
+    match api::set_routine_active(&id, !active).await {
+        Ok(_) => {
+            reload(bot_id, routines).await;
+            run_status.set(None);
+        }
+        Err(e) => run_status.set(Some((id, e))),
+    }
 }
 
-async fn delete_routine_action(id: String, bot_id: String, routines: Signal<Option<Vec<Routine>>>) {
-    let _ = api::delete_routine(&id).await;
-    reload(bot_id, routines).await;
+async fn delete_routine_action(
+    id: String,
+    bot_id: String,
+    routines: Signal<Option<Vec<Routine>>>,
+    mut run_status: Signal<Option<(String, String)>>,
+) {
+    match api::delete_routine(&id).await {
+        Ok(_) => {
+            reload(bot_id, routines).await;
+            run_status.set(None);
+        }
+        Err(e) => run_status.set(Some((id, e))),
+    }
 }
 
 async fn load_runs(
     id: String,
     mut runs_open: Signal<Option<String>>,
     mut runs: Signal<Vec<RoutineRun>>,
+    mut run_status: Signal<Option<(String, String)>>,
 ) {
-    if let Ok(list) = api::fetch_routine_runs(&id).await {
-        runs.set(list);
+    match api::fetch_routine_runs(&id).await {
+        Ok(list) => {
+            runs.set(list);
+            runs_open.set(Some(id.clone()));
+            run_status.set(None);
+        }
+        Err(e) => {
+            run_status.set(Some((id, e)));
+        }
     }
-    runs_open.set(Some(id));
 }
 
 async fn run_now(id: String, mut run_status: Signal<Option<(String, String)>>) {

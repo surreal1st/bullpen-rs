@@ -121,6 +121,22 @@ async fn post_routines(
     let db = state.db();
     let body_data: CreateRoutineBody = super::parse_body(&body)?;
 
+    // F6: Validate bot exists
+    if store::get_bot(&db, &body_data.bot_id)?.is_none() {
+        return Err(AppError::bad_request("no such bot"));
+    }
+
+    // F6: Validate name is not empty
+    if body_data.name.trim().is_empty() {
+        return Err(AppError::bad_request("Give the routine a name."));
+    }
+
+    // F6: Validate prompt is not empty (only for "prompt" kind)
+    let kind = body_data.kind.as_deref().unwrap_or("prompt");
+    if kind == "prompt" && body_data.prompt.trim().is_empty() {
+        return Err(AppError::bad_request("Give the routine something to do."));
+    }
+
     // Parse the schedule to compute next_run_at and validate it
     let schedule_parsed =
         crate::schedule::parse_schedule(&body_data.schedule).map_err(AppError::bad_request)?;
@@ -306,12 +322,18 @@ async fn post_routine_active(
 }
 
 /// DELETE /api/routines/:id - delete a routine
+///
+/// F7: Returns 404 if the routine doesn't exist, matching TS's
+/// `app.ts:3441-3445` behaviour.
 async fn delete_routine_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let db = state.db();
-    delete_routine(&db, &id)?;
+    let found = delete_routine(&db, &id)?;
+    if !found {
+        return Err(AppError::not_found("no such routine"));
+    }
     Ok(Json(json!({ "ok": true })))
 }
 
