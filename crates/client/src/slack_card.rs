@@ -40,6 +40,9 @@ struct SlackStatus {
     has_app_token: bool,
     answer_bot_id: Option<String>,
     answer_bot_name: Option<String>,
+    /// S5c-F-03 (F10, client half): the Events Request URL to paste into
+    /// Slack's app settings, `None` when the server's `PUBLIC_URL` is unset.
+    events_url: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -239,8 +242,14 @@ pub fn SlackCard() -> Element {
             h4 { class: "stg-sub-h", "Slack" }
             p { class: "set-note",
                 "A DM to the app, or an @mention in a channel, runs a bot and replies in place. A routine can also trigger on a Slack mention, keyword, message or reaction. From your Slack app's settings page, paste in the Bot User OAuth Token, the Signing Secret, and - only if you're using Socket Mode - the App-Level Token. Set the app's Events Request URL to "
-                code { "<this site's origin>/api/slack/events" }
-                "."
+                code {
+                    if let Some(url) = status.read().as_ref().and_then(|s| s.events_url.as_ref()) {
+                        "{url}"
+                    } else {
+                        "<this site's origin>/api/slack/events"
+                    }
+                }
+                ". Slack must be able to reach that URL from the internet."
             }
 
             if let Some(err) = error.read().clone() {

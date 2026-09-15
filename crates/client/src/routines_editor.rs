@@ -403,6 +403,9 @@ pub fn RoutinesEditor(bot_id: String) -> Element {
                                                                     option { key: "{value}", value: "{value}", "{label}" }
                                                                 }
                                                             }
+                                                            p { class: "muted",
+                                                                "Fires from Slack itself - no secret to paste here. Connect Slack in Settings first. \"Keyword\" uses the match field below as the keyword to look for."
+                                                            }
                                                         } else {
                                                             input {
                                                                 value: "{edit_hook_events}",
@@ -517,26 +520,31 @@ pub fn RoutinesEditor(bot_id: String) -> Element {
                                     },
                                     "Edit"
                                 }
-                                if routine.has_hook {
-                                    button {
-                                        onclick: {
-                                            let id = routine.id.clone();
-                                            let bot_id = bot_id.clone();
-                                            move |_| {
-                                                minted_hook.set(None);
-                                                spawn(clear_hook_action(id.clone(), bot_id.clone(), routines, hook_status));
-                                            }
-                                        },
-                                        "Clear webhook"
-                                    }
-                                } else {
-                                    button {
-                                        onclick: {
-                                            let id = routine.id.clone();
-                                            let bot_id = bot_id.clone();
-                                            move |_| { spawn(mint_hook_action(id.clone(), bot_id.clone(), routines, hook_status, minted_hook)); }
-                                        },
-                                        "Create webhook"
+                                // S5c-F-03 (F11): a Slack-kind routine fires from the
+                                // single, app-wide /api/slack/events endpoint - there is
+                                // no per-routine secret to mint or remove.
+                                if routine.hook_kind != "slack" {
+                                    if routine.has_hook {
+                                        button {
+                                            onclick: {
+                                                let id = routine.id.clone();
+                                                let bot_id = bot_id.clone();
+                                                move |_| {
+                                                    minted_hook.set(None);
+                                                    spawn(clear_hook_action(id.clone(), bot_id.clone(), routines, hook_status));
+                                                }
+                                            },
+                                            "Clear webhook"
+                                        }
+                                    } else {
+                                        button {
+                                            onclick: {
+                                                let id = routine.id.clone();
+                                                let bot_id = bot_id.clone();
+                                                move |_| { spawn(mint_hook_action(id.clone(), bot_id.clone(), routines, hook_status, minted_hook)); }
+                                            },
+                                            "Create webhook"
+                                        }
                                     }
                                 }
                                 button {
