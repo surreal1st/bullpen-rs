@@ -39,6 +39,8 @@ const OUT = process.argv[3] ?? join(process.cwd(), "shot.png");
 const WAIT_MS = Number(process.env["BULLPEN_SHOT_WAIT_MS"] ?? 6000);
 const EVAL = process.env["BULLPEN_SHOT_EVAL"];
 const SIZE = process.env["BULLPEN_SHOT_SIZE"] ?? "1600,1000";
+// Optional: after EVAL runs, navigate here and wait again before capturing.
+// Used for cookie-gated pages that have no gate of their own to sign into.
 
 /** Playwright ships a headless shell; no need for a second browser download. */
 function findChrome() {
@@ -166,6 +168,16 @@ try {
     }
     // Let React paint whatever the expression changed.
     await sleep(600);
+  }
+
+  // A second navigation on the SAME origin, after EVAL has signed in. The
+  // VM screen (`/api/bots/:id/vm/view/`) is cookie-gated and has no sign-in
+  // gate of its own, so shooting it cold captures {"error":"Sign in to
+  // Bullpen."} - which is what happened the first time it was shot.
+  const thenUrl = process.env["BULLPEN_SHOT_THEN_URL"];
+  if (thenUrl !== undefined && thenUrl !== "") {
+    await send("Page.navigate", { url: thenUrl });
+    await sleep(Number(process.env["BULLPEN_SHOT_THEN_WAIT_MS"] ?? WAIT_MS));
   }
 
   const shot = await send("Page.captureScreenshot", { format: "png" });

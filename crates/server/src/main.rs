@@ -1,8 +1,16 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
+// Only the `BULLPEN_FAKE_PORT` debug path below uses these, and that path is
+// `#[cfg(debug_assertions)]`. Ungated, they are four unused-import warnings in
+// the RELEASE build - the build that actually ships, and the one the gate
+// never compiles (`cargo clippy`/`cargo test` both run debug), so nothing
+// caught them until a ship log did. 2026-09-15.
+#[cfg(debug_assertions)]
 use std::sync::Arc;
+#[cfg(debug_assertions)]
 use std::time::Duration;
 
+#[cfg(debug_assertions)]
 use model::{EventStream, ModelEvent, ModelPort, ModelRequest};
 
 /// S1-07b: `BULLPEN_FAKE_PORT=1` swaps the real OpenRouter port for one
