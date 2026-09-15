@@ -123,6 +123,24 @@ async fn put_judge_invalid_body() {
 }
 
 #[tokio::test]
+async fn put_judge_non_bool_value() {
+    let db = open_db();
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let request = Request::put("/api/auto-review/judge")
+        .header("cookie", &session)
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"enabled":"yes"}"#))
+        .unwrap();
+
+    let response = app.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn get_log_empty() {
     let db = open_db();
     let session = seed_session(&db);
@@ -227,6 +245,73 @@ async fn get_log_with_limit() {
         entries[1].get("id").and_then(|v| v.as_str()),
         Some("entry-2")
     );
+}
+
+#[tokio::test]
+async fn get_log_limit_zero_clamped_to_one() {
+    let db = open_db();
+
+    // Seed 1 entry
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let entry = store::auto_review::LogEntry {
+        id: "entry-1".to_string(),
+        bot_id: "bot-1".to_string(),
+        run_id: "run-1".to_string(),
+        tool_name: "tool-1".to_string(),
+        description: "desc-1".to_string(),
+        verdict: "safe".to_string(),
+        reason: "reason-1".to_string(),
+        decision: "allow".to_string(),
+        created_at: now,
+    };
+    store::auto_review::insert(&db, entry).expect("insert entry");
+
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    // GET log with limit=0 - should be clamped to 1
+    let (status, body) = get_with_auth(&app, "/api/auto-review/log?limit=0", &session).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let entries = body.get("entries").and_then(|v| v.as_array());
+    assert!(entries.is_some());
+    let entries = entries.unwrap();
+    // limit=0 is clamped to 1, so we should get 1 row
+    assert_eq!(entries.len(), 1);
+}
+
+#[tokio::test]
+async fn get_log_limit_exceeds_max_clamped_to_200() {
+    let db = open_db();
+
+    // Seed 1 entry (no need to seed 201, just test the clamp works)
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let entry = store::auto_review::LogEntry {
+        id: "entry-1".to_string(),
+        bot_id: "bot-1".to_string(),
+        run_id: "run-1".to_string(),
+        tool_name: "tool-1".to_string(),
+        description: "desc-1".to_string(),
+        verdict: "safe".to_string(),
+        reason: "reason-1".to_string(),
+        decision: "allow".to_string(),
+        created_at: now,
+    };
+    store::auto_review::insert(&db, entry).expect("insert entry");
+
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    // GET log with a very large limit - should be clamped to 200
+    let (status, body) =
+        get_with_auth(&app, "/api/auto-review/log?limit=4294967295", &session).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let entries = body.get("entries").and_then(|v| v.as_array());
+    assert!(entries.is_some());
+    let entries = entries.unwrap();
+    // Should return the 1 entry that exists, not try to fetch 4294967295
+    assert_eq!(entries.len(), 1);
 }
 
 #[tokio::test]

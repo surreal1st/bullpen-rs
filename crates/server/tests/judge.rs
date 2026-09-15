@@ -226,12 +226,162 @@ fn test_log_list_with_limit() {
     assert_eq!(logs[0].id, "id-9");
 }
 
+// ---- Judge call with FakePort ----
+
+#[tokio::test]
+async fn test_judge_call_parses_risky_verdict() {
+    let response = r#"{"verdict":"risky","reason":"might delete stuff"}"#;
+    let port = model::fake::FakePort::new(vec![
+        model::ModelEvent::Delta {
+            text: response.to_string(),
+        },
+        model::ModelEvent::Done {
+            model: "test/model".to_string(),
+            usage: None,
+            finish_reason: None,
+        },
+    ]);
+
+    let result = server::judge::judge_call(&port, "shell", "rm -rf /").await;
+
+    assert!(result.is_ok());
+    let judgement = result.unwrap();
+    assert_eq!(judgement.verdict, server::judge::Verdict::Risky);
+    assert_eq!(judgement.reason, "might delete stuff");
+
+    // Verify fence markers are in the user message (index 1)
+    let requests = port.requests();
+    assert_eq!(requests.len(), 1);
+    let messages = &requests[0].messages;
+    assert_eq!(messages.len(), 2);
+
+    // System message (index 0) contains the instruction
+    let system_msg = &messages[0];
+    assert_eq!(system_msg.role, "system");
+    if let model::MessageContent::Text(text) = &system_msg.content {
+        assert!(
+            text.contains("DATA"),
+            "System message should explain that fenced text is DATA"
+        );
+        assert!(
+            text.contains("Judge the RISK"),
+            "System message should contain the instruction"
+        );
+    } else {
+        panic!("Expected system message to be Text");
+    }
+
+    // User message (index 1) contains the fenced description with fence markers
+    let user_msg = &messages[1];
+    assert_eq!(user_msg.role, "user");
+    if let model::MessageContent::Text(text) = &user_msg.content {
+        assert!(
+            text.contains("<<<PENDING_ACTION_DATA>>>"),
+            "User message should contain opening fence marker"
+        );
+        assert!(
+            text.contains("<<<END_PENDING_ACTION_DATA>>>"),
+            "User message should contain closing fence marker"
+        );
+        // Verify the fence markers are at the beginning and end, with content between
+        assert!(
+            text.starts_with("<<<PENDING_ACTION_DATA>>>"),
+            "User message should start with opening fence marker"
+        );
+        assert!(
+            text.ends_with("<<<END_PENDING_ACTION_DATA>>>"),
+            "User message should end with closing fence marker"
+        );
+    } else {
+        panic!("Expected user message to be Text");
+    }
+}
+
+#[tokio::test]
+async fn test_judge_call_parses_safe_verdict() {
+    let response = r#"{"verdict":"safe","reason":"no risk"}"#;
+    let port = model::fake::FakePort::new(vec![
+        model::ModelEvent::Delta {
+            text: response.to_string(),
+        },
+        model::ModelEvent::Done {
+            model: "test/model".to_string(),
+            usage: None,
+            finish_reason: None,
+        },
+    ]);
+
+    let result = server::judge::judge_call(&port, "shell", "ls").await;
+
+    assert!(result.is_ok());
+    let judgement = result.unwrap();
+    assert_eq!(judgement.verdict, server::judge::Verdict::Safe);
+    assert_eq!(judgement.reason, "no risk");
+}
+
+#[tokio::test]
+async fn test_judge_call_parses_dangerous_verdict() {
+    let response = r#"{"verdict":"dangerous","reason":"destroys production"}"#;
+    let port = model::fake::FakePort::new(vec![
+        model::ModelEvent::Delta {
+            text: response.to_string(),
+        },
+        model::ModelEvent::Done {
+            model: "test/model".to_string(),
+            usage: None,
+            finish_reason: None,
+        },
+    ]);
+
+    let result = server::judge::judge_call(&port, "shell", "dropdb prod").await;
+
+    assert!(result.is_ok());
+    let judgement = result.unwrap();
+    assert_eq!(judgement.verdict, server::judge::Verdict::Dangerous);
+    assert_eq!(judgement.reason, "destroys production");
+}
+
+#[tokio::test]
+async fn test_judge_call_unparseable_reply_returns_err() {
+    let port = model::fake::FakePort::new(vec![
+        model::ModelEvent::Delta {
+            text: "this is not JSON at all".to_string(),
+        },
+        model::ModelEvent::Done {
+            model: "test/model".to_string(),
+            usage: None,
+            finish_reason: None,
+        },
+    ]);
+
+    let result = server::judge::judge_call(&port, "shell", "ls").await;
+
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(err.contains("unparseable reply"));
+}
+
+#[tokio::test]
+async fn test_judge_call_model_error_returns_err() {
+    let port = model::fake::FakePort::new(vec![model::ModelEvent::Error {
+        message: "model error".to_string(),
+        status: None,
+    }]);
+
+    let result = server::judge::judge_call(&port, "shell", "ls").await;
+
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(err.contains("model error"));
+}
+
 // ---- Migration 20 ----
 
 #[test]
 fn test_migration_20_opens_fixture() {
-    // Copy the fixture to a temp location
-    let temp_path = std::env::temp_dir().join("test_migration_20.db");
+    // Use a unique temp filename with the process ID
+    let temp_filename = format!("test_migration_20_{}.db", std::process::id());
+    let temp_path = std::env::temp_dir().join(&temp_filename);
     let fixture_path = "d:/rainmade/.scratch/bullpen-rs/fixtures/ts-made.db";
     std::fs::copy(fixture_path, &temp_path).expect("copy fixture to temp");
 

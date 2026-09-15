@@ -55,7 +55,7 @@ async fn get_log(
     Query(query): Query<LogQuery>,
 ) -> ApiResult<Response> {
     let db = state.db();
-    let limit = query.limit.unwrap_or(20);
+    let limit = query.limit.unwrap_or(20).clamp(1, 200);
     let entries = crate::judge::list_log(&db, limit)?;
     Ok(Json(json!({ "entries": entries })).into_response())
 }
