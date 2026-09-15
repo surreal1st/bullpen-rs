@@ -63,27 +63,26 @@ pub fn parse_schedule(input: &str) -> Result<Schedule, String> {
     }
 
     // Try interval: "every N minutes" or "every N hours"
-    if text.starts_with("every ") {
-        let rest = &text[6..];
+    if let Some(rest) = text.strip_prefix("every ") {
         let parts: Vec<&str> = rest.split(' ').collect();
-        if parts.len() == 2 {
-            if let Ok(n) = parts[0].parse::<u32>() {
-                let unit = parts[1];
-                if matches!(unit, "minute" | "minutes" | "min" | "hour" | "hours") {
-                    let minutes = if unit.starts_with("hour") { n * 60 } else { n };
+        if parts.len() == 2
+            && let Ok(n) = parts[0].parse::<u32>()
+        {
+            let unit = parts[1];
+            if matches!(unit, "minute" | "minutes" | "min" | "hour" | "hours") {
+                let minutes = if unit.starts_with("hour") { n * 60 } else { n };
 
-                    if minutes < 5 {
-                        return Err("The shortest interval is 5 minutes.".to_string());
-                    }
-                    if minutes > 60 * 24 * 7 {
-                        return Err("That is longer than a week.".to_string());
-                    }
-                    return Ok(Schedule::Interval {
-                        minutes,
-                        from_hour: None,
-                        to_hour: None,
-                    });
+                if minutes < 5 {
+                    return Err("The shortest interval is 5 minutes.".to_string());
                 }
+                if minutes > 60 * 24 * 7 {
+                    return Err("That is longer than a week.".to_string());
+                }
+                return Ok(Schedule::Interval {
+                    minutes,
+                    from_hour: None,
+                    to_hour: None,
+                });
             }
         }
     }
@@ -260,7 +259,7 @@ fn list_days(days: &[u32]) -> String {
     if days.len() == 7 {
         return "daily".to_string();
     }
-    if days.len() == 5 && days.iter().all(|&d| d >= 1 && d <= 5) {
+    if days.len() == 5 && days.iter().all(|d| (1..=5).contains(d)) {
         return "weekdays".to_string();
     }
     if days.len() == 2 && days.contains(&0) && days.contains(&6) {
@@ -365,7 +364,7 @@ pub fn next_run(schedule: &Schedule, from: DateTime<Utc>) -> DateTime<Utc> {
             let mut next = from_local.with_minute(*minute).unwrap_or(from_local);
             next = next.with_second(0).unwrap_or(next);
             if next <= from_local {
-                next = next + chrono::Duration::hours(1);
+                next += chrono::Duration::hours(1);
             }
             next
         }
@@ -377,7 +376,7 @@ pub fn next_run(schedule: &Schedule, from: DateTime<Utc>) -> DateTime<Utc> {
                 .with_second(0)
                 .unwrap_or(next);
             if next <= from_local {
-                next = next + chrono::Duration::days(1);
+                next += chrono::Duration::days(1);
             }
             next
         }
@@ -389,11 +388,11 @@ pub fn next_run(schedule: &Schedule, from: DateTime<Utc>) -> DateTime<Utc> {
                 .with_second(0)
                 .unwrap_or(next);
             if next <= from_local {
-                next = next + chrono::Duration::days(1);
+                next += chrono::Duration::days(1);
             }
 
             while next.weekday() == Weekday::Sun || next.weekday() == Weekday::Sat {
-                next = next + chrono::Duration::days(1);
+                next += chrono::Duration::days(1);
             }
             next
         }
