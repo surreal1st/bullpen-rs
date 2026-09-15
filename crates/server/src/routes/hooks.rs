@@ -471,7 +471,16 @@ fn regex_matches_or_fails_open(pattern: &str, text: &str) -> bool {
 /// the TS `fireRoutine(db, runs, row, extra, "webhook")` calls at
 /// `app.ts:3830`/`:3841`. Flagged in this ticket's Results for the
 /// orchestrator to fold back into one function once `routines.rs` is free.
-fn fire_webhook_routine(state: &AppState, row: &RoutineRow, extra: &str) -> Option<String> {
+///
+/// `pub(crate)` (S5c-03): the Slack Events route (`routes/slack.rs`)
+/// re-fires the same routine shape for a `hook_kind: "slack"` routine's
+/// `## What arrived` branch - the only edit S5c-03 makes to this file, per
+/// its ticket.
+pub(crate) fn fire_webhook_routine(
+    state: &AppState,
+    row: &RoutineRow,
+    extra: &str,
+) -> Option<String> {
     // Same B2-style discipline as `fire_routine`'s own doc: the db guard is
     // locked, read, and DROPPED before `state.runs.start_routine` below,
     // which locks the same `Arc<Mutex<Db>>` internally - holding this guard
