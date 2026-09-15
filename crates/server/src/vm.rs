@@ -34,6 +34,105 @@ pub trait DockerRun: Send + Sync {
     async fn call(&self, args: &[&str], timeout_ms: u64) -> DockerResult;
 }
 
+/// The production `DockerRun`: shells out to the real `docker` CLI through
+/// the same `CommandRunner` seam `sandbox::DockerSandbox` already drives
+/// (`crates/server/src/sandbox.rs`) - S6-W-01's whole point is that this is
+/// the ONE place a `docker` command is actually run for real, reusing the
+/// same timeout/kill-on-drop/output-capping machinery `TokioRunner` already
+/// gives the sandbox, not a second copy of it.
+///
+/// **No Docker on this workstation.** Every test drives this crate's
+/// `RecordingDockerRun`/`FakeRunner`, never this struct - the only proof a
+/// real `docker run` for a VM works is the meridian smoke test (S6-W-04).
+pub struct RealDockerRun {
+    runner: Arc<dyn crate::sandbox::CommandRunner>,
+}
+
+impl RealDockerRun {
+    /// `runner` must already be configured with the right `DOCKER_HOST`
+    /// (`crate::sandbox::TokioRunner::new(cfg.docker_host.clone())`) - this
+    /// struct only shapes `DockerRun::call`'s `docker <args>` argv onto
+    /// whatever `runner` already knows how to run.
+    pub fn new(runner: Arc<dyn crate::sandbox::CommandRunner>) -> Self {
+        Self { runner }
+    }
+}
+
+#[async_trait::async_trait]
+impl DockerRun for RealDockerRun {
+    async fn call(&self, args: &[&str], timeout_ms: u64) -> DockerResult {
+        let mut argv = Vec::with_capacity(args.len() + 1);
+        argv.push("docker".to_string());
+        argv.extend(args.iter().map(|s| s.to_string()));
+
+        // 4 MiB: docker CLI output (an `inspect` format string, a `run`'s
+        // container id, or a failure's stderr) is never image bytes -
+        // `capture_frame` is the one docker call in this file that carries
+        // binary output, and it deliberately bypasses `DockerRun` entirely
+        // (see its own doc) for exactly that reason.
+        match self
+            .runner
+            .run(
+                argv,
+                Vec::new(),
+                Duration::from_millis(timeout_ms),
+                4 * 1024 * 1024,
+            )
+            .await
+        {
+            Ok((stdout, stderr, code)) => DockerResult {
+                ok: code == 0,
+                stdout,
+                stderr,
+            },
+            Err(crate::sandbox::RunError::Timeout) => DockerResult {
+                ok: false,
+                stdout: String::new(),
+                stderr: "docker did not answer before the timeout.".to_string(),
+            },
+            Err(crate::sandbox::RunError::Other(e)) => DockerResult {
+                ok: false,
+                stdout: String::new(),
+                stderr: e,
+            },
+        }
+    }
+}
+
+/// `DockerRun` for `BULLPEN_VM` off: never shells out, always refuses. A
+/// second gate behind whatever `enabled` check a route already does (S6-W-01
+/// bite (b)) - even a route that forgot its own check cannot reach a real
+/// container through this, the same defense-in-depth
+/// `sandbox::UnavailableSandbox` already gives `shell`/`sandbox_read`.
+pub struct DisabledDockerRun;
+
+#[async_trait::async_trait]
+impl DockerRun for DisabledDockerRun {
+    async fn call(&self, _args: &[&str], _timeout_ms: u64) -> DockerResult {
+        DockerResult {
+            ok: false,
+            stdout: String::new(),
+            stderr: "VM support is off here. Set BULLPEN_VM=on where machines are wanted."
+                .to_string(),
+        }
+    }
+}
+
+/// The `DockerRun` a production server wires onto `vm.rs`, chosen by
+/// `BULLPEN_VM` at startup - same posture `sandbox::default_sandbox` already
+/// takes for `BULLPEN_SANDBOX`. `env` is the caller's own snapshot
+/// (`std::env::vars().collect()`) rather than reading `std::env` directly in
+/// here, so `store::vms::vms_enabled`'s existing signature (already `&HashMap`,
+/// used by `AppState::build`'s other env-gated defaults) is the one thing
+/// this reads for the decision.
+pub fn default_docker_run(env: &HashMap<String, String>, cfg: &VmConfig) -> Arc<dyn DockerRun> {
+    if !store::vms::vms_enabled(env) {
+        return Arc::new(DisabledDockerRun);
+    }
+    let runner = Arc::new(crate::sandbox::TokioRunner::new(cfg.docker_host.clone()));
+    Arc::new(RealDockerRun::new(runner))
+}
+
 /// The result of ensuring a VM exists.
 #[derive(Debug, Clone)]
 pub struct EnsureOutcome {
@@ -371,6 +470,303 @@ pub async fn hibernate_idle(
             "UPDATE vms SET state = 'stopped' WHERE bot_id = ?",
             rusqlite::params![&vm.bot_id],
         )?;
+
+        if result.ok {
+            stopped.push(vm.bot_id);
+        }
+    }
+
+    Ok(stopped)
+}
+
+/* ------------------------------------------------- Send-safe route wrappers */
+//
+// `ensure_vm`/`refresh_vm`/`hibernate_idle` above all take `db: &Db` and hold
+// that borrow across their own `docker.call().await` - fine for a caller
+// that already owns (or, like every test in `tests/vm.rs`, exclusively
+// borrows) a `Db` for the call's whole duration. `routes/vms.rs` cannot be
+// that caller: `AppState` only ever hands out `Arc<Mutex<Db>>`
+// (`db_handle()`), and axum's `Handler` trait requires a route's future to
+// be `Send` - which `std::sync::MutexGuard` never is (`start_vm_reaper`'s own
+// doc, below, hit this exact wall first), and which a bare `&Db` also never
+// is regardless of the guard (`Db` wraps a `rusqlite::Connection`, which is
+// deliberately `!Sync`). Holding EITHER across an `.await` makes the
+// enclosing future `!Send`, so a route handler can never call `ensure_vm`
+// itself directly - `desk.rs`'s `existing_window`/`save_window` split (see
+// their doc) hit the identical constraint for `window_for`.
+//
+// These three reimplement the SAME cutoff/create/start/stop/write logic
+// against `Arc<Mutex<Db>>` instead, taking the lock only for each
+// synchronous step and dropping it before every `docker.call().await` - the
+// same discipline `start_vm_reaper` already uses for `hibernate_idle`'s tick
+// body. Per this ticket's constraint, `ensure_vm`/`refresh_vm`/`hibernate_idle`
+// themselves are NOT rewritten; these are new siblings, not replacements.
+
+/// `ensure_vm`, reimplemented for a route handler's `Arc<Mutex<Db>>`. See
+/// this section's header doc for why `ensure_vm` itself cannot be called
+/// from `routes/vms.rs` directly.
+pub async fn ensure_vm_in(
+    db: &Arc<Mutex<Db>>,
+    docker: Arc<dyn DockerRun>,
+    bot_id: &str,
+    bot_name: &str,
+    cfg: &VmConfig,
+) -> rusqlite::Result<EnsureOutcome> {
+    let now = Utc::now().to_rfc3339();
+
+    let row = {
+        let guard = db.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut row = get_vm(&guard, bot_id)?;
+
+        if row.is_none() {
+            let slot = list_vms(&guard).ok().and_then(|vms| {
+                let slots: Vec<i32> = vms.iter().map(|v| v.cdp_port).collect();
+                next_slot(&slots, cfg)
+            });
+
+            let Some(slot_idx) = slot else {
+                return Ok(EnsureOutcome {
+                    ok: false,
+                    vm: None,
+                    created: false,
+                    detail: format!(
+                        "Every one of the {} machine slots is taken. Delete a bot's machine before giving another one.",
+                        cfg.slots
+                    ),
+                });
+            };
+
+            let new_row = VmRow {
+                bot_id: bot_id.to_string(),
+                container: container_for(bot_id),
+                cdp_port: cfg.cdp_base + slot_idx,
+                web_port: cfg.web_base + slot_idx,
+                state: "new".to_string(),
+                last_used_at: now.clone(),
+            };
+
+            guard.conn().execute(
+                "INSERT INTO vms (bot_id, container, cdp_port, web_port, state, last_used_at) VALUES (?, ?, ?, ?, ?, ?)",
+                rusqlite::params![
+                    &new_row.bot_id,
+                    &new_row.container,
+                    &new_row.cdp_port,
+                    &new_row.web_port,
+                    &new_row.state,
+                    &new_row.last_used_at
+                ],
+            )?;
+
+            row = Some(new_row);
+        }
+
+        row.unwrap()
+    };
+
+    let state = parse_container_state(
+        &docker
+            .call(
+                &[
+                    "inspect",
+                    "-f",
+                    "{{.State.Status}} {{.State.Running}}",
+                    &row.container,
+                ],
+                20_000,
+            )
+            .await,
+    );
+
+    if state.status == "unreachable" {
+        let guard = db.lock().unwrap_or_else(PoisonError::into_inner);
+        touch(&guard, bot_id, &now, "stopped")?;
+        return Ok(EnsureOutcome {
+            ok: false,
+            vm: Some(VmRow {
+                state: "stopped".to_string(),
+                ..row.clone()
+            }),
+            created: false,
+            detail: "Docker did not answer, so no machine could be started.".to_string(),
+        });
+    }
+
+    if !state.exists {
+        let args = create_args(&row, bot_name, cfg);
+        let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        let made = docker.call(&arg_refs, 180_000).await;
+
+        let guard = db.lock().unwrap_or_else(PoisonError::into_inner);
+        if !made.ok {
+            touch(&guard, bot_id, &now, "stopped")?;
+            return Ok(EnsureOutcome {
+                ok: false,
+                vm: Some(VmRow {
+                    state: "stopped".to_string(),
+                    ..row.clone()
+                }),
+                created: false,
+                detail: first_line(&made.stderr)
+                    .unwrap_or_else(|| "docker refused to create the machine.".to_string()),
+            });
+        }
+
+        touch(&guard, bot_id, &now, "starting")?;
+        return Ok(EnsureOutcome {
+            ok: true,
+            vm: Some(VmRow {
+                state: "starting".to_string(),
+                last_used_at: now.clone(),
+                ..row.clone()
+            }),
+            created: true,
+            detail: format!("{}'s machine is booting for the first time.", bot_name),
+        });
+    }
+
+    if !state.running {
+        let started = docker.call(&["start", &row.container], 90_000).await;
+
+        let guard = db.lock().unwrap_or_else(PoisonError::into_inner);
+        if !started.ok {
+            touch(&guard, bot_id, &now, "stopped")?;
+            return Ok(EnsureOutcome {
+                ok: false,
+                vm: Some(VmRow {
+                    state: "stopped".to_string(),
+                    ..row.clone()
+                }),
+                created: false,
+                detail: first_line(&started.stderr)
+                    .unwrap_or_else(|| "docker refused to start the machine.".to_string()),
+            });
+        }
+
+        touch(&guard, bot_id, &now, "starting")?;
+        return Ok(EnsureOutcome {
+            ok: true,
+            vm: Some(VmRow {
+                state: "starting".to_string(),
+                last_used_at: now.clone(),
+                ..row.clone()
+            }),
+            created: false,
+            detail: format!("{}'s machine is waking up.", bot_name),
+        });
+    }
+
+    let guard = db.lock().unwrap_or_else(PoisonError::into_inner);
+    touch(&guard, bot_id, &now, "running")?;
+    Ok(EnsureOutcome {
+        ok: true,
+        vm: Some(VmRow {
+            state: "running".to_string(),
+            last_used_at: now.clone(),
+            ..row.clone()
+        }),
+        created: false,
+        detail: "running".to_string(),
+    })
+}
+
+/// `refresh_vm`, reimplemented for a route handler's `Arc<Mutex<Db>>` - see
+/// this section's header doc.
+pub async fn refresh_vm_in(
+    db: &Arc<Mutex<Db>>,
+    docker: Arc<dyn DockerRun>,
+    bot_id: &str,
+) -> rusqlite::Result<Option<VmRow>> {
+    let row = {
+        let guard = db.lock().unwrap_or_else(PoisonError::into_inner);
+        get_vm(&guard, bot_id)?
+    };
+    if row.is_none() || row.as_ref().unwrap().state != "starting" {
+        return Ok(row);
+    }
+
+    let row = row.unwrap();
+    let state = parse_container_state(
+        &docker
+            .call(
+                &[
+                    "inspect",
+                    "-f",
+                    "{{.State.Status}} {{.State.Running}}",
+                    &row.container,
+                ],
+                10_000,
+            )
+            .await,
+    );
+
+    if state.exists && state.running {
+        let guard = db.lock().unwrap_or_else(PoisonError::into_inner);
+        guard.conn().execute(
+            "UPDATE vms SET state = ? WHERE bot_id = ?",
+            rusqlite::params!["running", bot_id],
+        )?;
+        return Ok(Some(VmRow {
+            state: "running".to_string(),
+            ..row.clone()
+        }));
+    }
+
+    if state.exists && !state.running && state.status != "unknown" {
+        let guard = db.lock().unwrap_or_else(PoisonError::into_inner);
+        guard.conn().execute(
+            "UPDATE vms SET state = ? WHERE bot_id = ?",
+            rusqlite::params!["stopped", bot_id],
+        )?;
+        return Ok(Some(VmRow {
+            state: "stopped".to_string(),
+            ..row.clone()
+        }));
+    }
+
+    Ok(Some(row))
+}
+
+/// `hibernate_idle`, reimplemented for a route handler's `Arc<Mutex<Db>>` -
+/// see this section's header doc. Same cutoff/stop/write logic as
+/// `hibernate_idle` (and `start_vm_reaper`'s own inlined copy of it).
+pub async fn hibernate_idle_in(
+    db: &Arc<Mutex<Db>>,
+    docker: Arc<dyn DockerRun>,
+    cfg: &VmConfig,
+) -> rusqlite::Result<Vec<String>> {
+    let now = Utc::now().timestamp_millis();
+    let cutoff = now - cfg.idle_ms;
+
+    let candidates = {
+        let guard = db.lock().unwrap_or_else(PoisonError::into_inner);
+        list_vms(&guard)?
+    };
+
+    let mut stopped = Vec::new();
+    for vm in candidates {
+        if vm.state != "running" && vm.state != "starting" {
+            continue;
+        }
+
+        let used = chrono::DateTime::parse_from_rfc3339(&vm.last_used_at)
+            .ok()
+            .map(|dt| dt.timestamp_millis())
+            .unwrap_or(0);
+        if used > cutoff {
+            continue;
+        }
+
+        let result = docker
+            .call(&["stop", "-t", "10", &vm.container], 60_000)
+            .await;
+
+        {
+            let guard = db.lock().unwrap_or_else(PoisonError::into_inner);
+            guard.conn().execute(
+                "UPDATE vms SET state = 'stopped' WHERE bot_id = ?",
+                rusqlite::params![&vm.bot_id],
+            )?;
+        }
 
         if result.ok {
             stopped.push(vm.bot_id);
