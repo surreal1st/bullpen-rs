@@ -339,6 +339,88 @@ async fn toggle_routine_active() {
     );
 }
 
+/// S5-F-01/F2: pressing "Start" used to write `next_run_at = NULL`
+/// unconditionally (`set_routine_active(&db, &id, active, None)`), and
+/// `due_routines`/`fire_due` both require `next_run_at IS NOT NULL` - a
+/// routine started this way could never fire again. This is the bug's own
+/// end-to-end proof: Start must hand back a non-null, FUTURE `nextRunAt`,
+/// and that instant must actually be the one `fire_due` finds due.
+///
+/// Uses `AppState::with_port`/`ScriptedPort` rather than `app_for`'s real
+/// `AppState::new` (which would reach for a real `OpenRouterPort`) because
+/// `fire_due` here really does start a run - same posture as `tests/
+/// routines_fire.rs`. Routing and the judge are explicitly disabled on this
+/// db, per the ticket header rule, even though `open_db` (shared with every
+/// other test in this file) does not do that itself.
+#[tokio::test]
+async fn starting_a_routine_gives_it_a_non_null_next_run_at_that_fires() {
+    let db = open_db();
+    model::routing::set_routing_settings(&db, Some(false), None)
+        .expect("disable routing classifier");
+    server::judge::set_judge_enabled(&db, false).expect("disable judge");
+    let session = seed_session(&db);
+    let bot_id = create_test_bot(&db);
+
+    let scripted =
+        std::sync::Arc::new(common::ScriptedPort::new(vec![common::text_script("done")]));
+    let port: std::sync::Arc<dyn model::ModelPort> = scripted.clone();
+    let state = AppState::with_port(db, port);
+    let app = server::build_app(state.clone());
+
+    let (status, body) = post_with_auth(
+        &app,
+        "/api/routines",
+        &session,
+        json!({
+            "botId": &bot_id,
+            "name": "Test",
+            "prompt": "Do something",
+            "schedule": "every 15 minutes",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let routine_id = body
+        .get("routine")
+        .and_then(|r| r.get("id"))
+        .and_then(|v| v.as_str())
+        .unwrap()
+        .to_string();
+
+    let (status, body) = post_with_auth(
+        &app,
+        &format!("/api/routines/{}/active", routine_id),
+        &session,
+        json!({"active": true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let next_run_at = body
+        .get("routine")
+        .and_then(|r| r.get("nextRunAt"))
+        .and_then(|v| v.as_str())
+        .expect("F2: Start must set a non-null nextRunAt")
+        .to_string();
+    let next_run_at: chrono::DateTime<chrono::Utc> =
+        next_run_at.parse().expect("nextRunAt is a valid timestamp");
+    assert!(
+        next_run_at > chrono::Utc::now(),
+        "nextRunAt should be in the future right after Start"
+    );
+
+    // Prove it, don't just read it: fire at the computed instant and
+    // confirm THIS routine is what came due.
+    let started =
+        server::routines::fire_due(&state, next_run_at + chrono::Duration::seconds(1)).await;
+    assert_eq!(
+        started.len(),
+        1,
+        "the routine started via POST /:id/active must fire on the next tick"
+    );
+    assert_eq!(started[0].0, routine_id);
+}
+
 /// Test 6: Delete routine
 #[tokio::test]
 async fn delete_routine() {

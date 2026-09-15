@@ -203,6 +203,15 @@ struct ActiveBody {
 }
 
 /// POST /api/routines/:id/active - toggle routine active state
+///
+/// F2: `active: true` recomputes `next_run_at` from the routine's own
+/// stored schedule and passes it, never `None` - port of the TS
+/// `setRoutineActive` (`routines.ts:602-617`), which does exactly that on
+/// the way up and keeps the STORED value on the way down. Passing `None`
+/// unconditionally (the bug this replaces) wrote `next_run_at = NULL` on
+/// every Start, and `due_routines`/`fire_due` require `next_run_at IS NOT
+/// NULL`, so a routine started this way could never fire again - dead
+/// through its own "Start" button.
 async fn post_routine_active(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -212,12 +221,23 @@ async fn post_routine_active(
     let body_data: ActiveBody = super::parse_body(&body)?;
     let active = body_data.active.unwrap_or(true);
 
+    let existing =
+        store::routine_by_id(&db, &id)?.ok_or_else(|| AppError::not_found("no such routine"))?;
+
     // If activating, resume the routine (clear pause reason)
     if active {
         store::resume_routine(&db, &id)?;
     }
 
-    set_routine_active(&db, &id, active, None)?;
+    let next_run_at = if active {
+        let parsed =
+            crate::schedule::parse_schedule(&existing.schedule).map_err(AppError::bad_request)?;
+        Some(crate::schedule::next_run(&parsed, chrono::Utc::now()).to_rfc3339())
+    } else {
+        existing.next_run_at.clone()
+    };
+
+    set_routine_active(&db, &id, active, next_run_at)?;
 
     let routine =
         store::routine_by_id(&db, &id)?.ok_or_else(|| AppError::not_found("no such routine"))?;

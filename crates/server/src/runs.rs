@@ -1457,6 +1457,25 @@ were doing unless he changed it."
             .remove(run_id);
         self.changes.touch(ChangeKind::Working);
 
+        // F11: read back BEFORE either early-return branch below, so a
+        // run-row UPDATE failure (the very next check) still gets recorded
+        // as a routine failure instead of health tracking silently skipping
+        // it. Read once here rather than threaded through this function's
+        // parameters - see `start_routine`'s doc on why the column is
+        // stamped at INSERT time instead.
+        let routine_id: Option<String> = {
+            let db = self.db();
+            db.conn()
+                .query_row(
+                    "SELECT routine_id FROM runs WHERE id = ?1",
+                    rusqlite::params![run_id],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()
+                .unwrap_or_default()
+                .flatten()
+        };
+
         // B12: a run task has no HTTP response to fail - a store error past
         // this point is reported to subscribers as the run's own error
         // instead of panicking the task (and, via B2, poisoning the db
@@ -1470,6 +1489,22 @@ were doing unless he changed it."
                     status: None,
                 },
             );
+            // F11: previously this early return skipped health recording
+            // entirely, so a routine whose own row UPDATE kept failing (a
+            // locked db, a disk error) never counted toward FAILURE_LIMIT
+            // and never paused - the exact failure `routine-health.ts`
+            // exists to catch, just reached through a different door.
+            if let Some(routine_id) = &routine_id {
+                let db = self.db();
+                if let Err(err) = store::routines::record_routine_run(
+                    &db,
+                    routine_id,
+                    false,
+                    Some("internal error saving run result"),
+                ) {
+                    tracing::error!("run {run_id}: failed to record routine health: {err}");
+                }
+            }
             if let Some(hook) = self
                 .on_run_done
                 .lock()
@@ -1535,23 +1570,21 @@ were doing unless he changed it."
         // this next to (`runs.ts:1560-1576`): the reset on success is half
         // the rule, and skipping it here would leave a stale failure streak
         // standing until three unrelated failures paused an otherwise
-        // healthy routine. Read back off the row rather than threaded
-        // through this function's parameters - see `start_routine`'s doc.
-        let routine_id: Option<String> = {
-            let db = self.db();
-            db.conn()
-                .query_row(
-                    "SELECT routine_id FROM runs WHERE id = ?1",
-                    rusqlite::params![run_id],
-                    |row| row.get::<_, Option<String>>(0),
-                )
-                .optional()
-                .unwrap_or_default()
-                .flatten()
-        };
+        // healthy routine. `routine_id` was read back once, above, before
+        // either early-return branch - not re-read here (F11: it used to
+        // be, twice, on every settle in the app, routine or not).
+        //
+        // F11: `status == "done"` is an explicit ALLOW-list, not the
+        // `status != "failed"` deny-list this replaces. The match at the
+        // top of this function only ever produces "done" or "failed" here
+        // (`Paused` returns earlier, before this point), so the two read the
+        // same today - but a deny-list quietly counts ANY future status
+        // this function does not yet know about (a "stopped"/"cancelled"
+        // terminal state) as a success and resets the streak, where an
+        // allow-list forces a new status to be reckoned with explicitly.
         if let Some(routine_id) = routine_id {
             let db = self.db();
-            let ok = status != "failed";
+            let ok = status == "done";
             if let Err(err) =
                 store::routines::record_routine_run(&db, &routine_id, ok, failure.as_deref())
             {

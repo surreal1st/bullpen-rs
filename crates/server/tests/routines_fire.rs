@@ -1,4 +1,4 @@
-//! S5-03 acceptance: firing, the scheduler's `fire_due`, quiet hours,
+//! S5-03/S5-F-01 acceptance: firing, the scheduler's `fire_due`,
 //! health/pause tracking, the cheap-model floor, and the STOP block. Drives
 //! `server::routines::fire_due`/`resume_absence_paused` directly against a
 //! real `AppState` (per the ticket: `POST /api/routines/tick` and `POST
@@ -151,11 +151,10 @@ async fn routine_row(app: &axum::Router, session: &str, bot_id: &str, routine_id
         .expect("routine present in list")
 }
 
-/// A quiet-hours (or not) instant expressed as THIS machine's local wall
-/// clock, not a hardcoded UTC value - `is_quiet_hours` reads `chrono::
-/// Local` (matching `schedule.rs`'s own documented convention), so a fixed
-/// UTC instant would land inside 23:00-07:00 on some timezones and not on
-/// others.
+/// A given hour/minute expressed as THIS machine's local wall clock,
+/// converted to UTC - `schedule.rs`'s `next_run` reads `chrono::Local` for
+/// daily/weekly schedules, so a fixed UTC instant would land at a different
+/// local hour on some timezones than others.
 fn local_wall_clock_utc(hour: u32, minute: u32) -> DateTime<Utc> {
     let today = Local::now().date_naive();
     Local
@@ -240,38 +239,32 @@ async fn a_routine_not_yet_due_does_not_fire() {
     assert!(started.is_empty(), "a routine not yet due must not fire");
 }
 
+/// F4: TS `fireDue` has no quiet-hours rule at all (`routines.ts:753-916`,
+/// confirmed by full read) - the Rust port's own quiet-hours gate silenced
+/// every routine due between 23:00 and 07:00 local, which was a divergence
+/// from TS, not an extension of it (goals get their own quiet hours in
+/// S5b). This is the "would have been skipped, must not be" case the old
+/// `quiet_hours_skip_firing_entirely` test asserted backwards: a daily
+/// routine due at 02:00 local fires exactly like one due at noon.
 #[tokio::test]
-async fn quiet_hours_skip_firing_entirely() {
+async fn a_routine_due_at_night_fires_like_any_other_hour() {
     let db = open_db();
     let session = seed_session(&db);
     seed_bot(&db, "arthur", None);
-    let quiet_now = local_wall_clock_utc(2, 0); // 02:00 local - inside 23:00-07:00
-    let id = seed_active_routine(&db, "arthur", "x", "y", "every 15 minutes", quiet_now);
-
-    assert!(
-        routines::is_quiet_hours(quiet_now),
-        "02:00 local must read as quiet"
-    );
-    assert!(
-        !routines::is_quiet_hours(local_wall_clock_utc(12, 0)),
-        "noon local must not read as quiet"
-    );
+    let night_now = local_wall_clock_utc(2, 0); // 02:00 local
+    let id = seed_active_routine(&db, "arthur", "x", "y", "every 15 minutes", night_now);
 
     let port: Arc<dyn model::ModelPort> = Arc::new(ScriptedPort::new(vec![text_script("done")]));
     let state = AppState::with_port(db, port);
     let app = build_app(state.clone());
 
-    let started = routines::fire_due(&state, quiet_now).await;
-    assert!(
-        started.is_empty(),
-        "quiet hours must skip every firing, not just pause one"
-    );
+    let started = routines::fire_due(&state, night_now).await;
+    assert_eq!(started.len(), 1, "a routine due at 02:00 local must fire");
+    assert_eq!(started[0].0, id);
 
-    // Left exactly as it was - not rescheduled, not paused - so the next
-    // tick after quiet hours end still finds it due.
+    wait_for_run(&app, &session, &id).await;
     let row = routine_row(&app, &session, "arthur", &id).await;
     assert_eq!(row.get("active").and_then(|v| v.as_bool()), Some(true));
-    assert!(row.get("pausedReason").map(|v| v.is_null()).unwrap_or(true));
 }
 
 #[tokio::test]
@@ -482,6 +475,46 @@ async fn a_routine_fires_on_the_cheap_model_even_with_a_premium_pin() {
         requests[0].model,
         model::CHEAP_DEFAULT_MODEL,
         "a routine must never reach a model its bot is merely pinned to when that pin is premium"
+    );
+}
+
+/// F1: `anthropic/claude-sonnet-5` is deliberately absent from
+/// `ladder::PREMIUM_MARKERS` (see its own doc - a ROOM round needs that
+/// gap, since sonnet pins are exactly what ran up the room bill), so
+/// `model_for_run`'s ordinary non-Chat floor would wave a Sonnet pin
+/// straight through unflagged. `fire_routine` must never even hand it the
+/// pin to wave through - it calls `safe_fallback` directly, the same as TS
+/// `getDefaultModel(db)`, so this is the one pin the marker-based floor
+/// alone cannot catch.
+#[tokio::test]
+async fn a_routine_fires_on_the_cheap_default_even_with_a_sonnet_pin() {
+    let db = open_db();
+    seed_bot(&db, "arthur", Some("anthropic/claude-sonnet-5"));
+    let now = local_wall_clock_utc(9, 0);
+    let id = seed_active_routine(&db, "arthur", "nightly", "Check the logs.", "hourly", now);
+
+    let scripted = Arc::new(ScriptedPort::new(vec![text_script("done")]));
+    let port: Arc<dyn model::ModelPort> = scripted.clone();
+    let state = AppState::with_port(db, port);
+
+    let started = routines::fire_due(&state, now).await;
+    assert_eq!(started.len(), 1);
+    assert_eq!(started[0].0, id);
+
+    for _ in 0..300 {
+        if !scripted.requests().is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    let requests = scripted.requests();
+    assert_eq!(requests.len(), 1, "exactly one model call for one firing");
+    assert_eq!(
+        requests[0].model,
+        model::CHEAP_DEFAULT_MODEL,
+        "a sonnet pin must not survive a routine firing - the marker-based \
+         floor alone would let it through"
     );
 }
 

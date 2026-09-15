@@ -12,10 +12,14 @@
 //! side).
 //!
 //! Two rules from the TS module doc, unchanged (`routines.ts:19-33`):
-//! 1. A routine always runs on the cheap model - enforced by `model::ladder::
-//!    model_for_run`'s existing floor for any non-`Chat` trigger, not
-//!    reimplemented here. `fire_routine` passes `Trigger::Routine` and the
-//!    bot's own pin; the ladder is the only place that actually settles it.
+//! 1. A routine always runs on the cheap model - `fire_routine` calls
+//!    `model::ladder::safe_fallback` directly (F1: forced, not defaulted,
+//!    exactly like the TS `getDefaultModel(db)` comment at `routines.
+//!    ts:704-705`), never the bot's own pin. `model_for_run`'s non-`Chat`
+//!    floor still runs underneath via `StartOptions`/`start_routine`, but it
+//!    is a second net, not the enforcement point - see `fire_routine`'s own
+//!    doc for why the bot's pin cannot be trusted to reach it in the first
+//!    place.
 //! 2. A routine that cannot do its job says so once and stops -
 //!    `prompt::STOP_RATHER_THAN_INVENT` rides on every routine prompt,
 //!    appended here (not in `build_prompt`, which knows nothing about
@@ -26,7 +30,7 @@
 //! `state.credits` (a `CreditsPort`, async), and threading four separate
 //! params through instead is the same shape with worse call sites.
 
-use chrono::{DateTime, Local, Timelike, Utc};
+use chrono::{DateTime, Utc};
 use model::ladder::Trigger;
 use store::Db;
 use store::routines::RoutineRow;
@@ -46,19 +50,6 @@ pub const ABSENCE_PAUSE_REASON: &str = "Paused: no sign-in for 5 days";
 /// How long Josh can be gone before an unattended INTERVAL routine stops
 /// firing into silence. Matches the TS `ABSENCE_DAYS` (`auth.ts:152`).
 const ABSENCE_DAYS: i64 = 5;
-
-/// Quiet hours, server-local, matching `goal-scheduler.ts:54-59`'s
-/// `isQuietHours` exactly (23:00-07:00). TS only applies this to GOALS
-/// (S5b); the orchestrator's Design section extends it to every routine
-/// firing for this port - see `S5-tickets.md`'s Design section, "Scheduler".
-/// A routine due DURING quiet hours is simply left alone (not rescheduled,
-/// not paused): the next tick after quiet hours ends finds it still due
-/// (`next_run_at <= now`) and fires it exactly once, catching up rather than
-/// firing every 30s it was skipped.
-pub fn is_quiet_hours(now: DateTime<Utc>) -> bool {
-    let hour = now.with_timezone(&Local).hour();
-    !(7..23).contains(&hour)
-}
 
 /// Raw row lookup by id. `store::routines::routine_by_id` returns the
 /// friendly camelCase `Routine` DTO (bot name resolved, JSON columns
@@ -128,10 +119,18 @@ fn fire_routine(state: &AppState, row: &RoutineRow, extra: &str) -> Option<Strin
         let db = state.db();
         let bot = store::get_bot(&db, &row.bot_id).ok().flatten()?;
         let conversation_id = store::get_or_create_conversation(&db, &bot.id).ok()?;
-        let model = bot
-            .model
-            .clone()
-            .unwrap_or_else(|| model::ladder::default_model(&db));
+        // F1: forced, not defaulted - the bot's own pin is deliberately
+        // ignored, exactly like the TS `getDefaultModel(db)` comment at
+        // `routines.ts:704-705`. `bot.model` used to be read here first,
+        // which meant `model_for_run`'s non-Chat floor was the only thing
+        // standing between a routine and its bot's pin - and that floor
+        // waves `anthropic/claude-sonnet-5` straight through on purpose
+        // (`ladder::model_for_run`'s own doc: "sonnet" is deliberately
+        // absent from `PREMIUM_MARKERS`), so a bot pinned to Sonnet for
+        // chat fired every fifteen minutes on Sonnet, unattended.
+        // `safe_fallback` is the same floor a timer run gets nowhere near a
+        // bot at all, so there is no pin left to ignore.
+        let model = model::ladder::safe_fallback(&db);
 
         // S5-03: only a SHORT marker rides in the conversation's own
         // history - `[name] ran` - never the full prompt text. Port of the
@@ -198,23 +197,24 @@ pub fn run_routine_now(state: &AppState, id: &str) -> Result<String, String> {
 }
 
 /// Fires every routine that is due. Port of the TS `fireDue` (`routines.
-/// ts:753-916`), narrowed to "prompt"-kind routines (module doc) and
-/// extended to skip quiet hours (`is_quiet_hours`'s doc explains why that
-/// is this port's own call, not TS's). Reschedules BEFORE starting a run,
-/// same as TS, so a hung run cannot make its routine fire in a loop.
+/// ts:753-916`), narrowed to "prompt"-kind routines (module doc). Reschedules
+/// BEFORE starting a run, same as TS, so a hung run cannot make its routine
+/// fire in a loop.
+///
+/// F4: NO quiet-hours gate here. S5-03 added one (`is_quiet_hours`, since
+/// deleted - nothing else in this crate calls it) on the strength of
+/// `goal-scheduler.ts:57`/`quiet-routine.test.ts`, but `fireDue` in the TS
+/// source (`routines.ts:753-916`, read whole) has no quiet-hours rule at
+/// all - that test is the nothing-to-report rule for a live ping, not a
+/// silence window. The Rust gate silenced a "daily at 23:30" routine for
+/// 7.5 hours and an interval routine for 8 hours every night, and skipped
+/// the absence/spend pauses below along with it. Quiet hours are a GOALS
+/// concept (S5b), not a routines one.
 ///
 /// Returns `(routine_id, run_id)` for everything it actually started - the
 /// same shape `POST /api/routines/tick` (S5-04, stubbed pending this
 /// function) hands back as `{"started": [...]}`.
 pub async fn fire_due(state: &AppState, now: DateTime<Utc>) -> Vec<(String, String)> {
-    // Design: a routine due DURING quiet hours is left exactly as it is -
-    // not rescheduled, not paused - so the very next tick after quiet hours
-    // end finds it still due and fires it once, rather than firing on
-    // every 30s tick it was skipped.
-    if is_quiet_hours(now) {
-        return Vec::new();
-    }
-
     let now_str = now.to_rfc3339();
     let due = {
         let db = state.db();
@@ -352,19 +352,39 @@ pub fn resume_absence_paused(state: &AppState, now: DateTime<Utc>) -> usize {
 /// Starts the 30s scheduler tick. Port of the TS `startScheduler`
 /// (`routines.ts:1100-1117`): a `tokio::spawn`'d task, never awaited by the
 /// caller (mirrors TS's `timer.unref?.()` - the process can still exit with
-/// this running). A panic inside `fire_due`/one tick is caught by nothing
-/// here on purpose - tokio isolates a spawned task's panic to that task, so
-/// the worst case is this ONE tick's loop iteration never completing rather
-/// than the process going down; `main.rs` never `.await`s the returned
-/// handle.
+/// this running).
+///
+/// F8: each tick's `fire_due` runs as ITS OWN `tokio::spawn`'d task, awaited
+/// by this loop rather than called inline. The doc this replaces claimed "the
+/// worst case is this ONE tick's loop iteration never completing" - that is
+/// wrong: a panic inside `fire_due` called directly on this task would abort
+/// the whole `loop`, and nothing restarts it, so the scheduler goes silently
+/// dead until the next deploy with one panic line as the only trace.
+/// Reachable today: an interval count large enough to overflow `parse_
+/// schedule`'s `n * 60` panics in a debug build. Spawning the tick's work
+/// separately isolates a panic to that one task - tokio catches it at the
+/// task boundary, `JoinHandle::await` comes back `Err`, and this loop's next
+/// `interval.tick()` still runs. `main.rs` never `.await`s the OUTER handle
+/// this function itself returns.
 pub fn start_scheduler(state: AppState) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
         loop {
             interval.tick().await;
             let now = Utc::now();
-            for (routine_id, run_id) in fire_due(&state, now).await {
-                tracing::info!(%routine_id, %run_id, "routine started run");
+            let tick_state = state.clone();
+            match tokio::spawn(async move { fire_due(&tick_state, now).await }).await {
+                Ok(started) => {
+                    for (routine_id, run_id) in started {
+                        tracing::info!(%routine_id, %run_id, "routine started run");
+                    }
+                }
+                Err(join_err) => {
+                    tracing::error!(
+                        panic = join_err.is_panic(),
+                        "routine scheduler tick failed: {join_err}"
+                    );
+                }
             }
         }
     })
