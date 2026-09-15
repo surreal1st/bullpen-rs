@@ -12,8 +12,55 @@
 //! store turned on, so `login`'s session survives across every later
 //! request - a native build has no browser cookie jar to lean on the way
 //! the web build does (`Request::with_credentials`'s doc).
+//!
+//! **S13b-01: silent sign-in.** The above covers a session surviving
+//! *within* one process; it does nothing for the session surviving *across
+//! launches*, so the desktop build showed the sign-in gate every single
+//! time - strictly worse than the Electron shell it replaces, which signs
+//! in from `%USERPROFILE%\.bullpen\password.key`
+//! (`projects/bullpen/desktop/main.cjs::signIn`) before its window ever
+//! loads a page. [`silent_sign_in`] ports that: read the same file, POST it
+//! to `/api/auth/login`, and if it is accepted, remember the returned
+//! session token for every later request this process makes
+//! ([`SESSION_TOKEN`], attached in [`request_with_base`] below).
+//!
+//! **Re-authenticate every launch, not persist-to-disk.** The Electron app
+//! itself does not persist a session either - `main.cjs::signIn` runs fresh
+//! on every start, reading the password file each time rather than caching
+//! a token between runs. Copying that (rather than writing a new session
+//! file to disk) means no new secret-bearing artifact to protect beyond
+//! `password.key` itself, and no stale-session edge case: a signed-in
+//! session outlives nothing past process exit, so there is nothing to
+//! expire, revoke, or clean up later.
+//!
+//! **Why a bearer token, not the shared cookie jar, carries the result.**
+//! `desktop.rs::attempt_silent_sign_in_before_launch` calls this before
+//! `dioxus-desktop`'s own long-lived Tokio runtime exists, from a
+//! short-lived throwaway runtime built just for that one call (there is no
+//! async context to `.await` in yet at that point in `main()`). A
+//! `reqwest::Client`'s pooled HTTP/1.1 connections are driven by a
+//! background task tied to whichever Tokio runtime was current when the
+//! connection was opened; handing the *shared* `client()` singleton's
+//! cookie-bearing connections across to a runtime that then gets dropped
+//! would leave the app's very first *real* request (`app.rs`'s own
+//! `auth_status()` call, moments later, inside the real runtime) trying to
+//! drive a connection nothing is polling anymore. `silent_sign_in` sidesteps
+//! this entirely: it builds and uses its own one-off `reqwest::Client` for
+//! the login POST alone, and only a plain `String` token - which has no
+//! runtime affinity at all - crosses out of that throwaway runtime. `login`
+//! (`api.rs`, the interactive password-box path) is unaffected: it already
+//! only ever runs inside the one real runtime, so its cookie-store approach
+//! stays exactly as it was. The server accepts either (`auth::presented_token`
+//! checks `Authorization: Bearer` before falling back to the cookie), so
+//! this is additive, not a second competing mechanism.
 
 use super::{Method, RequestSpec, Transport, TransportResponse};
+#[cfg(feature = "desktop")]
+use serde::Deserialize;
+#[cfg(feature = "desktop")]
+use std::path::{Path, PathBuf};
+#[cfg(feature = "desktop")]
+use std::sync::Mutex;
 use std::sync::OnceLock;
 
 /// `deploy/Bullpen-rs.cmd` already sets `BULLPEN_URL` for the desktop
@@ -35,6 +82,38 @@ fn client() -> &'static reqwest::Client {
             .build()
             .expect("a rustls-only reqwest client always builds")
     })
+}
+
+/// The token a successful [`silent_sign_in`] obtained, if any - see this
+/// module's top doc ("why a bearer token, not the shared cookie jar") for
+/// why this, rather than `client()`'s own cookie jar, is what carries a
+/// silent sign-in's result. `None` until a silent sign-in succeeds; never
+/// written anywhere else, and never logged or displayed - only ever read
+/// back into an `Authorization` header in [`request_with_base`].
+///
+/// `feature = "desktop"`-gated, like the rest of this section: silent
+/// sign-in only ever has one caller (`desktop.rs`), itself gated the same
+/// way in `main.rs` - without this, `cargo check -p client` on the default
+/// `web` feature (still native-target, since only `target_arch` gates this
+/// whole file - see this module's top doc) would compile this with no
+/// caller anywhere in the crate and warn every one of these items dead,
+/// which `cargo clippy -D warnings` then turns into a build failure.
+#[cfg(feature = "desktop")]
+static SESSION_TOKEN: Mutex<Option<String>> = Mutex::new(None);
+
+#[cfg(feature = "desktop")]
+fn stored_session_token() -> Option<String> {
+    SESSION_TOKEN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
+#[cfg(feature = "desktop")]
+fn store_session_token(token: String) {
+    *SESSION_TOKEN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(token);
 }
 
 /// Every relative path in `api.rs` (`/api/rooms`, `/api/bots/:id/...`) is
@@ -86,6 +165,13 @@ async fn request_with_base(base: &str, spec: RequestSpec) -> Result<TransportRes
         Method::Patch => client().patch(&url),
         Method::Delete => client().delete(&url),
     };
+    // S13b-01: a silent sign-in's result rides in here, not in `client()`'s
+    // cookie jar - see this module's top doc. Attached unconditionally,
+    // same as the cookie store already is, regardless of `with_credentials`.
+    #[cfg(feature = "desktop")]
+    if let Some(token) = stored_session_token() {
+        builder = builder.bearer_auth(token);
+    }
     if let Some(bytes) = spec.body {
         builder = builder
             .header("content-type", "application/json")
@@ -135,6 +221,128 @@ impl NativeBody {
         }
     }
 }
+
+/* -------------------------------------------------------------- S13b-01 */
+// Every item below is `feature = "desktop"`-gated - see `SESSION_TOKEN`'s
+// doc above for why.
+
+/// What a silent sign-in attempt found. `NoKeyFile` covers both "the file
+/// does not exist" and "it exists but is empty/whitespace" - both mean
+/// "there is nothing to sign in with", the same outcome either way: fall
+/// back to the sign-in gate that already works, quietly.
+#[cfg(feature = "desktop")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SilentSignInOutcome {
+    SignedIn,
+    NoKeyFile,
+}
+
+#[cfg(feature = "desktop")]
+#[derive(Deserialize)]
+struct SignInOk {
+    token: String,
+}
+
+#[cfg(feature = "desktop")]
+#[derive(Deserialize)]
+struct SignInError {
+    error: String,
+}
+
+/// Where the Electron app's own silent sign-in reads its credential from
+/// (`projects/bullpen/desktop/main.cjs::signIn`, `deploy/Bullpen-rs.cmd`'s
+/// own comment): `%USERPROFILE%\.bullpen\password.key`. `BULLPEN_PASSWORD_FILE`
+/// overrides it - mirrors `main.cjs`'s own env override - purely so a test
+/// can point this at a disposable file instead of Josh's real one; nothing
+/// in this codebase sets it otherwise.
+#[cfg(feature = "desktop")]
+fn password_key_path() -> Option<PathBuf> {
+    if let Ok(overridden) = std::env::var("BULLPEN_PASSWORD_FILE") {
+        return Some(PathBuf::from(overridden));
+    }
+    std::env::var("USERPROFILE")
+        .ok()
+        .map(|home| Path::new(&home).join(".bullpen").join("password.key"))
+}
+
+/// The real entry point: `desktop.rs::attempt_silent_sign_in_before_launch`
+/// calls this once at startup, before the window opens. Never reads or logs
+/// the key's contents outside [`attempt_silent_sign_in`] itself, and never
+/// puts them in the `Result`'s `Err` - see this module's top doc and the
+/// crate's own secret-handling rule.
+#[cfg(feature = "desktop")]
+pub async fn silent_sign_in() -> Result<SilentSignInOutcome, String> {
+    let Some(path) = password_key_path() else {
+        return Ok(SilentSignInOutcome::NoKeyFile);
+    };
+    attempt_silent_sign_in(&base_url(), &path).await
+}
+
+/// The testable half of [`silent_sign_in`], taking `base` and `path`
+/// explicitly - same reasoning as [`request_with_base`]/
+/// [`resolve_url_with_base`] above: a test can point this at a local fake
+/// server and a throwaway key file without touching `BULLPEN_URL` or
+/// Josh's real `password.key`, and without racing another test over either.
+///
+/// On any failure below - a read error, an empty file, a rejected password,
+/// a network error - the `Err`/`NoKeyFile` returned names only the file's
+/// PATH and the failure KIND (an `io::ErrorKind`, or the server's own error
+/// message, which the server itself never echoes the password into - see
+/// `routes/auth.rs::login`). The password itself lives only in the local
+/// `password` binding below, used once to build the request body, never
+/// formatted into any `Err`, log line, URL, or header.
+#[cfg(feature = "desktop")]
+async fn attempt_silent_sign_in(base: &str, path: &Path) -> Result<SilentSignInOutcome, String> {
+    if !path.exists() {
+        return Ok(SilentSignInOutcome::NoKeyFile);
+    }
+    let contents = std::fs::read_to_string(path).map_err(|e| {
+        format!(
+            "could not read {path}: {kind:?}",
+            path = path.display(),
+            kind = e.kind()
+        )
+    })?;
+    let password = contents.trim_end_matches(['\r', '\n']);
+    if password.is_empty() {
+        return Ok(SilentSignInOutcome::NoKeyFile);
+    }
+
+    let url = resolve_url_with_base(base, "/api/auth/login")?;
+    let body = serde_json::to_vec(&serde_json::json!({ "password": password }))
+        .map_err(|e| e.to_string())?;
+
+    // A one-off client, deliberately not the shared `client()` above - see
+    // this module's top doc ("why a bearer token, not the shared cookie
+    // jar carries the result").
+    let login_client = reqwest::Client::builder()
+        .use_rustls_tls()
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = login_client
+        .post(&url)
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let status = resp.status();
+    if status.is_success() {
+        let ok: SignInOk = resp.json().await.map_err(|e| e.to_string())?;
+        store_session_token(ok.token);
+        return Ok(SilentSignInOutcome::SignedIn);
+    }
+    let message = match resp.json::<SignInError>().await {
+        Ok(err) => err.error,
+        Err(_) => format!("sign-in failed with status {status}"),
+    };
+    Err(message)
+}
+
+#[cfg(all(test, feature = "desktop"))]
+#[path = "silent_sign_in_tests.rs"]
+mod silent_sign_in_tests;
 
 #[cfg(test)]
 mod tests {

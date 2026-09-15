@@ -47,6 +47,17 @@ use native::NativeBody as PlatformBody;
 #[cfg(target_arch = "wasm32")]
 use web::WebBody as PlatformBody;
 
+// S13b-01: `native` is a private submodule (`mod native;` above), so
+// `desktop.rs` - outside `transport/` entirely - cannot name
+// `native::silent_sign_in` directly; Rust's module privacy blocks the path
+// itself regardless of the items' own visibility inside it. This is the
+// same re-export shape `Backend`/`PlatformBody` already use just above,
+// narrowed to `pub(crate)` since nothing outside this crate needs it. Not
+// named in S13b-01's own "Owns" list (`native.rs`, `desktop.rs`, a new
+// test file) - flagged here as the one line elsewhere it required.
+#[cfg(all(not(target_arch = "wasm32"), feature = "desktop"))]
+pub(crate) use native::{SilentSignInOutcome, silent_sign_in};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Method {
     Get,
