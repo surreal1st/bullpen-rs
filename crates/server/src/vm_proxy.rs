@@ -23,8 +23,11 @@
 //! what that buys in testability without a real browser.
 
 use axum::http::HeaderMap;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::task::{Context, Poll};
 use store::Db;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 
 /* -------------------------------------------------------------- the viewer */
 
@@ -217,46 +220,110 @@ pub async fn attach_vm_proxy<S>(
     require_auth: bool,
 ) -> ProxyOutcome
 where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let (path_only, query) = match raw_target.split_once('?') {
+    let (path_only, query) = split_raw_target(raw_target);
+
+    match resolve_viewer_target(path_only, request_headers, db, require_auth) {
+        Resolution::NotAViewerPath => ProxyOutcome::NotAViewerPath,
+        Resolution::Unauthorized => {
+            refuse(&mut client, "401 Unauthorized").await;
+            ProxyOutcome::Unauthorized
+        }
+        Resolution::UnknownBot => {
+            refuse(&mut client, "404 Not Found").await;
+            ProxyOutcome::UnknownBot
+        }
+        Resolution::Ready { target, web_port } => {
+            proxy_to_vm(client, &target, &query, request_headers, web_port).await
+        }
+    }
+}
+
+/// A client that has already gone away must not panic a caller - every
+/// write here is best-effort. Module-level (not nested in
+/// `attach_vm_proxy` any more) so `accept_and_route`'s pass-through
+/// detection can answer a non-viewer refusal the same way.
+async fn refuse<S: AsyncWrite + Unpin>(client: &mut S, status: &str) {
+    let line = format!("HTTP/1.1 {status}\r\nConnection: close\r\n\r\n");
+    let _ = client.write_all(line.as_bytes()).await;
+}
+
+/// `raw_target`'s path and its `?query` (re-prefixed with `?`, or empty) -
+/// the split `attach_vm_proxy` always did inline; pulled out so
+/// `resolve_viewer_target` and `proxy_to_vm` share exactly one copy of it.
+fn split_raw_target(raw_target: &str) -> (&str, String) {
+    match raw_target.split_once('?') {
         Some((path, q)) => (path, format!("?{q}")),
         None => (raw_target, String::new()),
-    };
-
-    let Some(target) = viewer_target(path_only) else {
-        return ProxyOutcome::NotAViewerPath;
-    };
-
-    // A client that has already gone away must not panic this handler -
-    // every write below is best-effort.
-    async fn refuse<S: tokio::io::AsyncWrite + Unpin>(client: &mut S, status: &str) {
-        let line = format!("HTTP/1.1 {status}\r\nConnection: close\r\n\r\n");
-        let _ = client.write_all(line.as_bytes()).await;
     }
+}
+
+/// What `resolve_viewer_target` decided about one request - everything
+/// needed to either refuse or dial upstream, with no `db` reference left
+/// in it, so a caller can drop a database lock (or a `MutexGuard`, which is
+/// never `Send`) before going anywhere near an `.await`.
+enum Resolution {
+    NotAViewerPath,
+    Unauthorized,
+    UnknownBot,
+    Ready { target: ViewerTarget, web_port: i32 },
+}
+
+/// The synchronous half of `attach_vm_proxy`: parse the path, check the
+/// session, look up the bot's VM row. No `.await` anywhere in this
+/// function - every call in it (`session_valid`, `get_vm`) is a plain
+/// `rusqlite` query - so it is safe to call while holding a
+/// `std::sync::MutexGuard<Db>` (`accept_and_route`'s real caller wraps
+/// `AppState`'s db in exactly that), as long as the guard is dropped
+/// before whatever comes next `.await`s (S6-06b's `start_vm_reaper` hit
+/// this same guard-across-await wall for the same reason - see its doc).
+fn resolve_viewer_target(
+    path_only: &str,
+    request_headers: &HeaderMap,
+    db: &Db,
+    require_auth: bool,
+) -> Resolution {
+    let Some(target) = viewer_target(path_only) else {
+        return Resolution::NotAViewerPath;
+    };
 
     if require_auth {
         let token = crate::auth::presented_token(request_headers);
         let valid = store::auth::session_valid(db, &token).unwrap_or(false);
         if !valid {
-            refuse(&mut client, "401 Unauthorized").await;
-            return ProxyOutcome::Unauthorized;
+            return Resolution::Unauthorized;
         }
     }
 
-    let vm = match store::vms::get_vm(db, &target.bot_id) {
-        Ok(Some(vm)) => vm,
-        _ => {
-            refuse(&mut client, "404 Not Found").await;
-            return ProxyOutcome::UnknownBot;
-        }
-    };
+    match store::vms::get_vm(db, &target.bot_id) {
+        Ok(Some(vm)) => Resolution::Ready {
+            target,
+            web_port: vm.web_port,
+        },
+        _ => Resolution::UnknownBot,
+    }
+}
 
+/// The relay itself, once a bot's VM row is already resolved: connect to
+/// its web desktop, send the handshake, pipe both directions. Split out of
+/// `attach_vm_proxy` (which still does exactly this after its own
+/// `db`-touching checks) so `accept_and_route` can reach it too, having
+/// already resolved the target with the database lock released.
+async fn proxy_to_vm<S>(
+    mut client: S,
+    target: &ViewerTarget,
+    query: &str,
+    request_headers: &HeaderMap,
+    web_port: i32,
+) -> ProxyOutcome
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let upstream_path = format!("/{}{}", target.rest, query);
-    let handshake = build_upgrade_request(&upstream_path, request_headers, vm.web_port);
+    let handshake = build_upgrade_request(&upstream_path, request_headers, web_port);
 
-    let mut upstream = match tokio::net::TcpStream::connect(("127.0.0.1", vm.web_port as u16)).await
-    {
+    let mut upstream = match tokio::net::TcpStream::connect(("127.0.0.1", web_port as u16)).await {
         Ok(stream) => stream,
         Err(_) => {
             refuse(&mut client, "502 Bad Gateway").await;
@@ -279,4 +346,353 @@ where
     });
 
     ProxyOutcome::Proxying
+}
+
+/* -------------------------------------------------------------- accept and route */
+//
+// Everything above this point (`attach_vm_proxy`, S6-06b) already does the
+// right thing GIVEN a raw duplex that is definitely a viewer upgrade. What
+// was still missing is Node's other half: `server.on("upgrade", ...)` in TS
+// fires at the raw `http.Server` for EVERY accepted connection, before
+// anything has been parsed as a normal request - that's the only reason
+// `attachVmProxy` gets the socket before any bytes are written back to the
+// client. axum's `Router` has no equivalent hook: `axum::serve` hands each
+// connection straight to hyper's own HTTP/1 machinery, which - for an
+// ordinary route - always writes hyper's own response before anything else
+// runs. `viewer_target` matching a path is not enough on its own to claim
+// that connection either, since a plain GET to a viewer path (loading the
+// desktop's own HTML shell, not the WebSocket) is exactly the kind of
+// ordinary request that must still reach the normal server.
+//
+// `read_request_head`/`accept_and_route` below are the accept/route half of
+// `attachVmProxy` (`vm.ts:686-741`): peek the request line and headers off
+// a freshly accepted connection, by hand, BEFORE handing it to hyper at
+// all - hyper's own upgrade support (`hyper::upgrade::on`) still requires
+// writing a real HTTP response first, which is exactly the RFC 6455
+// `Sec-WebSocket-Accept` feature S6-06b's own doc flagged as out of scope
+// (see `attach_vm_proxy`'s doc); peeking first sidesteps needing it at all,
+// the same way Node's raw socket handoff does. Only a request carrying an
+// `Upgrade` header is even a candidate; everything else - viewer path or
+// not - is left completely alone and handed to `serve`'s normal hyper
+// connection with every peeked byte restored to the front, via
+// `PrefixedStream`.
+
+const MAX_REQUEST_HEAD_BYTES: usize = 16 * 1024;
+
+/// The request line's target and headers of one HTTP/1.x request, read by
+/// hand off a raw connection - `raw` is the EXACT bytes consumed doing it,
+/// so a non-upgrade connection can be handed onward with nothing lost.
+struct RequestHead {
+    target: String,
+    headers: HeaderMap,
+    is_upgrade: bool,
+    raw: Vec<u8>,
+}
+
+/// Reads one HTTP/1.x request head (request line + headers, up to and
+/// including the terminating blank line) off `stream`, one byte at a time.
+/// Slow next to a real parser, but the head is a few hundred bytes and this
+/// is the only way to stop EXACTLY at the boundary without ever reading
+/// into whatever comes after (a body, or the next pipelined request) - a
+/// chunked read risks swallowing bytes that a real HTTP server (`serve`'s
+/// hyper fallback) would need to see. `None` on a malformed head, a closed
+/// connection before one full head arrives, or a head over
+/// `MAX_REQUEST_HEAD_BYTES` (a client that never sends `\r\n\r\n` must not
+/// be read from forever).
+async fn read_request_head<S: AsyncRead + Unpin>(stream: &mut S) -> Option<RequestHead> {
+    let mut raw = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        if raw.len() >= MAX_REQUEST_HEAD_BYTES {
+            return None;
+        }
+        stream.read_exact(&mut byte).await.ok()?;
+        raw.push(byte[0]);
+        if raw.ends_with(b"\r\n\r\n") {
+            break;
+        }
+    }
+    parse_request_head(&raw).map(|(target, headers, is_upgrade)| RequestHead {
+        target,
+        headers,
+        is_upgrade,
+        raw,
+    })
+}
+
+/// The request line and headers, hand-parsed - not a general HTTP parser
+/// (no continuation lines, no folding), just enough for a well-formed
+/// request from a real browser or `serve`'s own test doubles. A line this
+/// crate cannot make sense of drops that ONE header rather than failing
+/// the whole request, same as a tolerant proxy would.
+fn parse_request_head(raw: &[u8]) -> Option<(String, HeaderMap, bool)> {
+    let text = std::str::from_utf8(raw).ok()?;
+    let mut lines = text.split("\r\n");
+
+    let request_line = lines.next()?;
+    let mut parts = request_line.split(' ');
+    let _method = parts.next()?;
+    let target = parts.next()?.to_string();
+    let _version = parts.next()?;
+
+    let mut headers = HeaderMap::new();
+    let mut is_upgrade = false;
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        let name = name.trim();
+        let value = value.trim();
+        if name.eq_ignore_ascii_case("upgrade") {
+            is_upgrade = true;
+        }
+        if let (Ok(header_name), Ok(header_value)) = (
+            axum::http::HeaderName::from_bytes(name.as_bytes()),
+            axum::http::HeaderValue::from_str(value),
+        ) {
+            headers.append(header_name, header_value);
+        }
+    }
+
+    Some((target, headers, is_upgrade))
+}
+
+/// A stream with some already-read bytes glued back onto the front of its
+/// read side - reconstructs "as if nothing had been peeked" for whatever
+/// reads from it next. Writes pass straight through untouched.
+pub struct PrefixedStream<S> {
+    prefix: std::io::Cursor<Vec<u8>>,
+    inner: S,
+}
+
+impl<S> PrefixedStream<S> {
+    fn new(prefix: Vec<u8>, inner: S) -> Self {
+        Self {
+            prefix: std::io::Cursor::new(prefix),
+            inner,
+        }
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for PrefixedStream<S> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        let pos = this.prefix.position() as usize;
+        let remaining = &this.prefix.get_ref()[pos..];
+        if !remaining.is_empty() {
+            let n = remaining.len().min(buf.remaining());
+            buf.put_slice(&remaining[..n]);
+            this.prefix.set_position((pos + n) as u64);
+            return Poll::Ready(Ok(()));
+        }
+        Pin::new(&mut this.inner).poll_read(cx, buf)
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for PrefixedStream<S> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    }
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+
+/// What `accept_and_route` did with one freshly accepted connection - the
+/// observable both bite tests assert on. `PassThrough` carries the stream
+/// back (bytes already peeked restored to the front) rather than a bool,
+/// so nothing about a non-viewer connection is lost.
+pub enum RouteOutcome<S> {
+    /// Was a viewer upgrade; handled (proxied, or refused) already.
+    Viewer(ProxyOutcome),
+    /// Not a viewer upgrade - the caller serves it normally.
+    PassThrough(PrefixedStream<S>),
+    /// No full request head ever arrived.
+    Unreadable,
+}
+
+/// Manual, not derived: `PrefixedStream<S>` has no reason to require
+/// `S: Debug`, and a test's `{outcome:?}` only ever needs to say WHICH
+/// variant this was, not print a stream's bytes.
+impl<S> std::fmt::Debug for RouteOutcome<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RouteOutcome::Viewer(outcome) => f.debug_tuple("Viewer").field(outcome).finish(),
+            RouteOutcome::PassThrough(_) => f.write_str("PassThrough(..)"),
+            RouteOutcome::Unreadable => f.write_str("Unreadable"),
+        }
+    }
+}
+
+/// The accept/route half of `attachVmProxy` (`vm.ts:686-741`): given one
+/// freshly accepted connection, decide whether it is a bot's screen
+/// (relayed via `attach_vm_proxy`'s own logic, `proxy_to_vm`/`refuse`) or
+/// ordinary traffic (`PassThrough`, untouched). This is the piece S6-06b's
+/// relay had no caller for - see this module's own header doc for why a
+/// route match alone is not enough (`viewer_target` matching plus an
+/// `Upgrade` header, together, is).
+///
+/// 🔴 Authorization boundary, same as `viewer_target`/`attach_vm_proxy`
+/// (S6-06b bite (a); this ticket's own bite (a) is the end-to-end version
+/// of that same guarantee): a request whose path names bot A must reach
+/// bot A's `VmRow.web_port` and nothing else - `resolve_viewer_target`'s
+/// `get_vm` lookup is the ONLY thing that decides that, by exact bot id,
+/// same as before.
+///
+/// Takes `db: &Db` directly - correct and sufficient for every test below,
+/// since a test simply `.await`s this in its own async fn without ever
+/// spawning it. `serve`'s own per-connection task, which DOES need to be
+/// `Send` for `tokio::spawn`, cannot call this function with a live
+/// `std::sync::MutexGuard<Db>` (or even a bare `&Db`, which is `!Send`
+/// since `Db: !Sync`) sitting across this function's `read_request_head`
+/// await - so `serve` does not call `accept_and_route` at all; it inlines
+/// the same three steps (read head, resolve with the lock held only for
+/// that one synchronous call, dispatch) so the lock is provably dropped
+/// before either `.await`. See `serve`'s own doc.
+pub async fn accept_and_route<S>(mut stream: S, db: &Db, require_auth: bool) -> RouteOutcome<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let Some(head) = read_request_head(&mut stream).await else {
+        return RouteOutcome::Unreadable;
+    };
+
+    if !head.is_upgrade {
+        return RouteOutcome::PassThrough(PrefixedStream::new(head.raw, stream));
+    }
+
+    let (path_only, query) = split_raw_target(&head.target);
+    match resolve_viewer_target(path_only, &head.headers, db, require_auth) {
+        Resolution::NotAViewerPath => {
+            RouteOutcome::PassThrough(PrefixedStream::new(head.raw, stream))
+        }
+        Resolution::Unauthorized => {
+            refuse(&mut stream, "401 Unauthorized").await;
+            RouteOutcome::Viewer(ProxyOutcome::Unauthorized)
+        }
+        Resolution::UnknownBot => {
+            refuse(&mut stream, "404 Not Found").await;
+            RouteOutcome::Viewer(ProxyOutcome::UnknownBot)
+        }
+        Resolution::Ready { target, web_port } => RouteOutcome::Viewer(
+            proxy_to_vm(stream, &target, &query, &head.headers, web_port).await,
+        ),
+    }
+}
+
+/// Runs the whole server: `accept_and_route`'s logic per connection
+/// (inlined, not called - see `accept_and_route`'s own doc for why),
+/// dispatching a bot-screen upgrade straight to `proxy_to_vm`/`refuse` and
+/// everything else to `app` (the ordinary axum `Router`) through a manual
+/// HTTP/1 connection. This is the actual replacement for
+/// `axum::serve(listener, app).await` - main.rs's one-line swap, landed by
+/// the orchestrator per this ticket's file-ownership rule.
+///
+/// **Nothing in this crate has run this against a real browser or a real
+/// container** (no Docker, no browser on this workstation - S6's own
+/// constraint). What IS proven here: `cargo check` accepts this against
+/// the real `axum::Router`/`store::Db` types, and `accept_and_route`
+/// (identical routing/refusal logic, minus the lock-scoping this function
+/// exists to get right) is green against both bites. The meridian smoke
+/// test is still the only proof a real socket makes it through.
+pub async fn serve(
+    listener: tokio::net::TcpListener,
+    app: axum::Router,
+    db: Arc<Mutex<Db>>,
+    require_auth: bool,
+) -> std::io::Result<()> {
+    loop {
+        let (stream, _addr) = listener.accept().await?;
+        let app = app.clone();
+        let db = Arc::clone(&db);
+        tokio::spawn(async move {
+            route_one_connection(stream, app, db, require_auth).await;
+        });
+    }
+}
+
+async fn route_one_connection(
+    mut stream: tokio::net::TcpStream,
+    app: axum::Router,
+    db: Arc<Mutex<Db>>,
+    require_auth: bool,
+) {
+    let Some(head) = read_request_head(&mut stream).await else {
+        return;
+    };
+
+    if !head.is_upgrade {
+        serve_via_hyper(PrefixedStream::new(head.raw, stream), app).await;
+        return;
+    }
+
+    let (path_only, query) = split_raw_target(&head.target);
+
+    // The lock lives only inside this block, around one synchronous call -
+    // `resolve_viewer_target` never `.await`s (see its own doc) - so the
+    // `MutexGuard` (never `Send`) is dropped here, before either `.await`
+    // below, and never becomes part of this `tokio::spawn`ed task's state.
+    let resolution = {
+        let guard = db.lock().unwrap_or_else(PoisonError::into_inner);
+        resolve_viewer_target(path_only, &head.headers, &guard, require_auth)
+    };
+
+    match resolution {
+        Resolution::NotAViewerPath => {
+            serve_via_hyper(PrefixedStream::new(head.raw, stream), app).await;
+        }
+        Resolution::Unauthorized => {
+            refuse(&mut stream, "401 Unauthorized").await;
+        }
+        Resolution::UnknownBot => {
+            refuse(&mut stream, "404 Not Found").await;
+        }
+        Resolution::Ready { target, web_port } => {
+            proxy_to_vm(stream, &target, &query, &head.headers, web_port).await;
+        }
+    }
+}
+
+/// Ordinary traffic's path: one manual hyper HTTP/1 connection over
+/// `io`, calling straight into `app`. The documented axum pattern for
+/// serving a `Router` without `axum::serve` (`hyper::server::conn::http1`
+/// plus `hyper_util::rt::TokioIo`) - needed here only because this
+/// listener's accept loop has to look at the raw bytes of each connection
+/// BEFORE anything is parsed as a request (see this section's own header
+/// doc); `axum::serve` alone still works fine for a process with no
+/// viewer proxy at all.
+async fn serve_via_hyper<S>(io: S, app: axum::Router)
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let io = hyper_util::rt::TokioIo::new(io);
+    let hyper_service =
+        hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+            let app = app.clone();
+            async move {
+                let req = req.map(axum::body::Body::new);
+                let response = tower::ServiceExt::oneshot(app, req)
+                    .await
+                    .unwrap_or_else(|err: std::convert::Infallible| match err {});
+                Ok::<_, std::convert::Infallible>(response)
+            }
+        });
+    let _ = hyper::server::conn::http1::Builder::new()
+        .serve_connection(io, hyper_service)
+        .with_upgrades()
+        .await;
 }

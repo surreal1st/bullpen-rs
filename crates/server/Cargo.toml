@@ -46,6 +46,10 @@ regex = { workspace = true }
 aes-gcm = { workspace = true }
 base64 = { workspace = true }
 rand = { workspace = true }
+# S6-07: `vm_proxy::serve`'s accept/route loop - see the root `Cargo.toml`'s
+# comment for why these two and not a websocket crate.
+hyper = { workspace = true }
+hyper-util = { workspace = true }
 
 [dev-dependencies]
 # S0-04: driving `build_app` in tests via `tower::ServiceExt::oneshot`, and

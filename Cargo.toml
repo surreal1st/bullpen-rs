@@ -45,6 +45,16 @@ regex = "1"
 aes-gcm = "0.10"
 base64 = "0.22"
 rand = "0.8"
+# S6-07: the accept-and-route wiring for `vm_proxy::serve` needs to take
+# over a raw connection BEFORE any HTTP response is written (mirroring
+# Node's `server.on("upgrade")` timing - see `vm_proxy.rs`'s own doc), which
+# `axum::serve` has no hook for. Both are already transitive under axum
+# (`axum::serve` is built on them); this exposes what's already in the tree
+# rather than adding a stack. Approved by the orchestrator per
+# `.scratch/bullpen-rs/tickets/S6-tickets.md` S6-07 - do not add a third
+# HTTP/websocket crate without the same sign-off.
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["http1", "server", "tokio", "service"] }
 
 [profile.release]
 lto = "thin"
