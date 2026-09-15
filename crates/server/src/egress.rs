@@ -111,6 +111,16 @@ fn is_ipv6_link_local(v6: Ipv6Addr) -> bool {
     (v6.segments()[0] & 0xffc0) == 0xfe80
 }
 
+/// `fec0::/10` - site-local, deprecated by RFC 3879 but still parseable and
+/// still configurable on a real internal network, which is the only thing
+/// that matters to an SSRF guard. S6-F-01 left it classified public and
+/// flagged the uncertainty; the orchestrator's call is to refuse it, on the
+/// same reasoning every SSRF blocklist does: "deprecated" describes the
+/// standards process, not what an attacker can reach.
+fn is_ipv6_site_local(v6: Ipv6Addr) -> bool {
+    (v6.segments()[0] & 0xffc0) == 0xfec0
+}
+
 /// IPv4-compatible IPv6 (RFC 4291 2.5.5.1, deprecated but still parseable):
 /// `::a.b.c.d` - the high 96 bits are zero and the low 32 are an IPv4
 /// address. Distinct from IPv4-*mapped* (`::ffff:a.b.c.d`, handled by
@@ -139,7 +149,7 @@ fn is_private_ipv6(v6: Ipv6Addr) -> bool {
     if v6.is_loopback() || v6.is_unspecified() {
         return true;
     }
-    if is_ipv6_link_local(v6) || is_ipv6_unique_local(v6) {
+    if is_ipv6_link_local(v6) || is_ipv6_unique_local(v6) || is_ipv6_site_local(v6) {
         return true;
     }
     if let Some(v4) = v6.to_ipv4_mapped() {
@@ -583,9 +593,11 @@ mod tests {
             ("fe7f::1", false, "just below fe80::/10"),
             (
                 "fec0::1",
-                false,
-                "fec0::/10 (deprecated site-local), outside fe80::/10",
+                true,
+                "fec0::/10 site-local: RFC 3879 deprecated it, an internal                  network can still use it, so an SSRF guard refuses it",
             ),
+            ("feff:ffff::1", true, "top of fec0::/10"),
+            ("fe40::1", false, "below fe80::/10, not site-local either"),
             ("fdff:ffff::1", true, "top of fc00::/7"),
             ("fe00::1", false, "just above fc00::/7"),
             ("100.63.255.255", false, "just below CGNAT 100.64.0.0/10"),
