@@ -17,6 +17,7 @@ mod rail;
 mod room_picker;
 mod routines_editor;
 mod settings;
+mod slack_card;
 mod thread;
 mod types;
 mod working_bar;
