@@ -11,6 +11,7 @@ mod migrations;
 pub mod questions;
 pub mod rooms;
 pub mod roster;
+pub mod routines;
 
 pub use auth::{
     PasswordRecord, create_session, destroy_session, is_configured, password_record, session_valid,
@@ -31,6 +32,11 @@ pub use messages::{NewMessage, Usage, append_message, delete_message, list_messa
 pub use questions::{OpenQuestion, answer_question, insert_question, list_all_open, list_open};
 pub use rooms::{create_room, get_room, list_rooms, mark_room_seen, mark_room_unread, update_room};
 pub use roster::{first_line, list_roster};
+pub use routines::{
+    Condition, HealthOutcome, Routine, RoutineRow, RoutineRun, UpdateRoutineFields, create_routine,
+    delete_routine, due_routines, list_routines, record_routine_run, resume_routine, routine_by_id,
+    routine_runs, set_routine_active, update_routine,
+};
 
 use rusqlite::{Connection, OptionalExtension, params};
 use std::time::Duration;
@@ -129,6 +135,7 @@ impl Db {
         )?;
 
         questions::ensure_table(&db)?;
+        routines::ensure_routine_columns(&db)?;
 
         Ok(db)
     }
