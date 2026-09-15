@@ -16,6 +16,13 @@
 //! in - `cargo test` compiles `tests/runs.rs` and `tests/rooms.rs` as
 //! separate crates, and each only exercises the doubles its own scenarios
 //! need.
+//!
+//! **Routing and the judge are ON by default** - every test-db helper that
+//! calls `model::routing::set_routing_settings` disables routing to prevent
+//! a scripted test's first reply from being consumed by the classifier instead
+//! of the turn it scripted; the same helpers also disable the judge via
+//! `server::judge::set_judge_enabled` for the same reason (the judge makes
+//! an extra model call on risky tools).
 #![allow(dead_code)]
 
 use std::collections::VecDeque;

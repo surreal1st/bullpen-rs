@@ -37,6 +37,7 @@ fn open_db() -> Arc<Mutex<Db>> {
     let db = Db::open(":memory:").expect("open :memory: db");
     model::routing::set_routing_settings(&db, Some(false), None)
         .expect("disable routing classifier for scripted-model tests");
+    server::judge::set_judge_enabled(&db, false).expect("disable judge for scripted-model tests");
     Arc::new(Mutex::new(db))
 }
 
@@ -767,6 +768,7 @@ fn open_db_plain() -> Db {
     let db = Db::open(":memory:").expect("open :memory: db");
     model::routing::set_routing_settings(&db, Some(false), None)
         .expect("disable routing classifier for scripted-model tests");
+    server::judge::set_judge_enabled(&db, false).expect("disable judge for scripted-model tests");
     db
 }
 
