@@ -5,6 +5,7 @@ pub mod approvals;
 mod auth;
 pub mod changes;
 mod error;
+pub mod hooks;
 pub mod judge;
 pub mod permissions;
 pub mod prompt;
