@@ -5,6 +5,7 @@ pub mod auth;
 pub mod auto_review;
 pub mod bots;
 pub mod conversations;
+pub mod goals;
 pub mod memory;
 pub mod messages;
 mod migrations;
@@ -136,6 +137,7 @@ impl Db {
 
         questions::ensure_table(&db)?;
         routines::ensure_routine_columns(&db)?;
+        goals::ensure_goal_tables(&db)?;
 
         Ok(db)
     }
