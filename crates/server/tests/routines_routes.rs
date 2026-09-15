@@ -568,6 +568,61 @@ async fn created_routine_holds_the_ts_json_schedule_shape() {
     );
 }
 
+/// S5-F-02 (F3): the actual STORED column, not just the wire response.
+/// `routine_wire_json`'s read side reconstructs the wire `schedule` object
+/// via `schedule::parse_schedule`, which (deliberately, for legacy rows)
+/// accepts a stored PHRASE just as readily as stored JSON - so a
+/// wire-only assertion (like the test above) cannot tell "the route wrote
+/// JSON" from "the route wrote the phrase and the reader papered over
+/// it". A file-backed db (not `:memory:`) lets a second, independent
+/// connection read back the exact bytes the route wrote, the way a live
+/// TS Bullpen's `JSON.parse(row.schedule)` would see them.
+#[tokio::test]
+async fn created_routine_writes_ts_json_to_the_column_not_the_phrase() {
+    let temp_dir = tempfile::TempDir::new().expect("create temp dir");
+    let db_path = temp_dir
+        .path()
+        .join("bullpen.db")
+        .to_str()
+        .expect("utf8 path")
+        .to_string();
+
+    let db = Db::open(&db_path).expect("open file db");
+    let session = seed_session(&db);
+    let bot_id = create_test_bot(&db);
+    let app = app_for(db);
+
+    let (status, body) = post_with_auth(
+        &app,
+        "/api/routines",
+        &session,
+        json!({
+            "botId": &bot_id,
+            "name": "Test",
+            "prompt": "Do something",
+            "schedule": "every 15 minutes",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let routine_id = body
+        .get("routine")
+        .and_then(|r| r.get("id"))
+        .and_then(|v| v.as_str())
+        .unwrap()
+        .to_string();
+
+    let readback = Db::open(&db_path).expect("reopen file db");
+    let stored = store::routine_by_id(&readback, &routine_id)
+        .expect("query")
+        .expect("routine exists")
+        .schedule;
+    assert_eq!(
+        stored, r#"{"kind":"interval","minutes":15}"#,
+        "the column must hold the TS JSON shape, not the typed phrase"
+    );
+}
+
 /// S5-F-02 (F3): a `PATCH` that changes the schedule must re-encode the new
 /// phrase as TS JSON too, not just recompute `nextRunAt`.
 #[tokio::test]
