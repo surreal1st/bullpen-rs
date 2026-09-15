@@ -609,6 +609,52 @@ pub fn due_routines(db: &Db, now: &str) -> rusqlite::Result<Vec<RoutineRow>> {
     Ok(routines)
 }
 
+/// S5c-03: every active routine configured for one `hook_kind` - what the
+/// Slack Events route (`crates/server/src/routes/slack.rs`) offers each
+/// inbound event to, port of the TS `activeRoutinesByHookKind`
+/// (`app.ts:2697`). Same row shape and column list as `due_routines`/
+/// `routine_row_by_id` above; unlike `due_routines` this does not filter on
+/// `next_run_at` at all - a hook-triggered routine has no schedule to be due
+/// against, only `active`.
+pub fn active_routines_by_hook_kind(db: &Db, kind: &str) -> rusqlite::Result<Vec<RoutineRow>> {
+    let mut stmt = db.conn().prepare(
+        "SELECT id, bot_id, name, prompt, schedule, active, next_run_at, last_run_at,
+                tools, kind, tool, tool_args, hook_secret, hook_kind, hook_events, hook_match,
+                conditions, second_opinion, consecutive_failures, paused_reason, last_error
+         FROM routines WHERE active = 1 AND hook_kind = ?1",
+    )?;
+
+    let routines = stmt
+        .query_map(params![kind], |row| {
+            Ok(RoutineRow {
+                id: row.get(0)?,
+                bot_id: row.get(1)?,
+                name: row.get(2)?,
+                prompt: row.get(3)?,
+                schedule: row.get(4)?,
+                active: row.get(5)?,
+                next_run_at: row.get(6)?,
+                last_run_at: row.get(7)?,
+                tools: row.get(8)?,
+                kind: row.get(9)?,
+                tool: row.get(10)?,
+                tool_args: row.get(11)?,
+                hook_secret: row.get(12)?,
+                hook_kind: row.get(13)?,
+                hook_events: row.get(14)?,
+                hook_match: row.get(15)?,
+                conditions: row.get(16)?,
+                second_opinion: row.get(17)?,
+                consecutive_failures: row.get(18)?,
+                paused_reason: row.get(19)?,
+                last_error: row.get(20)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(routines)
+}
+
 /// Record the outcome of a routine run for health tracking.
 pub fn record_routine_run(
     db: &Db,
