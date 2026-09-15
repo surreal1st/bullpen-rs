@@ -20,16 +20,34 @@
 //! covers the ordinary case (server restart, network drop), but not the
 //! specific "technically open, silently stuck" case the original was
 //! written for. Worth adding if S1-07b's wiring hits that symptom.
+//!
+//! S13a-01: `gloo_net::eventsource` and `gloo_timers` are browser-only
+//! (`Cargo.toml` now gates both to wasm32), so `run()` below is two
+//! implementations behind one `#[cfg]`: the wasm32 half is this module's
+//! original `EventSource` loop, untouched; the native half drives the same
+//! `/api/events` stream through `crate::transport::Request`'s byte-chunk
+//! reader instead (`transport::native::NativeBody`, the same one
+//! `api.rs::send_message` reads), splitting on `\n` and feeding each
+//! `data: ...` line to the same `parse_change` both platforms share. 🔴
+//! Unverified at runtime - `subscribe_events` still has no caller (see
+//! above), so the native half has only been proven by `cargo check`, not by
+//! a real desktop build; whichever ticket wires the first native subscriber
+//! should give it a real look, in particular whether `dioxus::prelude::spawn`
+//! (used here in place of wasm's `wasm_bindgen_futures::spawn_local`, which
+//! does not exist off wasm32) is being called from a live component scope
+//! every time `subscribe_events` is.
 
 #![allow(dead_code)]
 
-use futures::StreamExt;
-use gloo_net::eventsource::futures::EventSource;
-use gloo_timers::future::TimeoutFuture;
 use serde::Deserialize;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
+
+#[cfg(target_arch = "wasm32")]
+use futures::StreamExt;
+#[cfg(target_arch = "wasm32")]
+use gloo_net::eventsource::futures::EventSource;
 
 /// What changed on the server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,12 +133,25 @@ pub fn subscribe_events(on_change: impl Fn(ChangeKind) + 'static) -> EventsHandl
     });
     LISTENERS.with(|l| l.borrow_mut().insert(id, Rc::new(on_change)));
     if !RUNNING.with(|r| r.replace(true)) {
-        wasm_bindgen_futures::spawn_local(run());
+        spawn_stream();
     }
     EventsHandle { id }
 }
 
+#[cfg(target_arch = "wasm32")]
+fn spawn_stream() {
+    wasm_bindgen_futures::spawn_local(run());
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn spawn_stream() {
+    dioxus::prelude::spawn(run());
+}
+
+#[cfg(target_arch = "wasm32")]
 async fn run() {
+    use gloo_timers::future::TimeoutFuture;
+
     loop {
         if !RUNNING.with(Cell::get) {
             return;
@@ -146,6 +177,56 @@ async fn run() {
         // A dead stream (connect failure or an `error` event) is retried,
         // not given up on - ported from `events.ts`'s `reconnectTimer`.
         TimeoutFuture::new(3_000).await;
+    }
+}
+
+/// Native's twin of the wasm `run()` above - see this module's top doc for
+/// why it exists and its one open question. Same buffering `api.rs::feed`
+/// uses for the run-message SSE stream, applied to `/api/events`'s change
+/// frames instead.
+#[cfg(not(target_arch = "wasm32"))]
+async fn run() {
+    loop {
+        if !RUNNING.with(Cell::get) {
+            return;
+        }
+        if let Ok(resp) = crate::transport::Request::get("/api/events").send().await {
+            let mut stream = resp.into_body_stream();
+            let mut buffer: Vec<u8> = Vec::new();
+            loop {
+                if !RUNNING.with(Cell::get) {
+                    return;
+                }
+                let Ok(Some(chunk)) = stream.next_chunk().await else {
+                    break;
+                };
+                buffer.extend_from_slice(&chunk);
+                while let Some(pos) = buffer.iter().position(|&b| b == b'\n') {
+                    let mut line: Vec<u8> = buffer.drain(..=pos).collect();
+                    line.pop(); // the '\n'
+                    if line.last() == Some(&b'\r') {
+                        line.pop();
+                    }
+                    let line = String::from_utf8_lossy(&line);
+                    let Some(payload) = line.strip_prefix("data:") else {
+                        continue;
+                    };
+                    let payload = payload.trim();
+                    if payload.is_empty() {
+                        continue;
+                    }
+                    if let Some(kind) = parse_change(payload) {
+                        notify(kind);
+                    }
+                }
+            }
+        }
+        if !RUNNING.with(Cell::get) {
+            return;
+        }
+        // Same reconnect posture as the wasm build's `TimeoutFuture::new`
+        // above - a dead stream is retried, not given up on.
+        tokio::time::sleep(std::time::Duration::from_millis(3_000)).await;
     }
 }
 

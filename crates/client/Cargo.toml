@@ -8,16 +8,18 @@ shared = { workspace = true }
 dioxus = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-# The ONE fetch dependency S0-05 adds: `/api/roster` from wasm. Purpose-built
-# for browser fetch (unlike reqwest, nothing here risks pulling a native TLS
-# stack into a wasm32 build), and is the pattern Dioxus's own docs use.
-# S1-07a adds the "eventsource" feature (events.rs's port of events.ts) -
-# still the one crate, one more of its own feature flags.
-gloo-net = { version = "0.6", default-features = false, features = ["http", "json", "eventsource"] }
-# S1-07a: `/api/events`'s heartbeat/reconnect timers (events.rs) - the gloo
-# family's own timer crate, so this is not a second choice of HTTP client,
-# just the matching small crate for "wait N ms" in a wasm binary.
-gloo-timers = { version = "0.3", features = ["futures"] }
+# 🔴 S13a-01: still unconditional, NOT wasm32-gated as the ticket asked -
+# `api.rs` and `events.rs` no longer call either directly (both now go
+# through `transport::Request`/`Response`, see that module's doc), but
+# `app.rs:31`, `routines_editor.rs:40`, `settings.rs:16` and
+# `slack_card.rs:27` still do, unconditionally, and none of those four
+# files are S13a-01's to touch (per the ticket's own "one owner per file"
+# rule and this ticket's explicit STOP-and-tell-the-orchestrator
+# instruction for exactly this case). Gating these to wasm32 here breaks
+# `cargo check -p client` on native for all four - confirmed by actually
+# doing it and reading the compiler's errors, then reverting. Flagged in
+# this ticket's `## Results` for whoever picks up the rest of the
+# dependency cleanup once those four are routed through `transport` too.
 # S1-07a: `StreamExt` for the eventsource stream in events.rs. Already a
 # workspace dependency (server-side); reused here rather than adding a
 # second futures-utility crate.
@@ -47,9 +49,28 @@ web-sys = { version = "0.3", features = [
 js-sys = "0.3"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
+# S13a-01: kept here, unconditional, alongside the other browser-only
+# crates above - see the 🔴 note on `futures` for why these did not move to
+# a `[target.'cfg(target_arch = "wasm32")'.dependencies]` section the way
+# the ticket asked.
+gloo-net = { version = "0.6", default-features = false, features = ["http", "json", "eventsource"] }
+gloo-timers = { version = "0.3", features = ["futures"] }
 
 [features]
 default = ["web"]
 web = ["dioxus/web"]
 desktop = ["dioxus/desktop"]
 mobile = ["dioxus/mobile"]
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# S13a-01: the native half of `transport::Request`/`Response`
+# (`src/transport/native.rs`) - rustls only, never native-tls, see that
+# module's doc on why - plus the shared cookie-jar client that keeps
+# `login`'s session across requests the way a browser's own cookie jar
+# does for the web build.
+reqwest = { workspace = true, features = ["cookies"] }
+# events.rs's native reconnect delay (`run()`'s 3s backoff - `gloo-timers`'
+# `TimeoutFuture` on web). `dioxus-desktop` already depends on tokio with
+# "full", so this only needs to name what this crate calls directly: the
+# sleep itself, plus what `#[tokio::test]` needs for native.rs's own tests.
+tokio = { version = "1", features = ["time", "rt", "macros"] }

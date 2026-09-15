@@ -3,6 +3,7 @@
 //! conversation), `:470-601` (`send`: POST messages, the SSE loop) and
 //! `:1424-1449` (`readSse`).
 
+use crate::transport::{Request, Response};
 use crate::types::{
     ApprovalsResponse, AuthStatus, AutoReviewLogEntry, AutoReviewLogResponse, AutoReviewState, Bot,
     BotPatchResponse, BotToolsField, ConversationView, CoreStatus, Goal, MadeTool, MemoryEntry,
@@ -12,7 +13,6 @@ use crate::types::{
     RulesField, SharedCoreField, SharedLogField, Tier1Models, Tier1Response, WorkingBot,
     WorkingResponse,
 };
-use gloo_net::http::{Request, Response};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -359,14 +359,17 @@ struct LoginError {
 }
 
 /// `POST /api/auth/login` - ported from `Gate.tsx:88-123`'s `signIn`. The
-/// server answers with a `Set-Cookie` on success; `credentials: include` is
-/// belt-and-suspenders for a same-origin fetch (the browser default already
-/// sends cookies here), kept explicit per the ticket's own instruction so a
-/// future reverse-proxy split between client and API origins does not
-/// silently drop the session cookie.
+/// server answers with a `Set-Cookie` on success; `with_credentials()` is
+/// belt-and-suspenders for a same-origin fetch on web (the browser default
+/// already sends cookies here), kept explicit per the ticket's own
+/// instruction so a future reverse-proxy split between client and API
+/// origins does not silently drop the session cookie. S13a-01: on native
+/// this is a no-op - `transport::native`'s shared client already carries
+/// the session cookie via its own cookie store, with no per-request browser
+/// cookie jar to opt into.
 pub async fn login(password: &str) -> Result<(), String> {
     let resp = Request::post("/api/auth/login")
-        .credentials(web_sys::RequestCredentials::Include)
+        .with_credentials()
         .json(&LoginBody { password })
         .map_err(|e| e.to_string())?
         .send()
@@ -394,17 +397,19 @@ struct SendBody<'a> {
 /// calls `on_event` zero times and returns `Ok(())`, same as the original.
 /// `thread_id` posts into a room's own conversation rather than the owner
 /// bot's default one - see `fetch_conversation`'s doc.
-#[cfg(feature = "web")]
+///
+/// S13a-01: this used to be wasm-only (`#[cfg(feature = "web")]`), reading
+/// the body through a raw `web_sys::ReadableStreamDefaultReader` inline.
+/// That reader is now `transport::BodyStream` (`web.rs`'s `WebBody` on
+/// wasm32, `native.rs`'s `NativeBody` over `reqwest` everywhere else), so
+/// this function is unchanged in shape but portable: the same `feed()` byte
+/// buffering drives both platforms.
 pub async fn send_message(
     bot_id: &str,
     text: &str,
     thread_id: Option<&str>,
     mut on_event: impl FnMut(StreamEvent),
 ) -> Result<(), String> {
-    use wasm_bindgen::{JsCast, JsValue};
-    use wasm_bindgen_futures::JsFuture;
-    use web_sys::ReadableStreamDefaultReader;
-
     let url = format!("/api/bots/{bot_id}/messages");
     let resp = Request::post(&url)
         .json(&SendBody { text, thread_id })
@@ -417,31 +422,16 @@ pub async fn send_message(
         return Err(format!("{url} -> {}", resp.status()));
     }
 
-    let content_type = resp.headers().get("content-type").unwrap_or_default();
-    if content_type.contains("application/json") {
+    let is_json = resp
+        .content_type()
+        .is_some_and(|ct| ct.contains("application/json"));
+    if is_json {
         return Ok(());
     }
 
-    let stream = resp
-        .body()
-        .ok_or_else(|| "send returned no body".to_string())?;
-    let reader: ReadableStreamDefaultReader = stream.get_reader().unchecked_into();
-
+    let mut stream = resp.into_body_stream();
     let mut buffer = Vec::new();
-    loop {
-        let result = JsFuture::from(reader.read())
-            .await
-            .map_err(|e| format!("{e:?}"))?;
-        let done = js_sys::Reflect::get(&result, &JsValue::from_str("done"))
-            .map_err(|e| format!("{e:?}"))?
-            .as_bool()
-            .unwrap_or(true);
-        if done {
-            break;
-        }
-        let value = js_sys::Reflect::get(&result, &JsValue::from_str("value"))
-            .map_err(|e| format!("{e:?}"))?;
-        let chunk = js_sys::Uint8Array::new(&value).to_vec();
+    while let Some(chunk) = stream.next_chunk().await? {
         for event in feed(&mut buffer, &chunk) {
             on_event(event);
         }
@@ -485,9 +475,14 @@ async fn put_model_field(url: &str, model: &str) -> Result<String, String> {
             .map(|b| b.model)
             .map_err(|e| e.to_string());
     }
+    // S13a-01: `status` is captured before `.json()` consumes `resp` -
+    // `transport::Response::json` takes `self`, not `&self` (unlike
+    // `gloo_net::http::Response::json`), since the native half buffers a
+    // stream it can only read once.
+    let status = resp.status();
     match resp.json::<ModelError>().await {
         Ok(err) => Err(err.error),
-        Err(_) => Err(format!("{url} -> {}", resp.status())),
+        Err(_) => Err(format!("{url} -> {status}")),
     }
 }
 
@@ -548,9 +543,12 @@ pub async fn put_tier1_model(kind: &str, model: &str) -> Result<String, String> 
             .map(|b| b.model)
             .map_err(|e| e.to_string());
     }
+    // S13a-01: see `put_model_field`'s comment above on why `status` must
+    // be captured before `.json()`.
+    let status = resp.status();
     match resp.json::<ModelError>().await {
         Ok(err) => Err(err.error),
-        Err(_) => Err(format!("/api/tier1-models -> {}", resp.status())),
+        Err(_) => Err(format!("/api/tier1-models -> {status}")),
     }
 }
 
@@ -666,10 +664,11 @@ pub async fn put_rules(rules: &str) -> Result<String, String> {
 }
 
 /// `GET /api/models?q=...`, `all=1` for the full catalogue - ported from
-/// `ModelPicker.tsx`'s own fetch. `js_sys::encode_uri_component` matches the
-/// TS `encodeURIComponent` this is a straight port of.
+/// `ModelPicker.tsx`'s own fetch. `transport::encode_uri_component` matches
+/// the TS `encodeURIComponent` this is a straight port of (S13a-01: was
+/// `js_sys::encode_uri_component`, wasm-only - see that function's doc).
 pub async fn fetch_models(query: &str, show_all: bool) -> Result<ModelsResponse, String> {
-    let encoded: String = js_sys::encode_uri_component(query).into();
+    let encoded = crate::transport::encode_uri_component(query);
     let url = if show_all {
         format!("/api/models?all=1&q={encoded}")
     } else {
@@ -755,9 +754,12 @@ pub async fn patch_bot(bot_id: &str, body: serde_json::Value) -> Result<Bot, Str
             .map(|b| b.bot)
             .map_err(|e| e.to_string());
     }
+    // S13a-01: see `put_model_field`'s comment on why `status` must be
+    // captured before `.json()`.
+    let status = resp.status();
     match resp.json::<ModelError>().await {
         Ok(err) => Err(err.error),
-        Err(_) => Err(format!("{url} -> {}", resp.status())),
+        Err(_) => Err(format!("{url} -> {status}")),
     }
 }
 
@@ -772,7 +774,7 @@ pub async fn fetch_bot_memory_query(bot_id: &str, query: &str) -> Result<MemoryV
     let url = if query.is_empty() {
         format!("/api/bots/{bot_id}/memory")
     } else {
-        let encoded: String = js_sys::encode_uri_component(query).into();
+        let encoded = crate::transport::encode_uri_component(query);
         format!("/api/bots/{bot_id}/memory?q={encoded}")
     };
     let resp = Request::get(&url).send().await.map_err(|e| e.to_string())?;
@@ -1142,9 +1144,12 @@ pub async fn mint_routine_hook(id: &str) -> Result<(String, String), String> {
         .await
         .map_err(|e| e.to_string())?;
     if !resp.ok() {
+        // S13a-01: see `put_model_field`'s comment on why `status` must be
+        // captured before `.json()`.
+        let status = resp.status();
         return match resp.json::<RoutineError>().await {
             Ok(err) => Err(err.error),
-            Err(_) => Err(format!("{url} -> {}", resp.status())),
+            Err(_) => Err(format!("{url} -> {status}")),
         };
     }
     resp.json::<HookMintField>()
@@ -1241,9 +1246,12 @@ pub async fn preview_schedule(schedule: &str) -> Result<String, String> {
         .await
         .map_err(|e| e.to_string())?;
     if !resp.ok() {
+        // S13a-01: see `put_model_field`'s comment on why `status` must be
+        // captured before `.json()`.
+        let status = resp.status();
         return match resp.json::<RoutineError>().await {
             Ok(err) => Err(err.error),
-            Err(_) => Err(format!("/api/routines/preview -> {}", resp.status())),
+            Err(_) => Err(format!("/api/routines/preview -> {status}")),
         };
     }
     resp.json::<PreviewOk>()
@@ -1269,9 +1277,12 @@ pub async fn run_routine_now(id: &str) -> Result<String, String> {
         .await
         .map_err(|e| e.to_string())?;
     if !resp.ok() {
+        // S13a-01: see `put_model_field`'s comment on why `status` must be
+        // captured before `.json()`.
+        let status = resp.status();
         return match resp.json::<RoutineError>().await {
             Ok(err) => Err(err.error),
-            Err(_) => Err(format!("{url} -> {}", resp.status())),
+            Err(_) => Err(format!("{url} -> {status}")),
         };
     }
     resp.json::<RunIdField>()
@@ -1433,9 +1444,12 @@ pub async fn run_goal_now(id: &str) -> Result<String, String> {
         .await
         .map_err(|e| e.to_string())?;
     if !resp.ok() {
+        // S13a-01: see `put_model_field`'s comment on why `status` must be
+        // captured before `.json()`.
+        let status = resp.status();
         return match resp.json::<GoalError>().await {
             Ok(err) => Err(err.error),
-            Err(_) => Err(format!("{url} -> {}", resp.status())),
+            Err(_) => Err(format!("{url} -> {status}")),
         };
     }
     resp.json::<RunIdField>()
