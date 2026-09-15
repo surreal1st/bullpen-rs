@@ -25,7 +25,11 @@ pub mod settings_secrets;
 pub mod slack;
 pub mod spend;
 pub mod teams;
-mod tools;
+// `pub` rather than crate-private so `tests/browse_tools.rs` can reach
+// `server::tools::browse`: Rust visibility is not transitive around a
+// private ancestor, so no amount of `pub` on the items mattered while this
+// module stayed private (S6-W-03).
+pub mod tools;
 pub mod vm;
 pub mod vm_proxy;
 pub mod workers;
@@ -102,10 +106,25 @@ pub struct AppState {
     /// `on_run_done` hook `build` wires below. See that hook's doc for the
     /// race this ordering does and does not close.
     pending_slack_replies: Arc<Mutex<HashMap<String, PendingSlackReply>>>,
+    /// S6-W-01: the production `DockerRun` for `vm.rs`, chosen by
+    /// `BULLPEN_VM` (`vm::default_docker_run`) - `vm::DisabledDockerRun` when
+    /// off, so a route that forgets its own `vm_enabled` check still cannot
+    /// reach a real container.
+    pub vm_docker: Arc<dyn vm::DockerRun>,
+    /// S6-W-01: `Arc`, not a bare `store::vms::VmConfig` - the struct itself
+    /// derives no `Clone`, and `AppState` (which does) would not compile
+    /// holding one by value.
+    pub vm_config: Arc<store::vms::VmConfig>,
+    /// S6-W-01: whether this server runs VMs at all - `store::vms::vms_enabled`
+    /// read once at construction, same convention `sandbox`'s `BULLPEN_SANDBOX`
+    /// check already uses.
+    pub vm_enabled: bool,
 }
 
 impl AppState {
     pub fn new(db: Db) -> Self {
+        let vm_config = default_vm_config();
+        let vm_docker = default_vm_docker(&vm_config);
         Self::build(
             db,
             default_client_root(),
@@ -114,10 +133,15 @@ impl AppState {
             default_credits(),
             default_sandbox(),
             default_slack_api(),
+            vm_docker,
+            vm_config,
+            default_vm_enabled(),
         )
     }
 
     pub fn with_client_root(db: Db, client_root: String) -> Self {
+        let vm_config = default_vm_config();
+        let vm_docker = default_vm_docker(&vm_config);
         Self::build(
             db,
             client_root,
@@ -126,6 +150,9 @@ impl AppState {
             default_credits(),
             default_sandbox(),
             default_slack_api(),
+            vm_docker,
+            vm_config,
+            default_vm_enabled(),
         )
     }
 
@@ -134,6 +161,8 @@ impl AppState {
     /// resolution `new` uses - the seam route tests need to drive real runs
     /// without an OpenRouter key.
     pub fn with_port(db: Db, port: Arc<dyn model::ModelPort>) -> Self {
+        let vm_config = default_vm_config();
+        let vm_docker = default_vm_docker(&vm_config);
         Self::build(
             db,
             default_client_root(),
@@ -142,11 +171,16 @@ impl AppState {
             default_credits(),
             default_sandbox(),
             default_slack_api(),
+            vm_docker,
+            vm_config,
+            default_vm_enabled(),
         )
     }
 
     /// S2-06: lets a test swap in a fixture catalog while keeping the same port.
     pub fn with_catalog(db: Db, catalog: Arc<dyn Catalog>) -> Self {
+        let vm_config = default_vm_config();
+        let vm_docker = default_vm_docker(&vm_config);
         Self::build(
             db,
             default_client_root(),
@@ -155,6 +189,9 @@ impl AppState {
             default_credits(),
             default_sandbox(),
             default_slack_api(),
+            vm_docker,
+            vm_config,
+            default_vm_enabled(),
         )
     }
 
@@ -162,6 +199,8 @@ impl AppState {
     /// while keeping the same port/catalog `new` uses - the 402/warning
     /// HTTP cases only need this to differ from `new`.
     pub fn with_credits(db: Db, credits: Arc<dyn spend::CreditsPort>) -> Self {
+        let vm_config = default_vm_config();
+        let vm_docker = default_vm_docker(&vm_config);
         Self::build(
             db,
             default_client_root(),
@@ -170,12 +209,17 @@ impl AppState {
             credits,
             default_sandbox(),
             default_slack_api(),
+            vm_docker,
+            vm_config,
+            default_vm_enabled(),
         )
     }
 
     /// S6L-01: lets a test swap in a scripted `Sandbox` (e.g. `FakeRunner`)
     /// while keeping the same port/catalog/credits the `new` uses.
     pub fn with_sandbox(db: Db, sandbox: Arc<dyn sandbox::Sandbox>) -> Self {
+        let vm_config = default_vm_config();
+        let vm_docker = default_vm_docker(&vm_config);
         Self::build(
             db,
             default_client_root(),
@@ -184,6 +228,33 @@ impl AppState {
             default_credits(),
             sandbox,
             default_slack_api(),
+            vm_docker,
+            vm_config,
+            default_vm_enabled(),
+        )
+    }
+
+    /// S6-W-01: lets a test swap in a scripted `vm::DockerRun`
+    /// (`RecordingDockerRun`) and drive `vm_enabled` directly, without
+    /// touching the real `BULLPEN_VM` env var - the two-worlds bite
+    /// (enabled vs `BULLPEN_VM` off) needs both states in one process.
+    pub fn with_vm(
+        db: Db,
+        docker: Arc<dyn vm::DockerRun>,
+        vm_config: store::vms::VmConfig,
+        vm_enabled: bool,
+    ) -> Self {
+        Self::build(
+            db,
+            default_client_root(),
+            default_port(),
+            default_catalog(),
+            default_credits(),
+            default_sandbox(),
+            default_slack_api(),
+            docker,
+            Arc::new(vm_config),
+            vm_enabled,
         )
     }
 
@@ -196,6 +267,8 @@ impl AppState {
         port: Arc<dyn model::ModelPort>,
         credits: Arc<dyn spend::CreditsPort>,
     ) -> Self {
+        let vm_config = default_vm_config();
+        let vm_docker = default_vm_docker(&vm_config);
         Self::build(
             db,
             default_client_root(),
@@ -204,6 +277,9 @@ impl AppState {
             credits,
             default_sandbox(),
             default_slack_api(),
+            vm_docker,
+            vm_config,
+            default_vm_enabled(),
         )
     }
 
@@ -211,6 +287,8 @@ impl AppState {
     /// the same port/catalog/credits/sandbox `new` uses - the config/status/
     /// connect route tests that only care about the Slack seam.
     pub fn with_slack_api(db: Db, slack_api: Arc<dyn slack::SlackApi + Send + Sync>) -> Self {
+        let vm_config = default_vm_config();
+        let vm_docker = default_vm_docker(&vm_config);
         Self::build(
             db,
             default_client_root(),
@@ -219,6 +297,9 @@ impl AppState {
             default_credits(),
             default_sandbox(),
             slack_api,
+            vm_docker,
+            vm_config,
+            default_vm_enabled(),
         )
     }
 
@@ -230,6 +311,8 @@ impl AppState {
         port: Arc<dyn model::ModelPort>,
         slack_api: Arc<dyn slack::SlackApi + Send + Sync>,
     ) -> Self {
+        let vm_config = default_vm_config();
+        let vm_docker = default_vm_docker(&vm_config);
         Self::build(
             db,
             default_client_root(),
@@ -238,6 +321,9 @@ impl AppState {
             default_credits(),
             default_sandbox(),
             slack_api,
+            vm_docker,
+            vm_config,
+            default_vm_enabled(),
         )
     }
 
@@ -250,6 +336,9 @@ impl AppState {
         credits: Arc<dyn spend::CreditsPort>,
         sandbox: Arc<dyn sandbox::Sandbox>,
         slack_api: Arc<dyn slack::SlackApi + Send + Sync>,
+        vm_docker: Arc<dyn vm::DockerRun>,
+        vm_config: Arc<store::vms::VmConfig>,
+        vm_enabled: bool,
     ) -> Self {
         // F1: `routing_log` is self-creating (same convention as
         // `rules::ensure_table`), but nothing in production ever called it -
@@ -291,6 +380,9 @@ impl AppState {
             sandbox,
             slack_api,
             pending_slack_replies: Arc::new(Mutex::new(HashMap::new())),
+            vm_docker,
+            vm_config,
+            vm_enabled,
         };
 
         // S5b-04b: chains `settle_goal_run` onto `on_run_done` ADDITIVELY,
@@ -486,6 +578,34 @@ fn default_slack_api() -> Arc<dyn slack::SlackApi + Send + Sync> {
 /// every constructor above already calls.
 fn default_sandbox() -> Arc<dyn sandbox::Sandbox> {
     sandbox::default_sandbox()
+}
+
+/// S6-W-01: this process's own environment, snapshotted once - what every
+/// `vm::*`/`store::vms::*` env-gated default below reads from, matching the
+/// `&HashMap` signature `store::vms::vms_enabled`/`vm_config` already take.
+fn env_snapshot() -> HashMap<String, String> {
+    std::env::vars().collect()
+}
+
+/// The `VmConfig` a production server (or any constructor that does not
+/// override it) runs with - `BULLPEN_VM_*` env vars, same defaults
+/// `store::vms::vm_config` already documents.
+fn default_vm_config() -> Arc<store::vms::VmConfig> {
+    Arc::new(store::vms::vm_config(&env_snapshot()))
+}
+
+/// Whether this server runs VMs at all - `BULLPEN_VM=on`, off by default
+/// exactly like `BULLPEN_SANDBOX`.
+fn default_vm_enabled() -> bool {
+    store::vms::vms_enabled(&env_snapshot())
+}
+
+/// The production `vm::DockerRun` - real `docker` CLI calls when
+/// `BULLPEN_VM=on`, `vm::DisabledDockerRun` otherwise. See
+/// `vm::default_docker_run`'s own doc for why the choice is made twice (once
+/// here via `cfg`'s caller, once inside `DockerRun::call` itself).
+fn default_vm_docker(cfg: &store::vms::VmConfig) -> Arc<dyn vm::DockerRun> {
+    vm::default_docker_run(&env_snapshot(), cfg)
 }
 
 /// Fallback for anything the API router didn't match: `/api/*` gets a plain
