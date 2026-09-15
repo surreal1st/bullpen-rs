@@ -11,25 +11,19 @@
 //! quiet-hours gate there (TS `fireDue` has none). `goal-scheduler.ts:54-72`
 //! is this file's own source for the rule.
 //!
-//! 🔴 KNOWN GAP, flagged for the reviewer/orchestrator rather than worked
-//! around: TS wires `settleGoalRun` to `runs.onRunDone`, called by `app.ts`
-//! for EVERY finished run regardless of what started it. `RunManager::
-//! on_run_done` (`crates/server/src/runs.rs`) is a SINGLE-SLOT hook already
-//! claimed by `rooms::RoomEngine::install` (called from `AppState::build` in
-//! `crates/server/src/lib.rs`) to chain a room round - `runs.rs` and the body
-//! of `AppState::build` are both outside this ticket's owned files (the
-//! shared-tree protocol's three allowed edits are one `mod` line each in
-//! `lib.rs`/`routes/mod.rs` plus one call line in `main.rs`, none of which
-//! reach `on_run_done`). `settle_goal_run` below is fully ported and directly
-//! testable (mirrors TS exactly, called with an explicit `run_id`/`now`), but
-//! nothing in this file's own `start_goal_scheduler` calls it automatically
-//! for a run that finished on its own spawned task - `fire_due_goals`'s
-//! 30s tick only starts sessions, same as TS's own `startGoalScheduler`
-//! timer body (`goal-scheduler.ts:287-298`) does; TS's actual settling
-//! happens through the separate `onRunDone` wiring this file cannot reach.
-//! Production wiring needs either a multi-listener `on_run_done` on
-//! `RunManager` or an explicit call added to `AppState::build`, both one
-//! ticket away and both out of this one's scope.
+//! `settle_goal_run` below is fully ported (mirrors TS `settleGoalRun`,
+//! `goal-scheduler.ts:226-267`, exactly) AND wired to fire for every
+//! finished run, same as TS's `onRunDone`: `AppState::build`
+//! (`crates/server/src/lib.rs`, S5b-04b) chains it onto `RunManager::
+//! add_on_run_done` ADDITIVELY, alongside `rooms::RoomEngine::install`'s
+//! own room-round chain (which claims the hook first via
+//! `set_on_run_done`) - `add_on_run_done` composes rather than replacing,
+//! so both fire. `settle_goal_run` itself no-ops for a run whose `goal_id`
+//! is null, so an ordinary chat/routine/room run costs one no-op lookup
+//! there. This was a known gap as of S5b-04's own landing (no
+//! `add_on_run_done` existed yet); it closed in S5b-04b, before this
+//! ticket (S5b-F-04) started - noted here only because two of this file's
+//! own doc comments below still described it as open.
 //!
 //! Per-member spend ceilings (TS `overUserCeiling`/`scopeForBot`) are a
 //! second, smaller known gap - no member-scope concept exists on the Rust
@@ -159,16 +153,18 @@ fn goal_prompt_text(goal: &GoalRow, weekly_report_due: bool) -> String {
 /// doc), so a platform default that DOES look premium (a hand-edited
 /// setting, a vendor rename) still gets floored.
 ///
-/// `goal_id` is stamped onto the run row with a follow-up `UPDATE` rather
-/// than at INSERT time (contrast `RunManager::start_routine`, which stamps
-/// `routine_id` synchronously before its drive task spawns, precisely to
-/// avoid a race with `settle`'s own UPDATE reading it back). Two things make
-/// that same race harmless here: `RunManager` has no `start_goal` entry
-/// point to add one without editing `crates/server/src/runs.rs` (not owned
-/// by this ticket - see this module's top doc), and `settle`'s own UPDATE in
-/// `runs.rs` never touches the `goal_id` column, so writing it a moment
-/// after `start` returns can never be clobbered by anything that column
-/// itself.
+/// S5b-F-04 (F16): `goal_id` is stamped onto the run row synchronously,
+/// inside `RunManager::start_goal`'s own INSERT, the same way `start_routine`
+/// stamps `routine_id` - not via a follow-up `UPDATE` after `start` returns.
+/// A follow-up `UPDATE` used to be here instead, because `RunManager` had no
+/// `start_goal` entry point; that left a narrow window where a fast-failing
+/// session (an instant model error, a missing API key) could reach
+/// `settle_goal_run` via `on_run_done` before this function's own `UPDATE`
+/// ran, so `settle_goal_run` read `goal_id` back as NULL and no-opped - the
+/// session's spend never folded into `spent_tokens`, `no_tool_streak` never
+/// advanced, and it never appeared under `GET /api/goals/:id/runs`. See
+/// `reviews/S5b-R.md`'s F16 and `RunManager::start_goal`'s own doc
+/// (`crates/server/src/runs.rs`).
 fn fire_goal_session(state: &AppState, row: &GoalRow, now: DateTime<Utc>) -> Option<String> {
     let (bot_id, conversation_id, model, messages, weekly_report_due) = {
         let db = state.db();
@@ -192,21 +188,20 @@ fn fire_goal_session(state: &AppState, row: &GoalRow, now: DateTime<Utc>) -> Opt
         (bot.id, conversation_id, model, messages, weekly_report_due)
     };
 
-    let run_id = state.runs.start(StartOptions {
-        bot_id,
-        conversation_id,
-        model,
-        messages,
-        trigger: Trigger::Goal,
-        room: false,
-    });
+    let run_id = state.runs.start_goal(
+        StartOptions {
+            bot_id,
+            conversation_id,
+            model,
+            messages,
+            trigger: Trigger::Goal,
+            room: false,
+        },
+        row.id.clone(),
+    );
 
     {
         let db = state.db();
-        let _ = db.conn().execute(
-            "UPDATE runs SET goal_id = ?1 WHERE id = ?2",
-            rusqlite::params![row.id, run_id],
-        );
         let _ = db.conn().execute(
             "UPDATE goals SET last_session_at = ?1 WHERE id = ?2",
             rusqlite::params![now.to_rfc3339(), row.id],
@@ -309,11 +304,11 @@ struct SettleRunRow {
 }
 
 /// Everything a goal's bookkeeping needs once one of its work sessions
-/// settles. Port of TS `settleGoalRun` (`goal-scheduler.ts:226-267`) - see
-/// this module's top doc for why nothing in `start_goal_scheduler` calls
-/// this automatically yet (the `RunManager::on_run_done` hook TS wires this
-/// through is out of this ticket's reach). Directly callable (a test, or a
-/// future caller once the hook exists), same as TS's own export.
+/// settles. Port of TS `settleGoalRun` (`goal-scheduler.ts:226-267`),
+/// wired onto `RunManager::add_on_run_done` in `AppState::build`
+/// (`crates/server/src/lib.rs`) - see this module's top doc. Directly
+/// callable too (this file's own tests call it with an explicit
+/// `run_id`/`now`), same as TS's own export.
 ///
 /// `run.status` is read but deliberately unused beyond existing on the row -
 /// TS's own `settleGoalRun` never branches on it either (`goal.status !==
@@ -470,9 +465,9 @@ pub fn append_goal_log(state: &AppState, id: &str, kind: &str, text: &str, now: 
 
 /// Checks for due goal sessions on a timer. Port of TS `startGoalScheduler`
 /// (`goal-scheduler.ts:287-298`): its own timer body calls ONLY
-/// `fireDueGoals`, same as this one - `settleGoalRun` is wired through
-/// `onRunDone` elsewhere in TS, not through this timer, and this port's own
-/// equivalent wiring is the gap this module's top doc names.
+/// `fireDueGoals`, same as this one - `settleGoalRun`/`settle_goal_run` is
+/// wired through `onRunDone`/`add_on_run_done` elsewhere (`AppState::build`),
+/// not through this timer, in both TS and this port.
 pub fn start_goal_scheduler(state: AppState) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));

@@ -335,7 +335,7 @@ impl RunManager {
     /// `start`, minus the `notice`/routing/snapshot legwork out of scope for
     /// S1.
     pub fn start(self: &Arc<Self>, options: StartOptions) -> String {
-        self.start_inner(options, None, None, None)
+        self.start_inner(options, None, None, None, None)
     }
 
     /// S5-03: same as `start`, but stamps the run row's `routine_id` column
@@ -357,7 +357,7 @@ impl RunManager {
     ///    `INSERT` that creates the row is the only way to make that race
     ///    impossible rather than merely unlikely.
     pub fn start_routine(self: &Arc<Self>, options: StartOptions, routine_id: String) -> String {
-        self.start_inner(options, None, Some(routine_id), None)
+        self.start_inner(options, None, Some(routine_id), None, None)
     }
 
     /// F3: same as `start_routine`, but narrows the run's toolbox to
@@ -376,7 +376,25 @@ impl RunManager {
         routine_id: String,
         only: Vec<String>,
     ) -> String {
-        self.start_inner(options, None, Some(routine_id), Some(only))
+        self.start_inner(options, None, Some(routine_id), Some(only), None)
+    }
+
+    /// S5b-F-04 (F16): same as `start`, but stamps the run row's `goal_id`
+    /// column (`ALTER TABLE runs ADD COLUMN goal_id TEXT`, `store::goals::
+    /// ensure_goal_tables`) BEFORE the drive task is spawned - not via a
+    /// follow-up `UPDATE` after `start` returns, and not via a
+    /// `StartOptions` field, same reasoning `start_routine`'s own doc gives
+    /// for `routine_id`. Before this existed, `server::goals::
+    /// fire_goal_session` had no way to set the column synchronously (no
+    /// `start_goal` entry point) and used a follow-up `UPDATE runs SET
+    /// goal_id = ?1 WHERE id = ?2` instead - a fast-failing session (an
+    /// instant model error, a missing API key) could reach `on_run_done`
+    /// via `settle_goal_run` (`crates/server/src/goals.rs`) with `goal_id`
+    /// still NULL, so its spend never folded into the goal's
+    /// `spent_tokens`, its `no_tool_streak` never advanced, and it never
+    /// showed under `GET /api/goals/:id/runs`. See `reviews/S5b-R.md`'s F16.
+    pub fn start_goal(self: &Arc<Self>, options: StartOptions, goal_id: String) -> String {
+        self.start_inner(options, None, None, None, Some(goal_id))
     }
 
     /// S2-F-04: same as `start`, but with a notice emitted BEFORE the
@@ -394,7 +412,7 @@ impl RunManager {
         options: StartOptions,
         starting_notice: Option<String>,
     ) -> String {
-        self.start_inner(options, starting_notice, None, None)
+        self.start_inner(options, starting_notice, None, None, None)
     }
 
     fn start_inner(
@@ -409,6 +427,9 @@ impl RunManager {
         // `decide_approval`'s two `toolbox_for` call sites so a resumed run
         // keeps whatever narrowing it started with.
         only: Option<Vec<String>>,
+        // F16: persisted onto the run row's `goal_id` column below, in the
+        // same INSERT - see `start_goal`'s doc for why.
+        goal_id: Option<String>,
     ) -> String {
         let id = Uuid::new_v4().to_string();
         let now = now_iso();
@@ -434,8 +455,8 @@ impl RunManager {
         let inserted = {
             let db = self.db();
             db.conn().execute(
-                "INSERT INTO runs (id, bot_id, conversation_id, trigger, status, model, messages, text, created_at, updated_at, routine_id, tools)
-                 VALUES (?1, ?2, ?3, ?4, 'running', ?5, ?6, '', ?7, ?8, ?9, ?10)",
+                "INSERT INTO runs (id, bot_id, conversation_id, trigger, status, model, messages, text, created_at, updated_at, routine_id, tools, goal_id)
+                 VALUES (?1, ?2, ?3, ?4, 'running', ?5, ?6, '', ?7, ?8, ?9, ?10, ?11)",
                 rusqlite::params![
                     id,
                     options.bot_id,
@@ -447,6 +468,7 @@ impl RunManager {
                     now,
                     routine_id,
                     tools_json,
+                    goal_id,
                 ],
             )
         };

@@ -11,6 +11,7 @@ mod add_to_room;
 mod ask_josh;
 mod create_room;
 pub(crate) mod escalate;
+mod goal_tools;
 mod message_bot;
 mod note;
 mod project_remember;
@@ -163,6 +164,9 @@ fn all_specs() -> Vec<ToolSpec> {
         shell::spec(),
         read_file::spec(),
         escalate::spec(),
+        goal_tools::set_goal_spec(),
+        goal_tools::update_goal_spec(),
+        goal_tools::reflect_spec(),
     ]
 }
 
@@ -276,6 +280,9 @@ pub fn build(params: BuildParams) -> ToolBox {
                         message_bot::run(&db, &port, &bot_id, &room_hook, trigger, room, &args)
                             .await
                     }
+                    "set_goal" => (goal_tools::run_set_goal(&db, &bot_id, &args), None),
+                    "update_goal" => (goal_tools::run_update_goal(&db, &bot_id, &args), None),
+                    "reflect" => (goal_tools::run_reflect(&db, &bot_id, &args), None),
                     other => (format!("Unknown tool: {other}"), None),
                 }
             })
