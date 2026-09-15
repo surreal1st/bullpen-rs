@@ -1518,3 +1518,40 @@ button.effort-glyph:disabled {
   padding: 0.25rem 0.4rem;
   font-size: 0.78rem;
 }
+
+/* --------------------------------------------------------- S5c-04: Slack */
+/* Settings > Slack card (`slack_card.rs`) - not a port, new in this ticket.
+   `.slack-card-form input`/`.slack-connected select` repeat the same
+   border/radius/padding/font shape `.routine-edit input`/`select` already
+   use above rather than widening that selector list to cover this card
+   too - `.routine-edit`/`.routine-new` are routines_editor.rs's own shell
+   classes, and this card is not inside one. */
+.slack-card-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.slack-card-form input,
+.slack-connected select {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--ink);
+  padding: 0.4rem 0.55rem;
+  font: inherit;
+  font-size: 0.85rem;
+}
+
+.slack-connected {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.slack-conn-state {
+  margin: 0;
+  font-weight: 600;
+  color: var(--ok);
+}
