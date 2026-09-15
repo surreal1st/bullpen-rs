@@ -83,3 +83,9 @@ reqwest = { workspace = true, features = ["cookies"] }
 # "full", so this only needs to name what this crate calls directly: the
 # sleep itself, plus what `#[tokio::test]` needs for native.rs's own tests.
 tokio = { version = "1", features = ["time", "rt", "macros"] }
+# S13a-02: `routines_editor.rs::copy_to_clipboard`'s native half - there is
+# no DOM clipboard on native the way `web-sys`'s `Clipboard` gives web, and
+# `dioxus-desktop` exposes no clipboard API of its own (checked: no
+# `clipboard` write anywhere in its 0.7.10 source). Pre-approved by name in
+# the ticket for exactly this.
+arboard = "3"

@@ -1,6 +1,12 @@
 [application]
 name = "bullpen"
 
+[bundle]
+# S13a-02: `dx bundle` (the desktop build) refuses to run without these two -
+# not published anywhere, just internal metadata for the OS package/installer.
+identifier = "space.rainmade.bullpen"
+publisher = "rainmade"
+
 [web.app]
 title = "Bullpen"
 # No base_path. Live Bullpen sits behind an nginx location that STRIPS the

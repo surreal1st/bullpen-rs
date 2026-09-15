@@ -583,8 +583,17 @@ pub fn RoutinesEditor(bot_id: String) -> Element {
                                         code { "{secret}" }
                                         button {
                                             onclick: {
+                                                let id = rid.clone();
                                                 let secret = secret.clone();
-                                                move |_| copy_to_clipboard(&secret)
+                                                move |_| {
+                                                    spawn(copy_and_report(
+                                                        id.clone(),
+                                                        secret.clone(),
+                                                        "Secret copied.",
+                                                        "Could not copy secret",
+                                                        hook_status,
+                                                    ));
+                                                }
                                             },
                                             "Copy secret"
                                         }
@@ -593,8 +602,17 @@ pub fn RoutinesEditor(bot_id: String) -> Element {
                                         code { "{url}" }
                                         button {
                                             onclick: {
+                                                let id = rid.clone();
                                                 let url = url.clone();
-                                                move |_| copy_to_clipboard(&url)
+                                                move |_| {
+                                                    spawn(copy_and_report(
+                                                        id.clone(),
+                                                        url.clone(),
+                                                        "URL copied.",
+                                                        "Could not copy URL",
+                                                        hook_status,
+                                                    ));
+                                                }
                                             },
                                             "Copy URL"
                                         }
@@ -741,15 +759,50 @@ pub fn RoutinesEditor(bot_id: String) -> Element {
     }
 }
 
-/// Best-effort copy to the OS clipboard via `navigator.clipboard.writeText`.
-/// Fire-and-forget: the returned `Promise` is dropped rather than awaited -
-/// there is nothing more useful to do with a copy failure here than what
-/// happens today with no copy button at all (the secret is still on screen,
-/// selectable by hand), and awaiting it would need a second `spawn` for a
-/// plain button click that has no other async work to do.
-fn copy_to_clipboard(text: &str) {
-    if let Some(window) = web_sys::window() {
-        let _ = window.navigator().clipboard().write_text(text);
+/// Copy `text` to the OS clipboard, reporting whether it actually worked.
+///
+/// 🔴 S13a-01b found the previous version of this function called
+/// `web_sys::window()` unconditionally and dropped the result: on native
+/// that returns `None`, so "Copy secret"/"Copy URL" compiled clean and then
+/// silently did nothing - unacceptable for a webhook secret shown exactly
+/// once (this module's own doc). This version is awaited by every caller
+/// (`copy_and_report` below) instead of fire-and-forgotten, on both
+/// platforms, so a failure is always visible.
+///
+/// Web still goes through `navigator.clipboard.writeText` - now awaited via
+/// `JsFuture` instead of dropped, so a denied clipboard permission surfaces
+/// too. Native has no DOM clipboard to call, so it uses `arboard` (the one
+/// dependency S13a-02 pre-approved for exactly this).
+#[cfg(target_arch = "wasm32")]
+async fn copy_to_clipboard(text: &str) -> Result<(), String> {
+    let window = web_sys::window().ok_or_else(|| "no browser window".to_string())?;
+    let promise = window.navigator().clipboard().write_text(text);
+    wasm_bindgen_futures::JsFuture::from(promise)
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("{e:?}"))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn copy_to_clipboard(text: &str) -> Result<(), String> {
+    let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    clipboard.set_text(text).map_err(|e| e.to_string())
+}
+
+/// Runs [`copy_to_clipboard`] and posts the result into `hook_status` -
+/// reusing the same per-row `(routine_id, message)` slot the mint/clear
+/// webhook actions already render just above the secret box, rather than
+/// adding a second status signal for one more kind of message.
+async fn copy_and_report(
+    id: String,
+    text: String,
+    ok_message: &'static str,
+    err_prefix: &'static str,
+    mut status: Signal<Option<(String, String)>>,
+) {
+    match copy_to_clipboard(&text).await {
+        Ok(()) => status.set(Some((id, ok_message.to_string()))),
+        Err(e) => status.set(Some((id, format!("{err_prefix}: {e}")))),
     }
 }
 
