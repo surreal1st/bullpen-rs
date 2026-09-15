@@ -21,6 +21,20 @@
 //! `attach_vm_proxy` takes a raw `AsyncRead + AsyncWrite` socket rather
 //! than an axum `Request` on purpose - see its own doc for why, and for
 //! what that buys in testability without a real browser.
+//!
+//! 🔴 S6-F-02 (`.scratch/bullpen-rs/tickets/S6-F-tickets.md`, from S6-R F7):
+//! the bot-id half of a viewer target is guarded (see `viewer_target`'s own
+//! doc) but the `rest`/`query` half was not - TS normalises the whole
+//! target through `new URL(req.url, "http://127.0.0.1").pathname`
+//! (`vm.ts:697`) before either half is used; this port never did, so a raw
+//! `\r`/`\n` in the query rode straight into `build_upgrade_request`'s
+//! concatenated request line and injected a header into the container's
+//! handshake. `target_has_raw_control_break` closes that at both places a
+//! target can enter this module: `parse_request_head` (the real server's
+//! only ingestion point, via `read_request_head`) and `attach_vm_proxy`
+//! itself (for any caller that hands it a `raw_target` directly). Unreached
+//! in production today - no VM route is mounted (S6-R's header) - but it
+//! had to be fixed before one is, not after.
 
 use axum::http::HeaderMap;
 use std::pin::Pin;
@@ -182,6 +196,13 @@ pub enum ProxyOutcome {
     UnknownBot,
     /// A VM row exists, but its web desktop would not accept a connection.
     UpstreamUnreachable,
+    /// The raw target carried a `\r` or `\n` that TS's `new URL(...).pathname`
+    /// (`vm.ts:697`) would have percent-encoded away before this ever saw it
+    /// (S6-R F7). Refused before any upstream connection was made - a bare
+    /// line break here would land inside `build_upgrade_request`'s
+    /// concatenated request line and inject a header into the container's
+    /// handshake.
+    MalformedTarget,
     /// The handshake was sent upstream and both directions are now piped.
     Proxying,
 }
@@ -222,6 +243,16 @@ pub async fn attach_vm_proxy<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    // S6-R F7: a raw `\r`/`\n` anywhere in the target - not just after the
+    // `?`, see `target_has_raw_control_break`'s own doc - must never reach
+    // `build_upgrade_request`'s concatenated request line. Checked on the
+    // whole, unsplit target so a break hiding in what would become `rest`
+    // is caught the same way as one in the query.
+    if target_has_raw_control_break(raw_target) {
+        refuse(&mut client, "400 Bad Request").await;
+        return ProxyOutcome::MalformedTarget;
+    }
+
     let (path_only, query) = split_raw_target(raw_target);
 
     match resolve_viewer_target(path_only, request_headers, db, require_auth) {
@@ -247,6 +278,22 @@ where
 async fn refuse<S: AsyncWrite + Unpin>(client: &mut S, status: &str) {
     let line = format!("HTTP/1.1 {status}\r\nConnection: close\r\n\r\n");
     let _ = client.write_all(line.as_bytes()).await;
+}
+
+/// A request TARGET carrying a raw `\r` or `\n` must never reach
+/// `build_upgrade_request`'s concatenated request line (S6-R F7). TS's
+/// `attachVmProxy` runs `new URL(req.url, "http://127.0.0.1").pathname`
+/// before `viewerTarget` ever sees the target (`vm.ts:697`), which
+/// percent-encodes control characters and resolves `.`/`..` segments; this
+/// port took the raw request target as-is and dropped that normalisation.
+/// Rather than resurrect a URL parser, this checks the one property that
+/// actually matters here: a `%0a`/`%0d` (an ASCII `%`, `0`, `a`/`d` - three
+/// ordinary printable bytes) is left exactly as it arrived, because nothing
+/// downstream of this ever decodes the query or `rest` half of a viewer
+/// path, so it can never become a real line break; a literal `\r` or `\n`
+/// byte is refused outright, because it already is one.
+fn target_has_raw_control_break(target: &str) -> bool {
+    target.contains(['\r', '\n'])
 }
 
 /// `raw_target`'s path and its `?query` (re-prefixed with `?`, or empty) -
@@ -434,6 +481,16 @@ fn parse_request_head(raw: &[u8]) -> Option<(String, HeaderMap, bool)> {
     let _method = parts.next()?;
     let target = parts.next()?.to_string();
     let _version = parts.next()?;
+
+    // S6-R F7: `lines` was split on the two-byte sequence "\r\n", so a bare
+    // `\r` or `\n` on its own survives inside `request_line` and therefore
+    // inside `target` - e.g. a query of `?a=1\nX-Injected:y` never meets a
+    // "\r\n" boundary and rides straight through to here. Refuse the whole
+    // head rather than accept a target that could later inject a line into
+    // `build_upgrade_request`'s handshake.
+    if target_has_raw_control_break(&target) {
+        return None;
+    }
 
     let mut headers = HeaderMap::new();
     let mut is_upgrade = false;

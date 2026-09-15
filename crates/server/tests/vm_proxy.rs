@@ -25,11 +25,28 @@
 //! every "container" here is a real local `TcpListener` standing in for
 //! one, and nothing here claims a real container was reached. That is the
 //! meridian smoke test, not this file.
+//!
+//! S6-F-02 (`.scratch/bullpen-rs/tickets/S6-F-tickets.md`, from S6-R F7)
+//! adds a third world to the ones above, for the query half of a viewer
+//! path rather than the bot-id half:
+//! - GUARD PRESENT: a raw `\r`/`\n` anywhere in the request target is
+//!   refused before any upstream connection is even attempted, and a
+//!   percent-encoded `%0a`/`%0d` is forwarded byte for byte, inert, because
+//!   nothing downstream of this module ever decodes it.
+//! - GUARD REMOVED: a raw line break survives into
+//!   `build_upgrade_request`'s concatenated request line and splits it into
+//!   two, injecting an attacker-chosen header into the container's
+//!   handshake.
+//!
+//! Proven the same way as the rest of this file: from the literal bytes a
+//! RECORDING upstream listener receives, never from `accept_and_route`'s
+//! returned outcome (an injected header still leaves the client-facing
+//! response looking fine).
 
-use server::vm_proxy::{ProxyOutcome, RouteOutcome, accept_and_route};
+use server::vm_proxy::{ProxyOutcome, RouteOutcome, accept_and_route, attach_vm_proxy};
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use store::Db;
 use store::vms::VmRow;
@@ -373,4 +390,180 @@ async fn an_accept_error_does_not_end_the_serve_loop() {
     );
 
     server.abort();
+}
+
+/* --------------------------------------------------------------- S6-F-02: header injection via the query half --------------------------------------------------------------- */
+
+/// Binds a real local listener that accepts ONE connection and records
+/// every byte written to it. `spawn_recording_listener` above only counts
+/// accepts, which proves ROUTING but not FRAMING: an injected header still
+/// leaves an accept count of exactly one. This is the oracle that reads the
+/// literal bytes the container's own handshake would receive.
+async fn spawn_capturing_listener() -> (SocketAddr, Arc<Mutex<Vec<u8>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral listener");
+    let addr = listener.local_addr().expect("local_addr");
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let captured_task = Arc::clone(&captured);
+    tokio::spawn(async move {
+        if let Ok((mut socket, _)) = listener.accept().await {
+            let mut buf = [0u8; 4096];
+            // `build_upgrade_request`'s handshake is written in one
+            // `write_all` call, so one read is enough to capture it whole.
+            if let Ok(Ok(n)) =
+                tokio::time::timeout(Duration::from_secs(2), socket.read(&mut buf)).await
+            {
+                captured_task.lock().unwrap().extend_from_slice(&buf[..n]);
+            }
+        }
+    });
+    (addr, captured)
+}
+
+/// **The S6-F-02 bite.** S6-R F7's literal example: a bare LF placed after
+/// `?` survives `parse_request_head`'s naive line splitting (it splits on
+/// the two-byte sequence `"\r\n"`, so a lone `\n` rides straight through),
+/// clears `viewer_target`'s bot-id guard (the LF lands in the query, not
+/// the path `viewer_target` matches against), and - without this ticket's
+/// guard - would land verbatim in `build_upgrade_request`'s concatenated
+/// request line, splitting it into two and injecting `X-Injected: y` as a
+/// real header on the container's request. No space inside the injected
+/// text: `parse_request_head` tokenises the request line on spaces, so a
+/// space there would just truncate the parsed target short of the bug
+/// rather than exercise it.
+///
+/// Proven from the upstream's own bytes, not the client-facing outcome: a
+/// status code proves nothing here (an injected header still returns
+/// normally to a client that never sees the container's side).
+#[tokio::test]
+async fn accept_and_route_refuses_a_bare_lf_in_the_query_before_touching_any_upstream() {
+    let db = Db::open(":memory:").expect("open :memory: db");
+
+    let (addr, captured) = spawn_capturing_listener().await;
+    insert_vm_row(&db, &vm_row("bot-a", addr.port() as i32));
+
+    let raw: &[u8] = b"GET /api/bots/bot-a/vm/view/?a=1\nX-Injected:y HTTP/1.1\r\n\
+                        Host: bullpen.example.com\r\n\
+                        Upgrade: websocket\r\n\
+                        Connection: Upgrade\r\n\
+                        Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+                        \r\n";
+
+    let outcome = route(&db, raw, false).await;
+
+    assert!(
+        matches!(outcome, RouteOutcome::Unreadable),
+        "a target carrying a raw LF must never parse into a routable request, got {outcome:?}"
+    );
+
+    // Bounded wait, not instant: a bug that still dials would otherwise
+    // race this assertion, the same shape `accept_and_route_unknown_bot_id_\
+    // never_dials_any_upstream` above uses.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(
+        captured.lock().unwrap().is_empty(),
+        "the container's socket must never receive a single byte for a target carrying a raw LF"
+    );
+}
+
+/// The other half of the same bite: an INERT encoding of the same attack
+/// (`%0a` - three ordinary printable ASCII bytes, `%`, `0`, `a`) must not
+/// be refused, because nothing downstream of this module ever decodes a
+/// viewer path's query - it is forwarded exactly as it arrived. Proven by
+/// reading the literal handshake bytes the recording upstream received:
+/// `%0a` must survive in the request line, and `X-Injected` must never
+/// appear as a header line of its own.
+#[tokio::test]
+async fn accept_and_route_forwards_a_percent_encoded_0a_in_the_query_as_inert_literal_text() {
+    let db = Db::open(":memory:").expect("open :memory: db");
+
+    let (addr, captured) = spawn_capturing_listener().await;
+    insert_vm_row(&db, &vm_row("bot-a", addr.port() as i32));
+
+    let outcome = route(
+        &db,
+        &upgrade_request("/api/bots/bot-a/vm/view/websockets?a=1%0aX-Injected:y"),
+        false,
+    )
+    .await;
+
+    assert!(
+        matches!(outcome, RouteOutcome::Viewer(ProxyOutcome::Proxying)),
+        "a %0a is inert ASCII text, not a control character - it must proxy normally, got {outcome:?}"
+    );
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let bytes = loop {
+        let snapshot = captured.lock().unwrap().clone();
+        if !snapshot.is_empty() || tokio::time::Instant::now() >= deadline {
+            break snapshot;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    };
+    assert!(
+        !bytes.is_empty(),
+        "expected the recording upstream to receive the handshake"
+    );
+
+    let text = String::from_utf8_lossy(&bytes);
+    let head_end = text
+        .find("\r\n\r\n")
+        .expect("a full handshake head must have arrived");
+    let head_lines: Vec<&str> = text[..head_end].split("\r\n").collect();
+
+    let request_line = head_lines[0];
+    assert!(
+        request_line.to_ascii_lowercase().contains("%0a"),
+        "the percent-encoded form must survive untouched in the handshake's request line, got: {request_line:?}"
+    );
+
+    let injected_as_its_own_header = head_lines[1..]
+        .iter()
+        .any(|line| line.to_ascii_lowercase().starts_with("x-injected"));
+    assert!(
+        !injected_as_its_own_header,
+        "an inert %0a must never become a real header line in the handshake, got: {head_lines:?}"
+    );
+}
+
+/// `attach_vm_proxy` (S6-06b) is the second place a raw target can enter
+/// this module - a caller that already has a socket and a `raw_target`
+/// string, bypassing `parse_request_head` entirely. The same guard must
+/// hold there too, refused before `resolve_viewer_target`/`get_vm` ever
+/// runs (a `CR` this time, not the `LF` used above, so both control bytes
+/// - not just the one in S6-R's literal example - are proven refused).
+#[tokio::test]
+async fn attach_vm_proxy_refuses_a_raw_target_with_an_embedded_cr_before_resolving_anything() {
+    let db = Db::open(":memory:").expect("open :memory: db");
+    let (server_side, mut client_side) = tokio::io::duplex(4096);
+    let headers = axum::http::HeaderMap::new();
+
+    let outcome = attach_vm_proxy(
+        server_side,
+        "/api/bots/bot-a/vm/view/websockets?a=1\rX-Injected:y",
+        &headers,
+        &db,
+        false,
+    )
+    .await;
+
+    assert!(
+        matches!(outcome, ProxyOutcome::MalformedTarget),
+        "a raw CR in the target must be refused before any resolution, got {outcome:?}"
+    );
+
+    let mut response = Vec::new();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        client_side.read_to_end(&mut response),
+    )
+    .await
+    .expect("timed out reading refusal")
+    .expect("read refusal");
+    let text = String::from_utf8_lossy(&response);
+    assert!(
+        text.starts_with("HTTP/1.1 400"),
+        "expected a 400 refusal, got: {text:?}"
+    );
 }
