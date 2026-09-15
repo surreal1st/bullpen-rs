@@ -8,6 +8,8 @@ export PATH="/c/Users/rain/.cargo/bin:$PATH"
 dx build --platform web --package client --release
 mkdir -p dist/client
 # 🔴 No `rm -rf`: this workspace is not backed up. Copy over the top.
-cp -r target/dx/client/release/web/public/* dist/client/
+# `dx` writes into $CARGO_TARGET_DIR when it is exported; copying from a
+# hardcoded `target/` then ships a STALE client silently (trap found in S5-F-02).
+cp -r "${CARGO_TARGET_DIR:-target}"/dx/client/release/web/public/* dist/client/
 echo "client built; dist/client refreshed"
 grep -n "assets/" dist/client/index.html
