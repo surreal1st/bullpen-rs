@@ -19,6 +19,7 @@ pub mod runs;
 pub mod sandbox;
 pub mod schedule;
 pub mod settings_secrets;
+pub mod slack;
 pub mod spend;
 mod tools;
 
