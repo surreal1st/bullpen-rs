@@ -59,32 +59,55 @@ async fn get_goals(
     Ok(Json(json!({ "goals": list })))
 }
 
-#[derive(Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-struct CreateGoalBody {
-    bot_id: String,
-    objective: String,
-    done_when: String,
-    budget_tokens: Option<f64>,
-    budget_until: Option<String>,
-}
-
 /// POST /api/goals - create a new goal. Port of `app.ts:3501-3514`: always a
 /// 400 on failure (no 404 branch on create, unlike the routes below - `no
 /// such bot` included), matching `createGoal`'s own `{ok, goal, error}`
-/// shape collapsed to a single status.
+/// shape collapsed to a single status. Parses body as raw JSON like PATCH
+/// does, coercing types like TS (missing budgetTokens/budgetUntil treated as
+/// absent, non-matching types coerced away).
 async fn post_goals(
     State(state): State<AppState>,
     body: axum::body::Bytes,
 ) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
     let db = state.db();
-    let body_data: CreateGoalBody = super::parse_body(&body)?;
+    let value: serde_json::Value = if body.is_empty() {
+        json!({})
+    } else {
+        serde_json::from_slice(&body).map_err(|_| AppError::bad_request("invalid JSON body"))?
+    };
+
+    // Extract string fields with type coercion, matching TS's `text` helper.
+    let text = |key: &str| -> String {
+        value
+            .get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+
+    let objective = text("objective");
+    let done_when = text("doneWhen");
+
+    if objective.is_empty() {
+        return Err(AppError::bad_request("Say what you are working toward."));
+    }
+    if done_when.is_empty() {
+        return Err(AppError::bad_request("Say what done looks like."));
+    }
+
+    // Extract numeric/string fields only if they match the type.
+    let budget_tokens = value.get("budgetTokens").and_then(|v| v.as_f64());
+    let budget_until = value
+        .get("budgetUntil")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
     let input = goals::CreateGoalInput {
-        bot_id: body_data.bot_id,
-        objective: body_data.objective,
-        done_when: body_data.done_when,
-        budget_tokens: body_data.budget_tokens,
-        budget_until: body_data.budget_until,
+        bot_id: text("botId"),
+        objective,
+        done_when,
+        budget_tokens,
+        budget_until,
     };
     match goals::create_goal(&db, input, chrono::Utc::now()) {
         Ok(goal) => Ok((StatusCode::CREATED, Json(json!({ "goal": goal })))),
@@ -105,7 +128,7 @@ async fn patch_goal(
     let value: serde_json::Value = if body.is_empty() {
         json!({})
     } else {
-        serde_json::from_slice(&body).map_err(|_| AppError::bad_request("invalid JSON body"))?
+        serde_json::from_slice(&body).unwrap_or_else(|_| json!({}))
     };
 
     let mut patch = goals::UpdateGoalPatch::default();
@@ -129,11 +152,22 @@ async fn patch_goal(
     // present + null -> Some(None) (clear); present + number -> Some(Some(v))
     // (set); key absent -> `.get()` itself is None, `patch.budget_tokens`
     // stays the type default None (leave unchanged) - see this module's doc.
+    // present + wrong type -> do not modify patch field at all.
     if let Some(raw) = value.get("budgetTokens") {
-        patch.budget_tokens = Some(raw.as_f64());
+        if raw.is_null() {
+            patch.budget_tokens = Some(None);
+        } else if let Some(num) = raw.as_f64() {
+            patch.budget_tokens = Some(Some(num));
+        }
+        // If wrong type (e.g., string), don't modify patch.budget_tokens at all
     }
     if let Some(raw) = value.get("budgetUntil") {
-        patch.budget_until = Some(raw.as_str().map(|s| s.to_string()));
+        if raw.is_null() {
+            patch.budget_until = Some(None);
+        } else if let Some(s) = raw.as_str() {
+            patch.budget_until = Some(Some(s.to_string()));
+        }
+        // If wrong type, don't modify patch.budget_until at all
     }
 
     match goals::update_goal(&db, &id, &patch, None, chrono::Utc::now()) {

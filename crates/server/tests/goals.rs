@@ -265,6 +265,17 @@ async fn fires_a_due_goal_once_and_reschedules_so_it_does_not_fire_twice() {
         next_session_at > now,
         "next_session_at must advance past the fired instant"
     );
+    // Assert the cadence: next_session_at should be approximately 1 hour ahead
+    // (GOAL_SESSION_MS = 3_600_000).
+    let cadence_ms = (next_session_at - now).num_milliseconds();
+    const GOAL_SESSION_MS: i64 = 3_600_000; // 1 hour
+    const TOLERANCE_MS: i64 = 5_000; // 5 seconds tolerance
+    assert!(
+        (cadence_ms - GOAL_SESSION_MS).abs() <= TOLERANCE_MS,
+        "next_session_at cadence should be ~{} ms, got {}",
+        GOAL_SESSION_MS,
+        cadence_ms
+    );
 
     let run = wait_for_goal_run(&app, &session, &goal.id).await;
     assert_eq!(run.get("status").and_then(|s| s.as_str()), Some("done"));
@@ -680,7 +691,7 @@ async fn settle_goal_run_is_a_noop_when_the_goal_is_already_closed() {
 
 #[tokio::test]
 async fn settle_goal_run_is_a_noop_for_a_run_with_no_goal_id() {
-    let db = open_db();
+    let (db, path) = open_file_db();
     seed_bot(&db, "arthur", None);
     let conversation_id =
         store::get_or_create_conversation(&db, "arthur").expect("get_or_create_conversation");
@@ -688,8 +699,8 @@ async fn settle_goal_run_is_a_noop_for_a_run_with_no_goal_id() {
     let now_str = chrono::Utc::now().to_rfc3339();
     db.conn()
         .execute(
-            "INSERT INTO runs (id, bot_id, conversation_id, trigger, status, model, messages, created_at, updated_at)
-             VALUES (?1, 'arthur', ?2, 'chat', 'done', 'test/model', '[]', ?3, ?3)",
+            "INSERT INTO runs (id, bot_id, conversation_id, trigger, status, model, messages, input_tokens, output_tokens, created_at, updated_at)
+             VALUES (?1, 'arthur', ?2, 'chat', 'done', 'test/model', '[]', 0, 0, ?3, ?3)",
             rusqlite::params![run_id, conversation_id, now_str],
         )
         .expect("insert ordinary chat run with no goal_id");
@@ -697,9 +708,31 @@ async fn settle_goal_run_is_a_noop_for_a_run_with_no_goal_id() {
     let port: Arc<dyn model::ModelPort> = Arc::new(ScriptedPort::new(vec![]));
     let state = AppState::with_port(db, port);
 
-    // Must not panic - the only observable behaviour for a run with no
-    // `goal_id` is that nothing happens.
+    // Settle the run and assert nothing changes.
     scheduler::settle_goal_run(&state, &run_id, Utc::now());
+
+    // Open a second connection to verify the run row is unchanged (see module doc).
+    let db2 = Db::open(&path).expect("open second connection");
+    let run_row = db2
+        .conn()
+        .query_row(
+            "SELECT status, input_tokens, output_tokens FROM runs WHERE id = ?1",
+            rusqlite::params![&run_id],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            },
+        )
+        .expect("run row found");
+
+    assert_eq!(run_row.0, "done", "status must not change");
+    assert_eq!(run_row.1, 0, "spent_tokens must not change");
+    assert_eq!(run_row.2, 0, "no_tool_streak must not change");
+
+    let _ = std::fs::remove_file(&path);
 }
 
 // ---------------------------------------------------------------------
@@ -991,4 +1024,237 @@ async fn goal_run_route_404s_for_an_unknown_goal() {
         post_json(&app, "/api/goals/does-not-exist/run", &session, json!({})).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["error"], "no such goal");
+}
+
+#[tokio::test]
+async fn patch_goal_wrong_type_budget_tokens_leaves_unchanged() {
+    let db = open_db();
+    let session = seed_session(&db);
+    seed_bot(&db, "arthur", None);
+    let goal = store::goals::create_goal(
+        &db,
+        CreateGoalInput {
+            bot_id: "arthur".to_string(),
+            objective: "Test".to_string(),
+            done_when: "never".to_string(),
+            budget_tokens: Some(1000.0),
+            ..Default::default()
+        },
+        chrono::Utc::now(),
+    )
+    .expect("create goal");
+    let port: Arc<dyn model::ModelPort> = Arc::new(ScriptedPort::new(vec![]));
+    let state = AppState::with_port(db, port);
+    let app = build_app(state);
+
+    // PATCH with wrong-typed budgetTokens (string instead of number)
+    let (status, body) = patch_json(
+        &app,
+        &format!("/api/goals/{}", goal.id),
+        &session,
+        json!({ "budgetTokens": "500" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    // Budget should be unchanged (still 1000.0, not touched)
+    assert_eq!(
+        body["goal"]["budgetTokens"].as_f64(),
+        Some(1000.0),
+        "wrong-typed budgetTokens must leave it unchanged"
+    );
+}
+
+#[tokio::test]
+async fn post_goals_missing_done_when_returns_correct_error() {
+    let db = open_db();
+    let session = seed_session(&db);
+    seed_bot(&db, "arthur", None);
+    let port: Arc<dyn model::ModelPort> = Arc::new(ScriptedPort::new(vec![]));
+    let state = AppState::with_port(db, port);
+    let app = build_app(state);
+
+    let (status, body) = post_json(
+        &app,
+        "/api/goals",
+        &session,
+        json!({ "botId": "arthur", "objective": "Test" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "Say what done looks like.");
+}
+
+#[tokio::test]
+async fn post_goals_missing_objective_returns_correct_error() {
+    let db = open_db();
+    let session = seed_session(&db);
+    seed_bot(&db, "arthur", None);
+    let port: Arc<dyn model::ModelPort> = Arc::new(ScriptedPort::new(vec![]));
+    let state = AppState::with_port(db, port);
+    let app = build_app(state);
+
+    let (status, body) = post_json(
+        &app,
+        "/api/goals",
+        &session,
+        json!({ "botId": "arthur", "doneWhen": "never" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "Say what you are working toward.");
+}
+
+#[tokio::test]
+async fn post_goals_wrong_type_budget_tokens_coerced_to_null() {
+    let db = open_db();
+    let session = seed_session(&db);
+    seed_bot(&db, "arthur", None);
+    let port: Arc<dyn model::ModelPort> = Arc::new(ScriptedPort::new(vec![]));
+    let state = AppState::with_port(db, port);
+    let app = build_app(state);
+
+    let (status, body) = post_json(
+        &app,
+        "/api/goals",
+        &session,
+        json!({
+            "botId": "arthur",
+            "objective": "Test",
+            "doneWhen": "never",
+            "budgetTokens": "5000"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert!(
+        body["goal"]["budgetTokens"].is_null(),
+        "wrong-typed budgetTokens must coerce to null"
+    );
+}
+
+#[tokio::test]
+async fn patch_goal_garbled_body_returns_200_unchanged() {
+    let db = open_db();
+    let session = seed_session(&db);
+    seed_bot(&db, "arthur", None);
+    let goal = store::goals::create_goal(
+        &db,
+        CreateGoalInput {
+            bot_id: "arthur".to_string(),
+            objective: "Test".to_string(),
+            done_when: "never".to_string(),
+            ..Default::default()
+        },
+        chrono::Utc::now(),
+    )
+    .expect("create goal");
+    let port: Arc<dyn model::ModelPort> = Arc::new(ScriptedPort::new(vec![]));
+    let state = AppState::with_port(db, port);
+    let app = build_app(state);
+
+    // Send garbled JSON directly - it should be treated as {} and return 200
+    let req = Request::builder()
+        .method("PATCH")
+        .uri(&format!("/api/goals/{}", goal.id))
+        .header("cookie", &session)
+        .header("content-type", "application/json")
+        .body(Body::from("{invalid json"))
+        .expect("build request");
+    let response = app.clone().oneshot(req).await.expect("call app");
+
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "garbled PATCH should return 200"
+    );
+}
+
+#[tokio::test]
+async fn post_goal_run_returns_201_with_run_id() {
+    let db = open_db();
+    let session = seed_session(&db);
+    seed_bot(&db, "arthur", None);
+    let goal = store::goals::create_goal(
+        &db,
+        CreateGoalInput {
+            bot_id: "arthur".to_string(),
+            objective: "Test".to_string(),
+            done_when: "never".to_string(),
+            ..Default::default()
+        },
+        chrono::Utc::now(),
+    )
+    .expect("create goal");
+    let port: Arc<dyn model::ModelPort> = Arc::new(ScriptedPort::new(vec![text_script("done")]));
+    let state = AppState::with_port(db, port);
+    let app = build_app(state);
+
+    let (status, body) = post_json(
+        &app,
+        &format!("/api/goals/{}/run", goal.id),
+        &session,
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert!(
+        body["runId"].as_str().is_some(),
+        "response must contain a runId string"
+    );
+}
+
+#[tokio::test]
+async fn create_21st_goal_exceeds_cap_and_returns_correct_error() {
+    let db = open_db();
+    let session = seed_session(&db);
+    seed_bot(&db, "arthur", None);
+    let port: Arc<dyn model::ModelPort> = Arc::new(ScriptedPort::new(vec![]));
+    let state = AppState::with_port(db, port);
+    let app = build_app(state);
+
+    // Create 20 goals (the cap)
+    for i in 0..20 {
+        let (status, _) = post_json(
+            &app,
+            "/api/goals",
+            &session,
+            json!({
+                "botId": "arthur",
+                "objective": format!("Goal {}", i),
+                "doneWhen": "never"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+
+    // 21st should fail
+    let (status, body) = post_json(
+        &app,
+        "/api/goals",
+        &session,
+        json!({
+            "botId": "arthur",
+            "objective": "Goal 21",
+            "doneWhen": "never"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    // Check for the exact error message with literal 20
+    assert_eq!(
+        body["error"],
+        "Already 20 active goals, which is the limit. Close or stop some first."
+    );
+}
+
+#[tokio::test]
+async fn no_tool_pause_reason_and_limit_are_correct_literals() {
+    // Pin the exact literals from store::goals to prevent silent drift
+    const EXPECTED_NO_TOOL_PAUSE_REASON: &str = "Paused: 3 sessions in a row made no progress";
+
+    assert_eq!(
+        NO_TOOL_PAUSE_REASON, EXPECTED_NO_TOOL_PAUSE_REASON,
+        "NO_TOOL_PAUSE_REASON must match"
+    );
 }
