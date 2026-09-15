@@ -131,3 +131,28 @@ pub fn list_sections(db: &Db) -> rusqlite::Result<Vec<Section>> {
 
     Ok(sections)
 }
+
+/// Get a bot's egress configuration (as a JSON string). Returns the default
+/// if the bot is not found or archived.
+pub fn get_bot_egress(db: &Db, id: &str) -> rusqlite::Result<Option<String>> {
+    let mut stmt = db
+        .conn()
+        .prepare("SELECT egress FROM bots WHERE id = ?1 AND archived_at IS NULL")?;
+
+    let result = stmt.query_row(params![id], |row| row.get(0));
+
+    match result {
+        Ok(egress) => Ok(Some(egress)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Set a bot's egress configuration (as a JSON string).
+pub fn set_bot_egress(db: &Db, id: &str, egress_json: &str) -> rusqlite::Result<()> {
+    db.conn().execute(
+        "UPDATE bots SET egress = ?1 WHERE id = ?2",
+        params![egress_json, id],
+    )?;
+    Ok(())
+}

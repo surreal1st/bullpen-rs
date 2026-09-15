@@ -11,6 +11,7 @@ mod auth;
 mod auto_review;
 mod bots;
 mod conversations;
+mod egress;
 mod events;
 mod goals;
 mod hooks;
@@ -25,6 +26,7 @@ mod settings;
 mod slack;
 mod spend;
 mod teams;
+mod vms;
 
 use crate::auth::presented_token;
 use crate::{ApiResult, AppError, AppState};
@@ -51,6 +53,7 @@ pub fn router() -> Router<AppState> {
         .merge(auto_review::router())
         .merge(bots::router())
         .merge(conversations::router())
+        .merge(egress::router())
         .merge(goals::router())
         .merge(hooks::router())
         .merge(permissions::router())
@@ -64,7 +67,8 @@ pub fn router() -> Router<AppState> {
         .merge(settings::router())
         .merge(memory::router())
         .merge(slack::router())
-        .merge(teams::router());
+        .merge(teams::router())
+        .merge(vms::router());
 
     // B2: exists only so `tests/errors.rs` can prove the db mutex recovers
     // from a poison instead of panicking every request after the first -

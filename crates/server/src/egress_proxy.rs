@@ -230,3 +230,66 @@ where
         (self.0)(host.to_string(), port).await
     }
 }
+
+/// A DNS resolver using the system's resolver.
+pub struct SystemResolver;
+
+#[async_trait::async_trait]
+impl Resolver for SystemResolver {
+    async fn resolve(&self, host: &str) -> Result<Vec<String>, String> {
+        use std::net::SocketAddr;
+
+        let addrs = tokio::net::lookup_host(format!("{}:443", host))
+            .await
+            .map_err(|e| format!("DNS resolution failed: {e}"))?;
+
+        let mut results = Vec::new();
+        for addr in addrs {
+            results.push(match addr {
+                SocketAddr::V4(v4) => v4.ip().to_string(),
+                SocketAddr::V6(v6) => v6.ip().to_string(),
+            });
+        }
+
+        if results.is_empty() {
+            Err("No addresses resolved".to_string())
+        } else {
+            Ok(results)
+        }
+    }
+}
+
+/// Starts the CONNECT egress proxy on an ephemeral loopback port.
+/// Returns a JoinHandle for the server task and the local address,
+/// suitable for passing to containers as a proxy env var (e.g., `http_proxy=http://127.0.0.1:PORT`).
+///
+/// The proxy enforces the master BULLPEN_SANDBOX_EGRESS policy.
+/// Per-bot allow lists are a future enhancement (per the TS `createBotProxyManager`
+/// comment in the module doc).
+pub async fn start_egress_proxy(
+    _state: Arc<crate::AppState>,
+) -> Result<(tokio::task::JoinHandle<()>, std::net::SocketAddr), String> {
+    // Bind the listener on an ephemeral loopback port
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|e| format!("failed to bind egress proxy: {e}"))?;
+
+    let local_addr = listener
+        .local_addr()
+        .map_err(|e| format!("failed to get local addr: {e}"))?;
+
+    let resolver = Arc::new(SystemResolver);
+
+    // For now, use an empty allow list (master switch off by default).
+    // The proxy will refuse all connections unless a future per-bot manager
+    // adds them to a dynamic policy.
+    let default_policy = EgressPolicy { allow: vec![] };
+
+    let options = ProxyOptions::new(default_policy, resolver);
+    let proxy = Arc::new(create_egress_proxy(options));
+
+    // Spawn the proxy server
+    let handle = tokio::spawn(proxy.serve(listener));
+
+    Ok((handle, local_addr))
+}

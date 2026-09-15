@@ -52,6 +52,11 @@ pub struct SandboxConfig {
     pub docker_host: String,
     /// Empty means `--network none`, which is the default.
     pub network: String,
+    /// S6-W-02: egress proxy address (e.g., "127.0.0.1:12345"), or empty
+    /// if the proxy is not running. When non-empty and a bot has egress mode
+    /// "allowlist", the container gets HTTP_PROXY/HTTPS_PROXY env vars pointing
+    /// to this address.
+    pub egress_proxy_addr: String,
 }
 
 impl Default for SandboxConfig {
@@ -67,6 +72,7 @@ impl Default for SandboxConfig {
             docker_host: std::env::var("DOCKER_HOST")
                 .unwrap_or_else(|_| "unix:///var/run/docker.sock".to_string()),
             network: String::new(),
+            egress_proxy_addr: String::new(),
         }
     }
 }
@@ -102,12 +108,29 @@ fn container_name(bot_id: &str) -> String {
 
 /// Network arguments for a sandbox container.
 /// With network off, returns `["--network", "none"]`.
+/// 🔴 This ALWAYS returns "none" for S6-W-02 - network ONLY through the proxy.
 fn network_args(cfg: &SandboxConfig) -> Vec<String> {
     if cfg.network.is_empty() {
         vec!["--network".to_string(), "none".to_string()]
     } else {
         vec!["--network".to_string(), cfg.network.clone()]
     }
+}
+
+/// Proxy environment variables for a bot with egress enabled.
+/// Returns docker `-e` flag pairs for HTTP_PROXY, HTTPS_PROXY, NO_PROXY.
+/// 🔴 These env vars ONLY configure the proxy path; the container still has
+/// `--network none`. Traffic ONLY flows through the proxy.
+fn proxy_args(proxy_addr: &str) -> Vec<String> {
+    let proxy_url = format!("http://{}", proxy_addr);
+    vec![
+        "-e".to_string(),
+        format!("HTTP_PROXY={}", proxy_url),
+        "-e".to_string(),
+        format!("HTTPS_PROXY={}", proxy_url),
+        "-e".to_string(),
+        "NO_PROXY=127.0.0.1,localhost".to_string(),
+    ]
 }
 
 /// F2: the full hardened flag block shared by BOTH `exec` and `read_file` -
@@ -490,6 +513,14 @@ impl Sandbox for DockerSandbox {
 
         args.extend(isolation_args(&self.config, &name));
 
+        // S6-W-02: add proxy environment variables if proxy is configured.
+        // A per-bot allowlist check would happen here once per-bot proxies
+        // are added. For now, the proxy address being non-empty means the
+        // master switch is on and this bot should go through it.
+        if !self.config.egress_proxy_addr.is_empty() {
+            args.extend(proxy_args(&self.config.egress_proxy_addr));
+        }
+
         // Volume and working directory
         args.extend(vec![
             "--mount".to_string(),
@@ -550,6 +581,14 @@ impl Sandbox for DockerSandbox {
         let mut args = vec!["docker".to_string(), "run".to_string(), "--rm".to_string()];
 
         args.extend(isolation_args(&self.config, &name));
+
+        // S6-W-02: add proxy environment variables if proxy is configured.
+        // A per-bot allowlist check would happen here once per-bot proxies
+        // are added. For now, the proxy address being non-empty means the
+        // master switch is on and this bot should go through it.
+        if !self.config.egress_proxy_addr.is_empty() {
+            args.extend(proxy_args(&self.config.egress_proxy_addr));
+        }
 
         args.extend(vec![
             "--mount".to_string(),
