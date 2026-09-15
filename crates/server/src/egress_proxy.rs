@@ -259,24 +259,115 @@ impl Resolver for SystemResolver {
     }
 }
 
-/// Starts the CONNECT egress proxy on an ephemeral loopback port.
-/// Returns a JoinHandle for the server task and the local address,
-/// suitable for passing to containers as a proxy env var (e.g., `http_proxy=http://127.0.0.1:PORT`).
+/// Where `start_egress_proxy` publishes the address it actually bound, so
+/// `sandbox::default_sandbox` - called from many places, long after startup,
+/// with no async context of its own - can read it instead of guessing.
+/// `None` until `start_egress_proxy` has bound (or forever, when egress is
+/// off and nothing ever calls it).
+static EGRESS_PROXY_ADDR: std::sync::OnceLock<std::net::SocketAddr> = std::sync::OnceLock::new();
+
+/// The address sandboxed containers should be pointed at, once
+/// `start_egress_proxy` has bound and published it.
+pub fn egress_proxy_addr() -> Option<std::net::SocketAddr> {
+    EGRESS_PROXY_ADDR.get().copied()
+}
+
+/// Ensures `network` exists as a docker bridge network and returns its
+/// gateway IP - the address a container joined to that network reaches the
+/// HOST at.
+///
+/// 🔴 This is the fix for S6-W-02's actual defect: `127.0.0.1` is the
+/// proxy's OWN loopback. A container has its own network namespace, so its
+/// `127.0.0.1` is itself, not the host - binding there made the proxy
+/// unreachable from any container regardless of what env vars it was
+/// handed. The docker bridge's gateway address is the one address a
+/// container on that network can always reach the host at, so the listener
+/// below binds there instead.
+async fn ensure_network_gateway(network: &str) -> Result<std::net::IpAddr, String> {
+    if let Ok(gateway) = network_gateway(network).await {
+        return Ok(gateway);
+    }
+    create_network(network).await?;
+    network_gateway(network).await
+}
+
+/// Reads `network`'s gateway IP via `docker network inspect`. Errors
+/// (including "no such network") are the normal, expected case the first
+/// time a network is used - `ensure_network_gateway` treats any error here
+/// as "try creating it" rather than distinguishing "absent" from "docker
+/// said something else went wrong", since either way creation is the next
+/// thing to attempt and its own error is the one worth surfacing.
+async fn network_gateway(network: &str) -> Result<std::net::IpAddr, String> {
+    let output = tokio::process::Command::new("docker")
+        .args([
+            "network",
+            "inspect",
+            network,
+            "--format",
+            "{{range .IPAM.Config}}{{.Gateway}}{{end}}",
+        ])
+        .output()
+        .await
+        .map_err(|e| format!("could not run docker: {e}"))?;
+
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    let gateway = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    gateway
+        .parse::<std::net::IpAddr>()
+        .map_err(|e| format!("docker network {network} has no usable gateway ({gateway:?}): {e}"))
+}
+
+/// Creates `network` as a docker bridge network. Idempotent: "already
+/// exists" (a race with another process, or a leftover from a prior run) is
+/// success, not an error.
+async fn create_network(network: &str) -> Result<(), String> {
+    let output = tokio::process::Command::new("docker")
+        .args(["network", "create", network])
+        .output()
+        .await
+        .map_err(|e| format!("could not run docker: {e}"))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr.contains("already exists") {
+        Ok(())
+    } else {
+        Err(stderr.trim().to_string())
+    }
+}
+
+/// Starts the CONNECT egress proxy on `network`'s docker bridge gateway,
+/// creating the network first if it does not exist yet.
+///
+/// Returns a JoinHandle for the server task and the address it bound -
+/// reachable from a container joined to `network`, unlike host loopback -
+/// and publishes that same address via `egress_proxy_addr` so
+/// `sandbox::default_sandbox` can pick it up for every sandbox built after
+/// this call.
 ///
 /// The proxy enforces the master BULLPEN_SANDBOX_EGRESS policy.
 /// Per-bot allow lists are a future enhancement (per the TS `createBotProxyManager`
 /// comment in the module doc).
 pub async fn start_egress_proxy(
-    _state: Arc<crate::AppState>,
+    network: &str,
 ) -> Result<(tokio::task::JoinHandle<()>, std::net::SocketAddr), String> {
-    // Bind the listener on an ephemeral loopback port
-    let listener = TcpListener::bind("127.0.0.1:0")
+    let gateway = ensure_network_gateway(network).await?;
+
+    let listener = TcpListener::bind((gateway, 0))
         .await
-        .map_err(|e| format!("failed to bind egress proxy: {e}"))?;
+        .map_err(|e| format!("failed to bind egress proxy on {gateway}: {e}"))?;
 
     let local_addr = listener
         .local_addr()
         .map_err(|e| format!("failed to get local addr: {e}"))?;
+    // Best-effort: a second call (should not happen in production, but a
+    // test process might) just keeps the first published address rather
+    // than erroring the whole proxy start over it.
+    let _ = EGRESS_PROXY_ADDR.set(local_addr);
 
     let resolver = Arc::new(SystemResolver);
 

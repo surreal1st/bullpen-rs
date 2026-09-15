@@ -1,172 +1,170 @@
-//! Integration tests for egress proxy wiring in sandbox.rs.
+//! Integration tests for S6-W-02b: proof that the egress path is
+//! REACHABLE by construction, not just "the env vars exist".
 //!
-//! 🔴 **THE BITE (S6-W-02).** Proof that:
-//! (a) When a bot has egress proxy configured (non-empty `egress_proxy_addr`),
-//!     the container arguments include HTTP_PROXY/HTTPS_PROXY env vars.
-//! (b) The `--network none` flag survives in the recorded arguments - the
-//!     container NEVER gets bare network access, only proxy access.
-//! (c) When proxy is not configured (empty `egress_proxy_addr`), no proxy
-//!     env vars are added.
+//! 🔴 S6-W-02's own 4 tests asserted exactly that - HTTP_PROXY/HTTPS_PROXY
+//! were present and `--network none` survived - and passed while the
+//! feature could not work at all: a container with `--network none` has no
+//! network stack, so it can never reach a proxy regardless of what env
+//! vars it is handed. See the ticket header in
+//! `.scratch/bullpen-rs/tickets/S6-W-tickets.md` ("S6-W-02 shipped an
+//! INERT egress path").
+//!
+//! **THE BITE.** Proof, from the RECORDED argv, of two branches mutated
+//! SEPARATELY:
+//! (a) egress off (`network` empty) -> `--network none`, and NOT ONE of
+//!     the four proxy spellings anywhere in argv - even with a stray
+//!     `egress_proxy_addr` set, so a regression that moves the proxy vars
+//!     back onto the `none` branch cannot hide behind "well nobody sets
+//!     that combination".
+//! (b) egress on (`network` non-empty) -> the named network, all four
+//!     proxy spellings (`http_proxy`/`https_proxy`/`HTTP_PROXY`/
+//!     `HTTPS_PROXY`) pointing at the same address, and `--network none`
+//!     is GONE - not merely "also present"; a container cannot be joined
+//!     to both.
 
 use server::sandbox::{DockerSandbox, FakeRunner, Sandbox, SandboxConfig};
 use std::sync::Arc;
 
-/// Helper to extract an argument from the command line.
-fn find_arg(args: &[String], needle: &str) -> Option<usize> {
-    args.iter().position(|a| a == needle)
-}
-
-/// Helper to check if a flag-value pair exists anywhere in the args.
-/// For -e flags with VAR=VALUE, pass the full string "VAR=VALUE" as the expected_value.
+/// True when `flag value` appears as an adjacent pair anywhere in `args`.
 fn has_flag_with_value(args: &[String], flag: &str, expected_value: &str) -> bool {
-    let mut i = 0;
-    while i < args.len() {
-        if args[i] == flag && i + 1 < args.len() && args[i + 1] == expected_value {
-            return true;
-        }
-        i += 1;
+    args.windows(2)
+        .any(|w| w[0] == flag && w[1] == expected_value)
+}
+
+/// The value of `VAR=...` for `var_name`, wherever it appears in `args` -
+/// docker `-e VAR=value` pairs are self-describing, so this does not need
+/// to also check the preceding `-e`.
+fn env_value<'a>(args: &'a [String], var_name: &str) -> Option<&'a str> {
+    let prefix = format!("{var_name}=");
+    args.iter().find_map(|a| a.strip_prefix(prefix.as_str()))
+}
+
+const FOUR_PROXY_SPELLINGS: [&str; 4] = ["http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"];
+
+/// **Bite (a).** Egress off yields `--network none` and NO proxy env vars.
+#[tokio::test]
+async fn egress_off_yields_network_none_and_no_proxy_vars() {
+    let config = SandboxConfig {
+        network: String::new(),
+        // Stray on purpose: even a leftover/misconfigured proxy address
+        // must not leak onto the `--network none` branch.
+        egress_proxy_addr: "10.0.0.9:3128".to_string(),
+        ..Default::default()
+    };
+
+    let runner = FakeRunner::new();
+    runner.push_response("ok\n", "", 0);
+    let sandbox = DockerSandbox::new(config, Arc::new(runner.clone()));
+    let _ = sandbox.exec("test-bot", "echo ok").await;
+
+    let commands = runner.commands();
+    assert_eq!(commands.len(), 1);
+    let args = &commands[0];
+
+    assert!(
+        has_flag_with_value(args, "--network", "none"),
+        "egress off must still get --network none, got: {args:?}"
+    );
+    for var in FOUR_PROXY_SPELLINGS {
+        assert!(
+            env_value(args, var).is_none(),
+            "{var} must not appear with --network none, got: {args:?}"
+        );
     }
-    false
 }
 
-/// Helper to count occurrences of an argument (for env vars passed with -e).
-fn count_env_vars(args: &[String], var_name: &str) -> usize {
-    let mut count = 0;
-    let mut i = 0;
-    while i < args.len() {
-        if args[i] == "-e" && i + 1 < args.len() {
-            if args[i + 1].starts_with(&format!("{}=", var_name)) {
-                count += 1;
-            }
-            i += 2;
-        } else {
-            i += 1;
-        }
+/// **Bite (b).** Egress on yields the named network, all four proxy
+/// spellings, and `--network none` is gone.
+#[tokio::test]
+async fn egress_on_yields_named_network_and_all_four_proxy_spellings() {
+    let config = SandboxConfig {
+        network: "bullpen-egress".to_string(),
+        egress_proxy_addr: "10.0.0.9:3128".to_string(),
+        ..Default::default()
+    };
+
+    let runner = FakeRunner::new();
+    runner.push_response("ok\n", "", 0);
+    let sandbox = DockerSandbox::new(config, Arc::new(runner.clone()));
+    let _ = sandbox.exec("test-bot", "echo ok").await;
+
+    let commands = runner.commands();
+    assert_eq!(commands.len(), 1);
+    let args = &commands[0];
+
+    assert!(
+        has_flag_with_value(args, "--network", "bullpen-egress"),
+        "egress on must join the named network, got: {args:?}"
+    );
+    assert!(
+        !has_flag_with_value(args, "--network", "none"),
+        "must NOT also carry --network none - a container cannot join both, got: {args:?}"
+    );
+    for var in FOUR_PROXY_SPELLINGS {
+        assert_eq!(
+            env_value(args, var),
+            Some("http://10.0.0.9:3128"),
+            "{var} missing or wrong, got: {args:?}"
+        );
     }
-    count
 }
 
+/// `read_file` shares `isolation_args` with `exec` - the whole point of
+/// folding the proxy vars into `network_args`/`isolation_args` instead of
+/// duplicating them per call site. Prove the egress-on branch reaches it
+/// too, not just `exec`.
 #[tokio::test]
-async fn proxy_env_vars_added_when_proxy_configured() {
+async fn read_file_gets_the_same_egress_wiring_as_exec() {
     let config = SandboxConfig {
-        egress_proxy_addr: "127.0.0.1:12345".to_string(),
+        network: "bullpen-egress".to_string(),
+        egress_proxy_addr: "10.0.0.9:3128".to_string(),
         ..Default::default()
     };
 
     let runner = FakeRunner::new();
-    runner.push_response("ok\n", "", 0);
-
+    runner.push_response("contents\n", "", 0);
     let sandbox = DockerSandbox::new(config, Arc::new(runner.clone()));
-    let _ = sandbox.exec("test-bot", "echo ok").await;
+    let _ = sandbox.read_file("test-bot", "f.txt").await;
 
     let commands = runner.commands();
-    assert_eq!(commands.len(), 1, "should have run one command");
-
+    assert_eq!(commands.len(), 1);
     let args = &commands[0];
 
-    // Should have HTTP_PROXY and HTTPS_PROXY env vars
     assert!(
-        has_flag_with_value(args, "-e", "HTTP_PROXY=http://127.0.0.1:12345"),
-        "args should include -e HTTP_PROXY=http://127.0.0.1:12345, got: {args:?}"
+        has_flag_with_value(args, "--network", "bullpen-egress"),
+        "read_file must join the named network too, got: {args:?}"
     );
-    assert!(
-        has_flag_with_value(args, "-e", "HTTPS_PROXY=http://127.0.0.1:12345"),
-        "args should include -e HTTPS_PROXY=http://127.0.0.1:12345, got: {args:?}"
-    );
-
-    // Verify NO_PROXY is also set
-    assert!(
-        find_arg(args, "-e").is_some(),
-        "should have at least one -e flag for NO_PROXY"
-    );
-    let has_no_proxy = args.iter().any(|a| a.starts_with("NO_PROXY="));
-    assert!(has_no_proxy, "should have NO_PROXY env var");
+    for var in FOUR_PROXY_SPELLINGS {
+        assert_eq!(
+            env_value(args, var),
+            Some("http://10.0.0.9:3128"),
+            "read_file: {var} missing or wrong, got: {args:?}"
+        );
+    }
 }
 
-/// **The bite (b) target.** `--network none` MUST survive even with proxy.
+/// `read_file` on the egress-off branch also gets neither a network nor
+/// proxy vars - the same bite (a) shape, on the other call site.
 #[tokio::test]
-async fn network_none_survives_with_proxy() {
-    let config = SandboxConfig {
-        egress_proxy_addr: "127.0.0.1:12345".to_string(),
-        ..Default::default()
-    };
+async fn read_file_egress_off_yields_network_none_and_no_proxy_vars() {
+    let config = SandboxConfig::default(); // network and egress_proxy_addr both empty
 
     let runner = FakeRunner::new();
-    runner.push_response("ok\n", "", 0);
-
+    runner.push_response("contents\n", "", 0);
     let sandbox = DockerSandbox::new(config, Arc::new(runner.clone()));
-    let _ = sandbox.exec("test-bot", "echo ok").await;
+    let _ = sandbox.read_file("test-bot", "f.txt").await;
 
     let commands = runner.commands();
     let args = &commands[0];
 
-    // Check for `--network none`
     assert!(
         has_flag_with_value(args, "--network", "none"),
-        "args must include --network none even with proxy, got: {args:?}"
+        "got: {args:?}"
     );
-}
-
-/// **The bite (c) target.** No proxy env vars when proxy is not configured.
-#[tokio::test]
-async fn no_proxy_env_vars_when_proxy_not_configured() {
-    let config = SandboxConfig::default(); // egress_proxy_addr is empty by default
-
-    let runner = FakeRunner::new();
-    runner.push_response("ok\n", "", 0);
-
-    let sandbox = DockerSandbox::new(config, Arc::new(runner.clone()));
-    let _ = sandbox.exec("test-bot", "echo ok").await;
-
-    let commands = runner.commands();
-    let args = &commands[0];
-
-    // Should NOT have HTTP_PROXY or HTTPS_PROXY
-    let http_proxy_count = count_env_vars(args, "HTTP_PROXY");
-    let https_proxy_count = count_env_vars(args, "HTTPS_PROXY");
-
-    assert_eq!(
-        http_proxy_count, 0,
-        "should not have HTTP_PROXY when egress_proxy_addr is empty, got: {args:?}"
-    );
-    assert_eq!(
-        https_proxy_count, 0,
-        "should not have HTTPS_PROXY when egress_proxy_addr is empty, got: {args:?}"
-    );
-
-    // But `--network none` should still be there
-    assert!(
-        has_flag_with_value(args, "--network", "none"),
-        "args must include --network none, got: {args:?}"
-    );
-}
-
-/// read_file should also get proxy env vars when configured.
-#[tokio::test]
-async fn read_file_includes_proxy_env_vars() {
-    let config = SandboxConfig {
-        egress_proxy_addr: "127.0.0.1:12345".to_string(),
-        ..Default::default()
-    };
-
-    let runner = FakeRunner::new();
-    runner.push_response("file contents\n", "", 0);
-
-    let sandbox = DockerSandbox::new(config, Arc::new(runner.clone()));
-    let _ = sandbox.read_file("test-bot", "test.txt").await;
-
-    let commands = runner.commands();
-    let args = &commands[0];
-
-    // Should have HTTP_PROXY env var
-    assert!(
-        has_flag_with_value(args, "-e", "HTTP_PROXY=http://127.0.0.1:12345"),
-        "read_file args should include HTTP_PROXY, got: {args:?}"
-    );
-
-    // And still have --network none
-    assert!(
-        has_flag_with_value(args, "--network", "none"),
-        "read_file args must include --network none, got: {args:?}"
-    );
+    for var in FOUR_PROXY_SPELLINGS {
+        assert!(
+            env_value(args, var).is_none(),
+            "{var} leaked, got: {args:?}"
+        );
+    }
 }

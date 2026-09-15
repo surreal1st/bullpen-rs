@@ -50,12 +50,17 @@ pub struct SandboxConfig {
     /// `--network`.
     pub runtime: String,
     pub docker_host: String,
-    /// Empty means `--network none`, which is the default.
+    /// Empty means `--network none`, which is the default and the property
+    /// that currently keeps a bot away from SHOOT, both CRMs, Brassrook and
+    /// Switchboard on meridian's own loopback. Set only when
+    /// `BULLPEN_SANDBOX_EGRESS` is on (see `default_sandbox`).
     pub network: String,
-    /// S6-W-02: egress proxy address (e.g., "127.0.0.1:12345"), or empty
-    /// if the proxy is not running. When non-empty and a bot has egress mode
-    /// "allowlist", the container gets HTTP_PROXY/HTTPS_PROXY env vars pointing
-    /// to this address.
+    /// The egress proxy's address the container is forced through, e.g.
+    /// `"10.9.0.1:3128"` (host:port, no scheme - `network_args` adds
+    /// `http://`). Empty means no proxy, which is also the default. Only
+    /// meaningful together with a non-empty `network`: `network_args` never
+    /// puts a proxy var on the `--network none` branch, so a stray address
+    /// here does nothing when egress is off.
     pub egress_proxy_addr: String,
 }
 
@@ -106,31 +111,38 @@ fn container_name(bot_id: &str) -> String {
     )
 }
 
-/// Network arguments for a sandbox container.
-/// With network off, returns `["--network", "none"]`.
-/// 🔴 This ALWAYS returns "none" for S6-W-02 - network ONLY through the proxy.
+/// Network arguments for a sandbox container, INCLUDING its proxy env vars
+/// when it has a real network to use them on.
+///
+/// Ported from TS `networkArgs` (`sandbox.ts:140-153`): ONE function, used
+/// by every call site that assembles a container's args (`exec` and
+/// `read_file` both go through `isolation_args` below), because two copies
+/// is how a background job ends up with a network the foreground job
+/// lacks - a difference nobody would think to test for.
+///
+/// With `cfg.network` empty this returns `["--network", "none"]` and
+/// NOTHING else - byte-for-byte what the sandbox did before egress existed.
+/// S6-W-02 put the proxy env vars on this branch, which is exactly why they
+/// were inert: a container with `--network none` has no network stack at
+/// all, so it can never dial a proxy regardless of what env vars it is
+/// handed. The proxy vars belong ONLY on the branch where the container
+/// actually joins a network - and there, both letter-case spellings, since
+/// half the tooling in an alpine image reads `http_proxy` and half reads
+/// `HTTP_PROXY`.
 fn network_args(cfg: &SandboxConfig) -> Vec<String> {
     if cfg.network.is_empty() {
-        vec!["--network".to_string(), "none".to_string()]
-    } else {
-        vec!["--network".to_string(), cfg.network.clone()]
+        return vec!["--network".to_string(), "none".to_string()];
     }
-}
 
-/// Proxy environment variables for a bot with egress enabled.
-/// Returns docker `-e` flag pairs for HTTP_PROXY, HTTPS_PROXY, NO_PROXY.
-/// 🔴 These env vars ONLY configure the proxy path; the container still has
-/// `--network none`. Traffic ONLY flows through the proxy.
-fn proxy_args(proxy_addr: &str) -> Vec<String> {
-    let proxy_url = format!("http://{}", proxy_addr);
-    vec![
-        "-e".to_string(),
-        format!("HTTP_PROXY={}", proxy_url),
-        "-e".to_string(),
-        format!("HTTPS_PROXY={}", proxy_url),
-        "-e".to_string(),
-        "NO_PROXY=127.0.0.1,localhost".to_string(),
-    ]
+    let mut args = vec!["--network".to_string(), cfg.network.clone()];
+    if !cfg.egress_proxy_addr.is_empty() {
+        let proxy_url = format!("http://{}", cfg.egress_proxy_addr);
+        for var in ["http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"] {
+            args.push("-e".to_string());
+            args.push(format!("{var}={proxy_url}"));
+        }
+    }
+    args
 }
 
 /// F2: the full hardened flag block shared by BOTH `exec` and `read_file` -
@@ -513,14 +525,6 @@ impl Sandbox for DockerSandbox {
 
         args.extend(isolation_args(&self.config, &name));
 
-        // S6-W-02: add proxy environment variables if proxy is configured.
-        // A per-bot allowlist check would happen here once per-bot proxies
-        // are added. For now, the proxy address being non-empty means the
-        // master switch is on and this bot should go through it.
-        if !self.config.egress_proxy_addr.is_empty() {
-            args.extend(proxy_args(&self.config.egress_proxy_addr));
-        }
-
         // Volume and working directory
         args.extend(vec![
             "--mount".to_string(),
@@ -581,14 +585,6 @@ impl Sandbox for DockerSandbox {
         let mut args = vec!["docker".to_string(), "run".to_string(), "--rm".to_string()];
 
         args.extend(isolation_args(&self.config, &name));
-
-        // S6-W-02: add proxy environment variables if proxy is configured.
-        // A per-bot allowlist check would happen here once per-bot proxies
-        // are added. For now, the proxy address being non-empty means the
-        // master switch is on and this bot should go through it.
-        if !self.config.egress_proxy_addr.is_empty() {
-            args.extend(proxy_args(&self.config.egress_proxy_addr));
-        }
 
         args.extend(vec![
             "--mount".to_string(),
@@ -686,6 +682,18 @@ fn probe_docker(docker_host: &str) -> Result<(), String> {
         })
 }
 
+/// The docker network sandboxed containers join when egress is enabled -
+/// `BULLPEN_SANDBOX_NETWORK`, defaulting to `bullpen-egress` (TS's
+/// `DEFAULT_SANDBOX.network`, `sandbox.ts:123`, picks the same default).
+/// Shared by `default_sandbox` below and by whatever starts the egress
+/// proxy (`egress_proxy::start_egress_proxy` takes the network it should
+/// create/join as a plain argument rather than reading this itself, so the
+/// two stay in sync through one call site instead of two copies of the
+/// same env read).
+pub fn sandbox_network_name() -> String {
+    std::env::var("BULLPEN_SANDBOX_NETWORK").unwrap_or_else(|_| "bullpen-egress".to_string())
+}
+
 /// The sandbox for executing bot commands, chosen by `BULLPEN_SANDBOX` at
 /// call time. S6L-01 put this logic in `lib.rs` as a private fn used only
 /// by `AppState::build`; S6L-02 moved it here, public, so `RunManager`'s
@@ -703,7 +711,22 @@ pub fn default_sandbox() -> std::sync::Arc<dyn Sandbox> {
         ));
     }
 
-    let config = SandboxConfig::default();
+    let mut config = SandboxConfig::default();
+    // S6-W-02b: `network`/`egress_proxy_addr` are gated on the master
+    // switch, same as TS's `DEFAULT_SANDBOX` (`sandbox.ts:122-125`) - both
+    // stay empty (`--network none`, no proxy vars) unless
+    // `BULLPEN_SANDBOX_EGRESS` is explicitly "on". `egress_proxy_addr` only
+    // becomes non-empty once something has actually bound a proxy and
+    // published it via `egress_proxy::egress_proxy_addr` - never guessed at
+    // here, so a container is never handed a proxy address nothing is
+    // listening on.
+    if crate::egress::egress_enabled(std::env::var("BULLPEN_SANDBOX_EGRESS").ok().as_deref()) {
+        config.network = sandbox_network_name();
+        if let Some(addr) = crate::egress_proxy::egress_proxy_addr() {
+            config.egress_proxy_addr = addr.to_string();
+        }
+    }
+
     // F9: the startup probe the ticket specified, and three doc comments
     // already claimed existed. Without it, a daemon that is not up yet (or
     // an image never pulled) meant every `shell` call returned raw `docker`
