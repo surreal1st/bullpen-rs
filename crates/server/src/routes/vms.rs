@@ -59,6 +59,13 @@ pub fn router() -> Router<AppState> {
         .route("/api/bots/{id}/vm/ensure", post(post_ensure))
         .route("/api/bots/{id}/vm/thumbnail.png", get(get_thumbnail))
         .route("/api/bots/{id}/vm/view", get(view_redirect))
+        // 🔴 Axum's `{*rest}` wildcard does not match an EMPTY remainder, so
+        // `/vm/view/` - the exact `viewPath` this API hands out, and where
+        // `/vm/view` redirects - fell through to a 404 while
+        // `/vm/view/index.html` routed fine. The advertised path redirected
+        // into a dead end; found by walking it on the shipped server, not by
+        // any test. This route is that same handler with an empty rest.
+        .route("/api/bots/{id}/vm/view/", any(view_proxy_root))
         .route("/api/bots/{id}/vm/view/{*rest}", any(view_proxy))
 }
 
@@ -342,6 +349,16 @@ const MAX_PROXY_BODY_BYTES: usize = 16 * 1024 * 1024;
 ///
 /// 🔴 NEVER creates a machine (bite (a), same as `get_thumbnail`): no `vms`
 /// row is a plain 404.
+/// `/vm/view/` with nothing after it: the container's own root. Exists
+/// because the wildcard route below cannot match an empty remainder.
+async fn view_proxy_root(
+    State(state): State<AppState>,
+    Path(bot_id): Path<String>,
+    req: Request,
+) -> Response {
+    view_proxy(State(state), Path((bot_id, String::new())), req).await
+}
+
 async fn view_proxy(
     State(state): State<AppState>,
     Path((bot_id, rest)): Path<(String, String)>,

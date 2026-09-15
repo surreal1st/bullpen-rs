@@ -489,3 +489,49 @@ async fn disabled_status_view_never_claims_a_machine_exists() {
         })
     );
 }
+
+/// 🔴 The `viewPath` this API hands out must actually ROUTE.
+///
+/// Found on the shipped server, not by a test: axum's `{*rest}` wildcard
+/// does not match an empty remainder, so `/api/bots/{id}/vm/view/` - the
+/// exact string `ensure` returns as `viewPath`, and where `/vm/view`
+/// redirects - fell through to a 404, while `/vm/view/index.html` routed
+/// fine. Opening a bot's screen was a redirect into a dead end.
+///
+/// Two worlds: with the trailing-slash route registered, the advertised
+/// path reaches the proxy handler (which then fails on its own terms -
+/// the fake docker has no container to reach - and NOT with 404 NOT_FOUND).
+/// Without it, the path is not routed at all. The observable that separates
+/// them is the status code being anything other than 404.
+#[tokio::test]
+async fn the_view_path_this_api_advertises_is_actually_routed() {
+    let db = Db::open(":memory:").expect("open :memory: db");
+    let session = seed_session(&db);
+    seed_bot(&db, "arthur", "Arthur");
+
+    let docker = Arc::new(RecordingDockerRun::new());
+    docker.push_response(true, "", "Error: no such container");
+    docker.push_response(true, "", "");
+    let docker_dyn: Arc<dyn DockerRun> = docker.clone();
+    let state = server::AppState::with_vm(db, docker_dyn, test_config(), true);
+    let router = server::build_app(state);
+
+    let (status, body) = send(post("/api/bots/arthur/vm/ensure", &session), router.clone()).await;
+    assert_eq!(status, StatusCode::OK, "body: {body:?}");
+    let advertised = body["viewPath"].as_str().expect("viewPath").to_string();
+
+    let req = Request::builder()
+        .method("GET")
+        .uri(&advertised)
+        .header("cookie", &session)
+        .body(Body::empty())
+        .expect("build request");
+    let response = router.oneshot(req).await.expect("send");
+
+    assert_ne!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "the viewPath this API hands out ({advertised}) must be routed - it 404'd, which is \
+         what opening a bot's screen did on the shipped server"
+    );
+}
