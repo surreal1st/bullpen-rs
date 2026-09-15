@@ -10,6 +10,7 @@
 use crate::api;
 use crate::message_time::format_time;
 use crate::model_chip::short_model;
+use crate::slack_card::SlackCard;
 use crate::types::{AutoReviewLogEntry, AutoReviewState, CatalogEntry, RoutingState};
 use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
@@ -67,6 +68,12 @@ fn GeneralSettings() -> Element {
             h3 { class: "stg-group-h", "Memory" }
             div { class: "stg-card stg-card-loose",
                 SharedMemorySection {}
+            }
+        }
+        section { class: "stg-group",
+            h3 { class: "stg-group-h", "Connectors" }
+            div { class: "stg-card stg-card-loose",
+                SlackCard {}
             }
         }
     }
