@@ -13,6 +13,7 @@ pub mod questions;
 pub mod rooms;
 pub mod roster;
 pub mod routines;
+pub mod slack;
 
 pub use auth::{
     PasswordRecord, create_session, destroy_session, is_configured, password_record, session_valid,
