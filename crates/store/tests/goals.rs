@@ -8,9 +8,9 @@ use uuid::Uuid;
 
 use store::Db;
 use store::goals::{
-    CreateGoalInput, MAX_ACTIVE_GOALS, MAX_LOG_ENTRIES, UpdateGoalPatch, budget_overrun,
-    create_goal, delete_goal, due_for_weekly_report, due_goals, goal_by_id, goal_runs, list_goals,
-    most_recent_active_goal, reflect_on_goal, update_goal,
+    CreateGoalInput, MAX_ACTIVE_GOALS, UpdateGoalPatch, budget_overrun, create_goal, delete_goal,
+    due_for_weekly_report, due_goals, goal_by_id, goal_runs, list_goals, most_recent_active_goal,
+    reflect_on_goal, update_goal,
 };
 
 /// Helper to create a test bot in the database.
@@ -26,29 +26,103 @@ fn create_test_bot(db: &Db) -> String {
     bot_id
 }
 
-/// Copies the fixture to a fresh temp path for isolation.
-fn copy_fixture_to_temp() -> PathBuf {
-    let fixture = "d:/rainmade/.scratch/bullpen-rs/fixtures/ts-made.db";
-    let temp = std::env::temp_dir().join(format!("bullpen-rs-goals-test-{}.db", Uuid::new_v4()));
-    fs::copy(fixture, &temp).expect("copy fixture to temp path");
-    temp
-}
-
 fn t(s: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
 }
 
 /// Test 1: ensureGoalTables is idempotent (opening twice doesn't error), and
-/// the fixture a live TS Bullpen wrote still opens.
+/// the fixture a live TS Bullpen wrote still opens. Asserts table schema
+/// (columns and indexes) via PRAGMA.
 #[test]
 fn ensure_goal_tables_is_idempotent_and_opens_ts_fixture() {
-    let temp = copy_fixture_to_temp();
+    // Construct path relative to CARGO_MANIFEST_DIR (crates/store), going up to
+    // the workspace root (rainmade), then to the fixture.
+    let fixture = {
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        // manifest: .../bullpen-rs/crates/store
+        // parent(): .../bullpen-rs/crates
+        // parent(): .../bullpen-rs
+        // parent(): .../projects
+        // parent(): .../rainmade
+        let workspace = manifest
+            .parent() // -> crates
+            .and_then(|p| p.parent()) // -> bullpen-rs
+            .and_then(|p| p.parent()) // -> projects
+            .and_then(|p| p.parent()) // -> rainmade
+            .expect("navigate to workspace root");
+        workspace.join(".scratch/bullpen-rs/fixtures/ts-made.db")
+    };
+
+    let temp = {
+        let fixture_str = fixture.to_str().expect("fixture path is valid UTF-8");
+        let temp =
+            std::env::temp_dir().join(format!("bullpen-rs-goals-test-{}.db", Uuid::new_v4()));
+        fs::copy(fixture_str, &temp).expect("copy fixture to temp path");
+        temp
+    };
+
     let db1 = Db::open(temp.to_str().unwrap()).expect("open first time");
     let db2 = Db::open(temp.to_str().unwrap()).expect("open second time");
 
     let goals1 = list_goals(&db1, None).expect("list goals db1");
     let goals2 = list_goals(&db2, None).expect("list goals db2");
     assert_eq!(goals1.len(), goals2.len(), "same number of goals");
+
+    // Assert the goals table has at least all 16 expected columns.
+    let columns: Vec<String> = db1
+        .conn()
+        .prepare("PRAGMA table_info(goals)")
+        .expect("prepare PRAGMA")
+        .query_map([], |row| row.get(1))
+        .expect("query PRAGMA")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect column names");
+
+    let expected_columns = vec![
+        "id",
+        "bot_id",
+        "objective",
+        "done_when",
+        "status",
+        "budget_tokens",
+        "spent_tokens",
+        "budget_until",
+        "plan",
+        "log",
+        "no_tool_streak",
+        "reason",
+        "next_session_at",
+        "last_session_at",
+        "last_report_at",
+        "created_at",
+    ];
+    assert_eq!(
+        columns.len(),
+        expected_columns.len(),
+        "goals table column count"
+    );
+    for (got, expected) in columns.iter().zip(expected_columns.iter()) {
+        assert_eq!(got, expected, "goals table column mismatch");
+    }
+
+    // Assert both index names exist.
+    let indexes: Vec<String> = db1
+        .conn()
+        .prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='goals'")
+        .expect("prepare index query")
+        .query_map([], |row| row.get(0))
+        .expect("query indexes")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect index names");
+
+    assert!(
+        indexes.contains(&"idx_goals_due".to_string()),
+        "idx_goals_due must exist"
+    );
+    assert!(
+        indexes.contains(&"idx_goals_bot".to_string()),
+        "idx_goals_bot must exist"
+    );
 
     let _ = fs::remove_file(&temp);
 }
@@ -366,24 +440,22 @@ fn goal_log_trims_to_max_entries_dropping_oldest() {
     )
     .expect("create goal");
 
-    let overflow = MAX_LOG_ENTRIES + 5;
+    // Hardcode the literal 200 (TS's MAX_LOG_ENTRIES), not MAX_LOG_ENTRIES var
+    const LITERAL_LOG_CAP: usize = 200;
+    let overflow = LITERAL_LOG_CAP + 5;
     for i in 0..overflow {
         reflect_on_goal(&db, &bot_id, &format!("event {}", i), "", Utc::now()).expect("reflect");
     }
 
     let listed = list_goals(&db, Some(&bot_id)).expect("list");
     let g = listed.iter().find(|g| g.id == goal.id).unwrap();
-    assert_eq!(
-        g.log.len(),
-        MAX_LOG_ENTRIES,
-        "log capped at MAX_LOG_ENTRIES"
-    );
+    assert_eq!(g.log.len(), LITERAL_LOG_CAP, "log capped at 200");
     // Oldest dropped first: entry 0 is gone, the earliest surviving entry is
     // "event 5" (5 entries were pushed off the front).
     assert_eq!(g.log[0].text, "Unexpected: event 5");
     // Newest entry is still present at the end.
     assert_eq!(
-        g.log[MAX_LOG_ENTRIES - 1].text,
+        g.log[LITERAL_LOG_CAP - 1].text,
         format!("Unexpected: event {}", overflow - 1)
     );
 }
