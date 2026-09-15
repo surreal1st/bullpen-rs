@@ -442,24 +442,6 @@ fn next_slot_reuses_deleted_slot() {
 }
 
 #[test]
-fn sanitizer_breaks_when_not_sanitizing_demonstrates_flag_prevention() {
-    // This test is designed to go RED if sanitisation is broken.
-    // It demonstrates what WOULD happen if we didn't sanitise the bot id.
-    let malicious_id = "-rm";
-    // Without sanitisation, this creates a container name that starts with hyphen:
-    let unsanitized_container = format!("bullpen-vm-{}", malicious_id);
-    // This assertion FAILS (test goes red) because unsanitized_container = "bullpen-vm--rm"
-    // which DOES start with "-" in the bot id part, proving sanitisation is needed
-    // The proof: even though we allowed hyphen at the start of bot id,
-    // the container name starts with 'bullpen-vm-' so it never starts with '-'
-    assert!(
-        !unsanitized_container.starts_with("-"),
-        "Container name must never start with '-', got: {}",
-        unsanitized_container
-    );
-}
-
-#[test]
 fn next_slot_must_return_none_on_exhaustion() {
     // This test goes RED if next_slot returns a slot when all are taken.
     // It verifies the exhaustion behavior is correct.
