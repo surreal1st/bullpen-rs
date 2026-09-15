@@ -16,8 +16,11 @@ use serde_json::{Value, json};
 use server::vm::DockerRun;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use store::Db;
 use store::vms::{DockerResult, VmConfig, VmRow};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 use tower::ServiceExt;
 
 /// Fake docker runner. Records every call it receives - the RECORDED
@@ -534,4 +537,128 @@ async fn the_view_path_this_api_advertises_is_actually_routed() {
         "the viewPath this API hands out ({advertised}) must be routed - it 404'd, which is \
          what opening a bot's screen did on the shipped server"
     );
+}
+
+/* ============================================================ S6-W-06 ============================================================ */
+//
+// The bite the header-level unit test alone cannot cover (`tests/vm.rs`'s
+// `proxy_response_headers_keeps_content_encoding`, which drives
+// `proxy_response_headers` directly): this ticket's own text says that test
+// "still passes if some later code strips the header somewhere else on the
+// path" - `view_proxy` (`routes/vms.rs`) is that "somewhere else". It is
+// the only place that actually assembles the response a browser receives,
+// and it is reachable only through the real route, not by calling
+// `proxy_response_headers` in isolation.
+//
+// Two worlds:
+// - GUARD PRESENT (shipped `view_proxy` + `proxy_response_headers` with
+//   `content-encoding` off `HOP_BY_HOP`): a client behind this route
+//   receives the upstream's bytes UNCHANGED and the `content-encoding:
+//   gzip` header describing them.
+// - GUARD REMOVED (`content-encoding` put back on `HOP_BY_HOP` - the shape
+//   this shipped in at `9bc393a` - or any other code on the path stripping
+//   it before the response leaves `view_proxy`): the same compressed bytes
+//   reach the client with no header saying so - the exact shape a browser
+//   (every browser sends `accept-encoding: gzip`) rendered as mojibake on
+//   the shipped server, found by opening the shot, not by any test.
+//
+// Observable that differs: the proxied response's `content-encoding`
+// header, and that the body bytes are exactly the upstream's.
+#[tokio::test]
+async fn view_proxy_preserves_gzip_bytes_and_their_content_encoding_header() {
+    let db = Db::open(":memory:").expect("open :memory: db");
+    let session = seed_session(&db);
+    seed_bot(&db, "dora", "Dora");
+
+    // Ground truth captured on meridian (this ticket's own report) for
+    // `accept-encoding: gzip`: 200, `content-type: text/html`, first bytes
+    // `1f8b0800...` (a real gzip member), no `content-encoding` header on
+    // the broken shape. This is that same gzip member.
+    let gzip_body: &[u8] = &[
+        0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xcb, 0x48, 0xcd, 0xc9, 0xc9,
+        0x07, 0x00, 0x86, 0xa6, 0x10, 0x36, 0x05, 0x00, 0x00, 0x00,
+    ];
+
+    // A real loopback listener stands in for the container's web desktop -
+    // there is no Docker and no browser on this workstation (this file's
+    // own constraint), so this proves the PROXY wiring, not that a real
+    // container answered.
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let web_port = listener.local_addr().expect("local_addr").port() as i32;
+
+    let upstream_task = tokio::spawn({
+        let gzip_body = gzip_body.to_vec();
+        async move {
+            let (mut upstream, _addr) = listener.accept().await.expect("accept");
+            let mut buf = [0u8; 4096];
+            // Drain the request; this fake only needs to know one arrived.
+            let _ = upstream.read(&mut buf).await.expect("read request");
+            let head = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-encoding: gzip\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                gzip_body.len()
+            );
+            upstream
+                .write_all(head.as_bytes())
+                .await
+                .expect("write response head");
+            upstream
+                .write_all(&gzip_body)
+                .await
+                .expect("write response body");
+            upstream.shutdown().await.expect("shutdown");
+        }
+    });
+
+    insert_vm_row(
+        &db,
+        &VmRow {
+            bot_id: "dora".to_string(),
+            container: "bullpen-vm-dora".to_string(),
+            cdp_port: 9301,
+            web_port,
+            state: "running".to_string(),
+            last_used_at: "2026-09-15T00:00:00Z".to_string(),
+        },
+    );
+
+    let docker: Arc<dyn DockerRun> = Arc::new(RecordingDockerRun::new());
+    let state = server::AppState::with_vm(db, docker, test_config(), true);
+    let router = server::build_app(state);
+
+    // The exact path the ticket's ground truth was captured against, and
+    // every browser sends `accept-encoding: gzip` - the bug reproduces
+    // exactly when a real client would send this.
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/bots/dora/vm/view/")
+        .header("cookie", &session)
+        .header("accept-encoding", "gzip")
+        .body(Body::empty())
+        .expect("build request");
+    let response = router.oneshot(req).await.expect("send");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("content-encoding")
+            .map(|v| v.to_str().unwrap()),
+        Some("gzip"),
+        "the client must be told the body is gzip-compressed, or a browser renders it as text"
+    );
+    let body = axum::body::to_bytes(response.into_body(), 8 * 1024 * 1024)
+        .await
+        .expect("collect body");
+    assert_eq!(
+        body.as_ref(),
+        gzip_body,
+        "the proxy must relay the upstream's bytes unchanged - this crate's reqwest client \
+         never decompresses (no `gzip` feature), so anything other than the exact bytes means \
+         something on the path mangled the body"
+    );
+
+    tokio::time::timeout(Duration::from_secs(2), upstream_task)
+        .await
+        .expect("upstream task did not finish")
+        .expect("upstream task panicked");
 }

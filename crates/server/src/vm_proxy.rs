@@ -117,6 +117,22 @@ fn percent_decode(input: &str) -> String {
 }
 
 /// Headers a proxy must not pass on, per RFC 9110 - they describe ONE hop.
+///
+/// 🔴 `content-encoding` is deliberately NOT on this list, unlike TS
+/// `vm.ts:617-628`'s equivalent. `content-encoding` is an END-TO-END header
+/// in RFC 9110, not a hop-by-hop one - TS could get away with stripping it
+/// only because TS fetches upstream with `fetch()`/undici, which transparently
+/// decompresses the body before TS ever sees it, so by the time TS strips the
+/// header it no longer described the (already-plain) bytes. This crate's
+/// `reqwest` client is built `default-features = false` with no `gzip`
+/// feature (`Cargo.toml`) - it never decompresses, so the body a browser
+/// receives here is still gzip-compressed. Stripping `content-encoding` too
+/// left the compressed bytes with no header saying so, so a browser (every
+/// browser sends `accept-encoding: gzip`) rendered them as plain text
+/// (S6-W-06). Do NOT add reqwest's `gzip` feature to "fix" this instead -
+/// this proxy relays bytes for a desktop stream; decompressing only to
+/// re-send costs CPU on every frame for nothing. `content-length` stays
+/// stripped: axum recomputes it from the body it actually sends.
 const HOP_BY_HOP: &[&str] = &[
     "connection",
     "keep-alive",
@@ -126,7 +142,6 @@ const HOP_BY_HOP: &[&str] = &[
     "trailer",
     "transfer-encoding",
     "upgrade",
-    "content-encoding",
     "content-length",
 ];
 

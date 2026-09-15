@@ -758,6 +758,37 @@ fn proxy_response_headers_keeps_ordinary_headers_and_forces_no_store() {
     assert_eq!(out.get("cache-control").unwrap(), "no-store");
 }
 
+/// S6-W-06 bite (a). Two worlds:
+/// - GUARD PRESENT (shipped `proxy_response_headers`, `content-encoding` NOT
+///   on `HOP_BY_HOP`): a `content-encoding: gzip` on the upstream response
+///   survives into the proxied headers, still describing the (still
+///   compressed - this crate's `reqwest` never decompresses) body a caller
+///   receives.
+/// - GUARD REMOVED (`content-encoding` put back on `HOP_BY_HOP`, the shape
+///   this shipped in until S6-W-06): the header is stripped, leaving a
+///   browser with compressed bytes and no label saying so - it renders them
+///   as text/html mojibake instead of a desktop (found on the SHIPPED
+///   server at `9bc393a` by opening the shot, not by any test that existed
+///   then).
+///
+/// Observable that differs: `out.get("content-encoding")`.
+#[test]
+fn proxy_response_headers_keeps_content_encoding() {
+    let mut source = HeaderMap::new();
+    source.insert("content-type", HeaderValue::from_static("text/html"));
+    source.insert("content-encoding", HeaderValue::from_static("gzip"));
+
+    let out = proxy_response_headers(&source);
+
+    assert_eq!(
+        out.get("content-encoding").unwrap(),
+        "gzip",
+        "content-encoding is END-TO-END per RFC 9110 and must survive - without it a \
+         browser (every browser sends accept-encoding: gzip) renders the still-compressed \
+         body as text"
+    );
+}
+
 /// S6-06b bite (b). Two worlds:
 /// - GUARD PRESENT (shipped `proxy_response_headers`): every header in
 ///   `HOP_BY_HOP` (`connection`, `transfer-encoding`, ...) is stripped
