@@ -52,6 +52,24 @@ const HOOK_KINDS: &[(&str, &str)] = &[
     ("sentry", "Sentry"),
     ("linear", "Linear"),
     ("pagerduty", "PagerDuty"),
+    ("slack", "Slack"),
+];
+
+/// S5c-04: the four ways a `hook_kind: "slack"` routine can fire - matches
+/// `store::slack::SLACK_TRIGGER_KINDS` on the server. Unlike every other
+/// hook kind, `hook_events` here is not a free-typed comma list (there is
+/// nothing per-delivery to enumerate the way GitHub's event names are) - it
+/// is exactly one of these four, so the edit form below swaps the free-text
+/// events `input` for a `select` over this list when `slack` is picked, and
+/// that select writes its single choice straight into `edit_hook_events`
+/// (still a plain `String` - `save_edit`'s existing comma-split-and-filter
+/// turns one value with no commas in it into a one-element `Vec` with no
+/// changes needed there).
+const SLACK_TRIGGER_KINDS: &[(&str, &str)] = &[
+    ("mention", "Mention (@bot)"),
+    ("keyword", "Keyword"),
+    ("message", "Any message"),
+    ("reaction", "Reaction"),
 ];
 
 /// The modal shell, opened from `thread.rs`'s "Routines" button - reuses
@@ -342,27 +360,64 @@ pub fn RoutinesEditor(bot_id: String) -> Element {
                                             }
                                             {schedule_hint(edit_preview)}
 
-                                            div { class: "routine-hook",
-                                                p { class: "field", small { "Webhook signature" } }
-                                                select {
-                                                    "aria-label": "Webhook signature kind",
-                                                    value: "{edit_hook_kind}",
-                                                    onchange: move |e| edit_hook_kind.set(e.value()),
-                                                    for (value , label) in HOOK_KINDS.iter() {
-                                                        option { key: "{value}", value: "{value}", "{label}" }
+                                            {
+                                                let is_slack_hook = *edit_hook_kind.read() == "slack";
+                                                let match_placeholder = if is_slack_hook {
+                                                    "keyword, regex (blank = every message)"
+                                                } else {
+                                                    "Match pattern, regex (blank = every delivery)"
+                                                };
+                                                rsx! {
+                                                    div { class: "routine-hook",
+                                                        p { class: "field", small { "Webhook signature" } }
+                                                        select {
+                                                            "aria-label": "Webhook signature kind",
+                                                            value: "{edit_hook_kind}",
+                                                            onchange: move |e| {
+                                                                let kind = e.value();
+                                                                // S5c-04: landing on "slack" with events left over from
+                                                                // another kind (free-typed GitHub event names, say)
+                                                                // would otherwise save as an invalid trigger kind - a
+                                                                // fresh pick always starts the trigger select on the
+                                                                // server's own default ("message", same as `hook_events[0]`
+                                                                // absent on `routes/slack.rs`'s read side).
+                                                                if kind == "slack"
+                                                                    && !SLACK_TRIGGER_KINDS
+                                                                        .iter()
+                                                                        .any(|(k, _)| *k == edit_hook_events.read().as_str())
+                                                                {
+                                                                    edit_hook_events.set("message".to_string());
+                                                                }
+                                                                edit_hook_kind.set(kind);
+                                                            },
+                                                            for (value , label) in HOOK_KINDS.iter() {
+                                                                option { key: "{value}", value: "{value}", "{label}" }
+                                                            }
+                                                        }
+                                                        if is_slack_hook {
+                                                            select {
+                                                                "aria-label": "Slack trigger kind",
+                                                                value: "{edit_hook_events}",
+                                                                onchange: move |e| edit_hook_events.set(e.value()),
+                                                                for (value , label) in SLACK_TRIGGER_KINDS.iter() {
+                                                                    option { key: "{value}", value: "{value}", "{label}" }
+                                                                }
+                                                            }
+                                                        } else {
+                                                            input {
+                                                                value: "{edit_hook_events}",
+                                                                placeholder: "push, pull_request (GitHub events, blank = all)",
+                                                                "aria-label": "Webhook events",
+                                                                oninput: move |e| edit_hook_events.set(e.value()),
+                                                            }
+                                                        }
+                                                        input {
+                                                            value: "{edit_hook_match}",
+                                                            placeholder: "{match_placeholder}",
+                                                            "aria-label": "Webhook match pattern",
+                                                            oninput: move |e| edit_hook_match.set(e.value()),
+                                                        }
                                                     }
-                                                }
-                                                input {
-                                                    value: "{edit_hook_events}",
-                                                    placeholder: "push, pull_request (GitHub events, blank = all)",
-                                                    "aria-label": "Webhook events",
-                                                    oninput: move |e| edit_hook_events.set(e.value()),
-                                                }
-                                                input {
-                                                    value: "{edit_hook_match}",
-                                                    placeholder: "Match pattern, regex (blank = every delivery)",
-                                                    "aria-label": "Webhook match pattern",
-                                                    oninput: move |e| edit_hook_match.set(e.value()),
                                                 }
                                             }
 
