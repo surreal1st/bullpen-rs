@@ -35,6 +35,12 @@ hmac = "0.12"
 sha2 = "0.10"
 subtle = "2"
 hex = "0.4"
+# S5b-06b: `hook_match`/`Condition.match` are user-supplied regex patterns
+# (`new RegExp(row.hook_match, "i")` in TS) checked against a webhook's
+# reduced text - not a fixed small grammar S5b-01's hand-scan approach fits,
+# so this is a real new dependency, added and flagged per that ticket's own
+# "tell me if you need one" rule.
+regex = "1"
 
 [profile.release]
 lto = "thin"

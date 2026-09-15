@@ -35,7 +35,14 @@ pub struct RoutineRow {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Condition {
     pub kind: String, // "github" | "sentry" | "linear" | "pagerduty" | "raw"
-    #[serde(skip_serializing_if = "Option::is_none")]
+    // S5b-06b: `match` is a Rust keyword, but the TS `Condition.match`
+    // (`routines.ts:67-70`) is what both the create/update route bodies
+    // (`routes/routines.rs`) and the wire JSON actually carry - without this
+    // rename, `match_` silently ate every incoming `"match"` key as a
+    // missing `Option` (see this struct's own doc history / S5b-06b's
+    // Results for the store read that surfaced it) and serialized it back
+    // out as `match_`.
+    #[serde(rename = "match", skip_serializing_if = "Option::is_none")]
     pub match_: Option<String>,
 }
 
@@ -192,13 +199,17 @@ fn parse_tools(stored: Option<&str>) -> Option<Vec<String>> {
     stored.and_then(|s| serde_json::from_str(s).ok())
 }
 
-/// Parse a JSON string as a vector of conditions.
-fn parse_conditions(stored: Option<&str>) -> Option<Vec<Condition>> {
+/// Parse a JSON string as a vector of conditions. `pub`: S5b-06b's webhook
+/// route (`crates/server/src/routes/hooks.rs`) reads a routine's stored
+/// `conditions` the same way `routine_from_row` does.
+pub fn parse_conditions(stored: Option<&str>) -> Option<Vec<Condition>> {
     stored.and_then(|s| serde_json::from_str(s).ok())
 }
 
-/// Parse a JSON string as a vector of hook events.
-fn parse_hook_events(stored: Option<&str>) -> Option<Vec<String>> {
+/// Parse a JSON string as a vector of hook events. `pub` for the same
+/// reason as `parse_conditions` above - the webhook route narrows a github
+/// delivery by this same list.
+pub fn parse_hook_events(stored: Option<&str>) -> Option<Vec<String>> {
     stored.and_then(|s| serde_json::from_str(s).ok())
 }
 
@@ -659,6 +670,62 @@ pub fn clear_routine_hook(db: &Db, id: &str) -> rusqlite::Result<bool> {
         params![id],
     )?;
     Ok(changes > 0)
+}
+
+/// S5b-06b: records one webhook delivery for a routine holding `conditions`.
+/// The AND-group cannot know a condition is met until every kind in it has
+/// its own recent arrival. Port of the TS `INSERT INTO hook_arrivals ...`
+/// (`app.ts:3780-3783`). The `hook_arrivals` table itself already exists
+/// (`ensure_routine_columns` above); this ticket adds no columns.
+pub fn record_hook_arrival(
+    db: &Db,
+    routine_id: &str,
+    kind: &str,
+    reduced_text: &str,
+) -> rusqlite::Result<()> {
+    db.conn().execute(
+        "INSERT INTO hook_arrivals (id, routine_id, kind, arrived_at, reduced_text) \
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            Uuid::new_v4().to_string(),
+            routine_id,
+            kind,
+            Utc::now().to_rfc3339(),
+            reduced_text,
+        ],
+    )?;
+    Ok(())
+}
+
+/// The most recent arrival for one routine+kind at or after `since` (an
+/// RFC3339 timestamp), or `None` if nothing of that kind has arrived in the
+/// window. Port of the TS per-condition lookup (`app.ts:3793-3805`).
+pub fn latest_hook_arrival(
+    db: &Db,
+    routine_id: &str,
+    kind: &str,
+    since: &str,
+) -> rusqlite::Result<Option<String>> {
+    db.conn()
+        .query_row(
+            "SELECT reduced_text FROM hook_arrivals \
+             WHERE routine_id = ?1 AND kind = ?2 AND arrived_at >= ?3 \
+             ORDER BY arrived_at DESC LIMIT 1",
+            params![routine_id, kind, since],
+            |row| row.get(0),
+        )
+        .optional()
+}
+
+/// Clears every recorded arrival for a routine once all its conditions have
+/// been met and it has fired - a met AND-group must not re-fire off the same
+/// arrivals a second time. Port of `app.ts:3827`.
+pub fn clear_hook_arrivals(db: &Db, routine_id: &str) -> rusqlite::Result<()> {
+    db.conn().execute(
+        "DELETE FROM hook_arrivals WHERE routine_id = ?1",
+        params![routine_id],
+    )?;
+    Ok(())
 }
 
 // Helper function to convert a database row into a Routine.
