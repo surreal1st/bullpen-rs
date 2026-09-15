@@ -150,6 +150,21 @@ async fn post_routines(
     let schedule_json = serde_json::to_string(&schedule_parsed)
         .map_err(|e| AppError::bad_request(format!("could not encode schedule: {e}")))?;
 
+    // 🔴 Refused here rather than discovered at 06:00. A routine naming a
+    // path it cannot reach does not fail loudly - it stops and asks Josh to paste
+    // the files into the chat, hours later, with nobody reading.
+    // Only a path NOTHING can reach refuses a save. A Windows path or a meridian
+    // path is a dependency on a tool, not a broken routine - Josh: "code happens
+    // here on Windows, storage/hosting happens on Meridian."
+    let blocking = crate::routine_paths::blocking_problems(
+        &crate::routine_paths::check_routine_paths(&body_data.prompt),
+    );
+    if !blocking.is_empty() {
+        return Err(AppError::bad_request(
+            crate::routine_paths::describe_path_problems(&blocking),
+        ));
+    }
+
     // Call the store to create the routine - it will check the 50-cap
     let result = create_routine(
         &db,
@@ -221,6 +236,22 @@ async fn patch_routine(
             serde_json::to_string(&schedule_parsed)
                 .map_err(|e| AppError::bad_request(format!("could not encode schedule: {e}")))?,
         );
+    }
+
+    // The same guard as creation: a prompt edited into a broken state is exactly
+    // as unreachable as one created that way.
+    // Only a path NOTHING can reach refuses a save. A Windows path or a meridian
+    // path is a dependency on a tool, not a broken routine - Josh: "code happens
+    // here on Windows, storage/hosting happens on Meridian."
+    if let Some(ref prompt) = body_data.prompt {
+        let blocking = crate::routine_paths::blocking_problems(
+            &crate::routine_paths::check_routine_paths(prompt),
+        );
+        if !blocking.is_empty() {
+            return Err(AppError::bad_request(
+                crate::routine_paths::describe_path_problems(&blocking),
+            ));
+        }
     }
 
     // Build the update fields
