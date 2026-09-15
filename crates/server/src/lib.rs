@@ -13,6 +13,7 @@ mod routes;
 pub mod rules;
 pub mod runs;
 pub mod sandbox;
+pub mod schedule;
 pub mod spend;
 mod tools;
 
