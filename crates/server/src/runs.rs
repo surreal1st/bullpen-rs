@@ -291,7 +291,29 @@ impl RunManager {
     /// `start`, minus the `notice`/routing/snapshot legwork out of scope for
     /// S1.
     pub fn start(self: &Arc<Self>, options: StartOptions) -> String {
-        self.start_inner(options, None)
+        self.start_inner(options, None, None)
+    }
+
+    /// S5-03: same as `start`, but stamps the run row's `routine_id` column
+    /// (migration-added, `crates/store/src/migrations.rs:154-155`) BEFORE
+    /// the drive task is spawned - not after, and not via a `StartOptions`
+    /// field. Two reasons:
+    ///
+    /// 1. `StartOptions` is built by struct literal at 13 call sites across
+    ///    this crate (`rooms.rs` x2, `routes/messages.rs`, ten test files);
+    ///    a new required field on that struct means editing all thirteen for
+    ///    a feature none of them has anything to do with. A second
+    ///    `start_*` entry point, exactly the shape `start_with_notice`
+    ///    already set as precedent, touches none of them.
+    /// 2. It must land before `tokio::spawn` returns control to the caller,
+    ///    not after: a fast (fake) model port can reach `settle` on another
+    ///    executor thread before a caller-side follow-up `UPDATE` runs, and
+    ///    `settle` (below) reads this same column back to decide whether to
+    ///    record routine health. Setting it inside the same synchronous
+    ///    `INSERT` that creates the row is the only way to make that race
+    ///    impossible rather than merely unlikely.
+    pub fn start_routine(self: &Arc<Self>, options: StartOptions, routine_id: String) -> String {
+        self.start_inner(options, None, Some(routine_id))
     }
 
     /// S2-F-04: same as `start`, but with a notice emitted BEFORE the
@@ -309,13 +331,14 @@ impl RunManager {
         options: StartOptions,
         starting_notice: Option<String>,
     ) -> String {
-        self.start_inner(options, starting_notice)
+        self.start_inner(options, starting_notice, None)
     }
 
     fn start_inner(
         self: &Arc<Self>,
         options: StartOptions,
         starting_notice: Option<String>,
+        routine_id: Option<String>,
     ) -> String {
         let id = Uuid::new_v4().to_string();
         let now = now_iso();
@@ -334,8 +357,8 @@ impl RunManager {
         let inserted = {
             let db = self.db();
             db.conn().execute(
-                "INSERT INTO runs (id, bot_id, conversation_id, trigger, status, model, messages, text, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, 'running', ?5, ?6, '', ?7, ?8)",
+                "INSERT INTO runs (id, bot_id, conversation_id, trigger, status, model, messages, text, created_at, updated_at, routine_id)
+                 VALUES (?1, ?2, ?3, ?4, 'running', ?5, ?6, '', ?7, ?8, ?9)",
                 rusqlite::params![
                     id,
                     options.bot_id,
@@ -345,6 +368,7 @@ impl RunManager {
                     messages_json,
                     now,
                     now,
+                    routine_id,
                 ],
             )
         };
@@ -1505,6 +1529,35 @@ were doing unless he changed it."
                 }
             }
         };
+
+        // S5-03: counted on EVERY terminal routine run, success included -
+        // deliberately not folded into the `!silent`/notify branch TS keeps
+        // this next to (`runs.ts:1560-1576`): the reset on success is half
+        // the rule, and skipping it here would leave a stale failure streak
+        // standing until three unrelated failures paused an otherwise
+        // healthy routine. Read back off the row rather than threaded
+        // through this function's parameters - see `start_routine`'s doc.
+        let routine_id: Option<String> = {
+            let db = self.db();
+            db.conn()
+                .query_row(
+                    "SELECT routine_id FROM runs WHERE id = ?1",
+                    rusqlite::params![run_id],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()
+                .unwrap_or_default()
+                .flatten()
+        };
+        if let Some(routine_id) = routine_id {
+            let db = self.db();
+            let ok = status != "failed";
+            if let Err(err) =
+                store::routines::record_routine_run(&db, &routine_id, ok, failure.as_deref())
+            {
+                tracing::error!("run {run_id}: failed to record routine health: {err}");
+            }
+        }
 
         if status == "failed" {
             self.emit(

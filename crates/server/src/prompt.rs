@@ -215,6 +215,19 @@ pub fn set_house_rules(db: &Db, rules: &str) -> String {
 /// continuation trap for Gemini.
 const NO_NEW_MESSAGE_TRAILER: &str = "Josh has not sent a new message - the conversation above ends on your own last turn. Do not continue or extend that reply as if it were unfinished. Say something new only if you have something worth saying unprompted; otherwise wait.";
 
+/// S5-03: appended, verbatim, to the prompt text of every ROUTINE run - and
+/// only a routine run; nothing here reads `Trigger`, so a caller (`routines::
+/// fire_routine`) is the one deciding whether this rides along, the same way
+/// TS's `fireRoutine` appends its own `STOP_RATHER_THAN_INVENT` constant
+/// rather than `buildPrompt` doing it based on trigger.
+///
+/// The rule this exists for (`routines.ts:19-33`): nobody is watching a
+/// scheduled run as it happens, so the one failure mode worse than doing
+/// nothing is inventing a result and reporting it as real. Verbatim from the
+/// TS `STOP_RATHER_THAN_INVENT` (`routines.ts:36-43`), including its leading
+/// newline from the TS array's own leading `""` element (joined with `"\n"`).
+pub const STOP_RATHER_THAN_INVENT: &str = "\n## How to behave on a scheduled run\nNobody is reading this as it happens.\nIf something you need is missing (a file, a login, a service that is down), say exactly what is missing and stop.\nDo not substitute a different method, do not guess, and do not report a result you did not actually obtain.\nSaying you could not do it is a good outcome. Inventing an answer is the only bad one.";
+
 /// Assembles the system prompt plus trimmed history for one bot's turn.
 /// Block order (and this is the whole point - see the module doc): shared,
 /// cacheable blocks first (`WHERE_YOU_ARE`, `HOW_YOU_WRITE`, house rules,

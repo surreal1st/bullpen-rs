@@ -245,21 +245,36 @@ async fn get_routine_runs(
     Ok(Json(json!({ "runs": runs })))
 }
 
-/// POST /api/routines/tick - fire all due routines (S5-03)
-async fn post_routines_tick(State(_state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
-    // S5-03 not yet implemented - stub with error
-    Err(AppError::bad_request(
-        "TODO: S5-03 fireDue not implemented".to_string(),
-    ))
+/// POST /api/routines/tick - fire all due routines. Port of the TS `app.
+/// post("/api/routines/tick", ...)` (`app.ts:3450`): the scheduler
+/// (`server::routines::start_scheduler`) calls the SAME `fire_due` on its
+/// own 30s timer, so this route and the timer can never drift apart. The
+/// `now` here is the real clock - only tests reach `fire_due` with an
+/// explicit one, calling `server::routines::fire_due` directly (see
+/// `crates/server/tests/routines_fire.rs`'s doc for why).
+async fn post_routines_tick(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    let started = crate::routines::fire_due(&state, chrono::Utc::now()).await;
+    let started: Vec<serde_json::Value> = started
+        .into_iter()
+        .map(|(routine_id, run_id)| json!({ "routineId": routine_id, "runId": run_id }))
+        .collect();
+    Ok(Json(json!({ "started": started })))
 }
 
-/// POST /api/routines/:id/run - run a routine immediately (S5-03)
+/// POST /api/routines/:id/run - "Run now": fires regardless of schedule or
+/// active state. Port of the TS `app.post("/api/routines/:id/run", ...)`
+/// (`app.ts:3454-3458`), same status-code split: "no such routine"/"no
+/// such bot" is a 404, anything else (today, only "could not start") is a
+/// 400.
 async fn post_routine_run(
-    State(_state): State<AppState>,
-    Path(_id): Path<String>,
-) -> ApiResult<Json<serde_json::Value>> {
-    // S5-03 not yet implemented - stub with error
-    Err(AppError::bad_request(
-        "TODO: S5-03 runRoutineNow not implemented".to_string(),
-    ))
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
+    match crate::routines::run_routine_now(&state, &id) {
+        Ok(run_id) => Ok((StatusCode::CREATED, Json(json!({ "runId": run_id })))),
+        Err(error) if error == "no such routine" || error == "no such bot" => {
+            Err(AppError::not_found(error))
+        }
+        Err(error) => Err(AppError::bad_request(error)),
+    }
 }

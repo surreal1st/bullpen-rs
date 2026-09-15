@@ -10,6 +10,7 @@ pub mod permissions;
 pub mod prompt;
 mod rooms;
 mod routes;
+pub mod routines;
 pub mod rules;
 pub mod runs;
 pub mod sandbox;

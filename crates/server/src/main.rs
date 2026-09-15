@@ -55,19 +55,27 @@ async fn main() {
     tracing::info!(%data_dir, "bullpen data dir");
 
     #[cfg(debug_assertions)]
-    let app = if std::env::var("BULLPEN_FAKE_PORT").as_deref() == Ok("1") {
+    let state = if std::env::var("BULLPEN_FAKE_PORT").as_deref() == Ok("1") {
         tracing::info!("BULLPEN_FAKE_PORT=1: model calls are scripted, no OpenRouter key needed");
         let fake_port: Arc<dyn ModelPort> = Arc::new(DelayedFakePort {
             reply: "Working on it - give me a moment.",
             delay: Duration::from_secs(4),
         });
-        server::build_app(server::AppState::with_port(db, fake_port))
+        server::AppState::with_port(db, fake_port)
     } else {
-        server::build_app(server::AppState::new(db))
+        server::AppState::new(db)
     };
 
     #[cfg(not(debug_assertions))]
-    let app = server::build_app(server::AppState::new(db));
+    let state = server::AppState::new(db);
+
+    // S5-03: the routine scheduler, ticking every 30s - started here so it
+    // runs against the same `AppState` (same `Arc<Mutex<Db>>`, same
+    // `RunManager`) every route in `app` shares. Cloning `state` before
+    // `build_app` consumes it, not after: `build_app` takes it by value.
+    let _scheduler = server::routines::start_scheduler(state.clone());
+
+    let app = server::build_app(state);
 
     // B7: was `0.0.0.0` - every route was unauthenticated (before this
     // ticket's `/api/*` gate) while bound to every interface, so anyone on

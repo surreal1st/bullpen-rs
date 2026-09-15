@@ -151,9 +151,22 @@ pub fn set_password(db: &Db, password: &str) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// Same settings key the TS `LAST_LOGIN_KEY` uses (`auth.ts:149`) - what
+/// S5-03's absence pause (`server::routines::fire_due`) reads via
+/// `Db::settings_get` to decide whether an unattended interval routine has
+/// been running into silence for `ABSENCE_DAYS`.
+pub const LAST_LOGIN_KEY: &str = "auth.last_login_at";
+
 /// Mints a new session token and writes its row. Mirrors the TS
 /// `createSession` (minus the `userId`/`stampLastLogin` half - no scope
 /// concept exists yet, see the module doc).
+///
+/// S5-03: also stamps `LAST_LOGIN_KEY`, unconditionally - the TS version
+/// skips this when `session.stampLastLogin === false`, which only a MEMBER
+/// sign-in (S5b - no such scope exists here yet, per the module doc above)
+/// ever passes. Until that scope exists, every session created here IS
+/// Josh signing in, so every one of them should stamp it, same as the TS
+/// default path.
 pub fn create_session(db: &Db) -> rusqlite::Result<String> {
     let token = hex_encode(&random_bytes(32));
     let now = Utc::now();
@@ -162,6 +175,7 @@ pub fn create_session(db: &Db) -> rusqlite::Result<String> {
         "INSERT INTO sessions (token, created_at, expires_at) VALUES (?1, ?2, ?3)",
         params![token, now.to_rfc3339(), expires.to_rfc3339()],
     )?;
+    db.settings_set(LAST_LOGIN_KEY, &now.to_rfc3339())?;
     Ok(token)
 }
 
