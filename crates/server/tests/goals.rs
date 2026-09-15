@@ -1155,7 +1155,7 @@ async fn patch_goal_garbled_body_returns_200_unchanged() {
     // Send garbled JSON directly - it should be treated as {} and return 200
     let req = Request::builder()
         .method("PATCH")
-        .uri(&format!("/api/goals/{}", goal.id))
+        .uri(format!("/api/goals/{}", goal.id))
         .header("cookie", &session)
         .header("content-type", "application/json")
         .body(Body::from("{invalid json"))
