@@ -4,6 +4,7 @@
 pub mod approvals;
 mod auth;
 pub mod changes;
+pub mod desk;
 pub mod egress;
 mod error;
 pub mod goals;
@@ -24,6 +25,7 @@ pub mod slack;
 pub mod spend;
 pub mod teams;
 mod tools;
+pub mod vm;
 pub mod workers;
 
 pub use error::{ApiResult, AppError};
