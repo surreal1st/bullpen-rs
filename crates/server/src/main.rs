@@ -76,6 +76,24 @@ async fn main() {
     let _scheduler = server::routines::start_scheduler(state.clone());
     let _goal_scheduler = server::goals::start_goal_scheduler(state.clone());
 
+    // S6-W-02b: the CONNECT proxy every sandboxed bot's traffic is forced
+    // through, started only when egress is enabled. It binds the docker
+    // network's GATEWAY, not loopback - a container lives in its own network
+    // namespace and can never reach the host's 127.0.0.1, which is why the
+    // first version of this wiring was inert. With egress off nothing starts
+    // and the sandbox keeps `--network none`, byte-for-byte its old
+    // behaviour. A failure here is logged, not fatal: a bot that cannot
+    // reach the network is a degraded bot, not a dead server.
+    if server::egress::egress_enabled(std::env::var("BULLPEN_SANDBOX_EGRESS").ok().as_deref()) {
+        let network = server::sandbox::sandbox_network_name();
+        match server::egress_proxy::start_egress_proxy(&network).await {
+            Ok((_handle, addr)) => {
+                tracing::info!(%addr, %network, "egress proxy listening")
+            }
+            Err(e) => tracing::error!(%e, "egress proxy failed to start; bots stay offline"),
+        }
+    }
+
     // S6-07: `vm_proxy::serve` needs its own handle on the same db every
     // route shares, taken before `build_app` consumes `state` below.
     let db_handle = state.db_handle();
