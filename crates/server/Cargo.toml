@@ -50,6 +50,9 @@ rand = { workspace = true }
 # comment for why these two and not a websocket crate.
 hyper = { workspace = true }
 hyper-util = { workspace = true }
+# S6-W-05: `HttpCdp::create_window`/`call` - see the root `Cargo.toml`'s
+# comment for the version pin and why.
+tokio-tungstenite = { workspace = true }
 
 [dev-dependencies]
 # S0-04: driving `build_app` in tests via `tower::ServiceExt::oneshot`, and

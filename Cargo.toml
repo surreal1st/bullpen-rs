@@ -55,6 +55,22 @@ rand = "0.8"
 # HTTP/websocket crate without the same sign-off.
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["http1", "server", "tokio", "service"] }
+# S6-W-05: `HttpCdp::create_window`/`call` need a WebSocket client to open
+# DevTools' per-target and per-browser sockets - approved by the
+# orchestrator per `.scratch/bullpen-rs/tickets/S6-W-tickets.md` S6-W-03's
+# Results (do not add a second WebSocket crate without the same sign-off).
+# Pinned to `0.28` to match `tungstenite 0.28.0`, the version actually
+# reachable from `crates/client`'s desktop feature per `cargo tree -p
+# client -i tungstenite@0.28.0` (`dioxus-devtools -> dioxus`/`dioxus-web`) -
+# NOT `0.27.0`, which is also in `Cargo.lock` but, per `cargo tree
+# --workspace --target all --all-features -i tungstenite@0.27.0` printing
+# nothing, is unreachable from any workspace member under any target or
+# feature combination (a `dioxus-fullstack` dependency edge that never
+# activates, since `client` builds with the `desktop` feature, not
+# `fullstack`). Matching `0.27` as the ticket's text suggested would have
+# introduced a THIRD tungstenite version rather than reusing one already
+# resolved.
+tokio-tungstenite = "0.28"
 
 [profile.release]
 lto = "thin"

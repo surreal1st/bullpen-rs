@@ -28,12 +28,14 @@
 
 use crate::egress::{EgressPolicy, Resolver, decide_connect};
 use async_trait::async_trait;
+use futures::{SinkExt, StreamExt};
 use reqwest::Url;
 use rusqlite::OptionalExtension;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use store::Db;
+use tokio_tungstenite::tungstenite::Message;
 
 /* ------------------------------------------------------------- config */
 
@@ -503,53 +505,208 @@ impl Cdp for UnavailableCdp {
     async fn close_target(&self, _target_id: &str) {}
 }
 
-/// S6-W-03: port of TS `httpCdp` (`desk.ts:149-204`) - HALF of it. What TS
-/// does over plain HTTP ports for real below (`has_target`/`close_target`).
-/// What TS does over a raw WebSocket (`create_window`'s
-/// `Target.createTarget` call, and every `call()`) does NOT - see
-/// `NO_WEBSOCKET_CLIENT`'s own doc for exactly why, checked rather than
-/// assumed. This is a narrower, more honest version of S6-04's cut: that
-/// ticket skipped `httpCdp` entirely; this one ships the half that needed
-/// no new dependency and refuses loudly, per-call, on the half that does -
-/// never a silent no-op, never a guess dressed as success.
+/// S6-W-03 ported the HTTP half of TS `httpCdp` (`desk.ts:149-204`) for
+/// real (`has_target`/`close_target`) and refused the WebSocket half
+/// loudly because no WebSocket client was a dependency of this crate yet.
+/// S6-W-05 lands that half: `tokio-tungstenite` (approved, see this
+/// ticket's Results for the version pin and how it was confirmed against
+/// `cargo tree`) drives `create_window`'s `Target.createTarget` call and
+/// every `call()` - the per-target JSON-RPC round trip
+/// `evaluate`/`read_page`/`browse`/`click_text`/`type_into`/`screenshot`
+/// all depend on.
+///
+/// 🔴 Still unproven against a real browser - see this file's own header
+/// and this ticket's Results. A local WebSocket listener that speaks the
+/// DevTools wire format is not Chromium; the tests below prove this
+/// CLIENT's behaviour (timeout, error surfacing, id matching), not that a
+/// real DevTools endpoint answers correctly. The meridian smoke test
+/// (S6-SMOKE) is the only thing that can prove that.
 pub struct HttpCdp {
     config: DeskConfig,
     http: reqwest::Client,
+    connect_timeout: Duration,
+    call_timeout: Duration,
 }
 
 impl HttpCdp {
     pub fn new(config: DeskConfig) -> Self {
+        Self::with_timeouts(config, SOCKET_CONNECT_TIMEOUT, CALL_TIMEOUT)
+    }
+
+    /// Same as `new`, with the connect/call timeouts overridable. TS has no
+    /// equivalent - `CALL_TIMEOUT_MS`/the 10s connect timeout are both
+    /// module-level constants there - but proving this ticket's bite (b)
+    /// (a wedged socket cannot hang a run forever) against the REAL 30s
+    /// production timeout would mean waiting out 30 real seconds on every
+    /// run of the suite. `build_cdp` (the only production call site) always
+    /// calls `new`, never this - production behaviour is untouched.
+    pub fn with_timeouts(
+        config: DeskConfig,
+        connect_timeout: Duration,
+        call_timeout: Duration,
+    ) -> Self {
         Self {
             config,
             http: reqwest::Client::new(),
+            connect_timeout,
+            call_timeout,
         }
     }
 }
 
-/// Why `HttpCdp::create_window`/`call` refuse instead of connecting.
-///
-/// 🔴 Checked, not assumed: `cargo tree -p server` (this crate's OWN
-/// resolved dependency graph, not the workspace-wide `Cargo.lock`) has no
-/// `tungstenite` anywhere in it. `tungstenite` DOES appear in `Cargo.lock`,
-/// but only as a transitive dependency of `crates/client`'s `dioxus`
-/// desktop feature, a different crate entirely; `server` cannot reach it
-/// without its own `Cargo.toml` entry. That is a real new dependency
-/// (`tokio-tungstenite`, to match the `tungstenite 0.27` already resolved
-/// workspace-wide), `Cargo.toml` is not a file this ticket owns, and the
-/// ticket's own instructions are to ask before adding one rather than add
-/// it and mention it afterward - see this ticket's Results for the ask.
-const NO_WEBSOCKET_CLIENT: &str = "The production browser client needs a WebSocket dependency \
-this crate does not have yet (tokio-tungstenite - not yet approved, see S6-W-03's Results). \
-Nothing was attempted.";
+/// A DevTools WebSocket, already connected - what `create_window`'s
+/// `Target.createTarget` call and `call()`'s per-target round trip both
+/// send `once()` requests over. `tokio_tungstenite::connect_async` always
+/// returns this concrete stream type (TLS-wrapping enum, "plain" variant
+/// used here since every CDP endpoint this file talks to is `ws://`, never
+/// `wss://`) regardless of which URL was connected to, so `once` below can
+/// take it directly rather than being generic over the stream type.
+type WsStream =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// TS `socket()`'s own connect timeout (`desk.ts:143`: "DevTools did not
+/// accept a connection" after 10s) - guards `call()`'s per-target socket
+/// open. `create_window` connects straight to the `webSocketDebuggerUrl`
+/// `GET /json/version` hands back with no timeout of its own, faithfully
+/// matching TS `createWindow` (`desk.ts:163-171`), which also has none;
+/// that connect is bounded only by the CALL_TIMEOUT_MS wrapped around the
+/// `Target.createTarget` round trip that follows it.
+const SOCKET_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// TS `CALL_TIMEOUT_MS` (`desk.ts:139`) - what stops a wedged DevTools
+/// socket hanging a bot's run forever. Wraps the message-wait half of
+/// `once()`, not the connect (that is `SOCKET_CONNECT_TIMEOUT`, a separate
+/// timer in TS too).
+const CALL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// TS's `${config.cdp.replace(/^http/, "ws")}` (`desk.ts:141`): "https://"
+/// becomes "wss://", "http://" becomes "ws://". Only used by `call()`'s
+/// `socket()` helper - `create_window` never rewrites a scheme, it connects
+/// to whatever `webSocketDebuggerUrl` Chromium already handed back as a
+/// `ws://` URL.
+fn cdp_as_ws_scheme(cdp: &str) -> String {
+    match cdp.strip_prefix("http") {
+        Some(rest) => format!("ws{rest}"),
+        None => cdp.to_string(),
+    }
+}
+
+/// One DevTools JSON-RPC reply. TS `CdpMessage` (`desk.ts:135-138`
+/// interface) - `id`/`result`/`error.message` all optional the same way.
+#[derive(serde::Deserialize)]
+struct CdpMessage {
+    id: Option<u64>,
+    result: Option<serde_json::Value>,
+    error: Option<CdpErrorField>,
+}
+
+#[derive(serde::Deserialize)]
+struct CdpErrorField {
+    message: Option<String>,
+}
+
+/// Port of TS's free function `once` (`desk.ts:217-231`): sends one
+/// `{id, method, params}` request over an already-open socket and waits for
+/// the reply carrying that same `id`, ignoring every other message the
+/// socket delivers in between (another in-flight call's reply, a
+/// keep-alive, anything) - matching TS's own `if (msg.id !== id) return;`
+/// inside its `message` listener. Guarded end-to-end by `CALL_TIMEOUT`,
+/// the literal thing this ticket's bite (b) proves cannot be bypassed by a
+/// socket that accepts and then goes silent.
+async fn once(
+    ws: &mut WsStream,
+    id: u64,
+    method: &str,
+    params: serde_json::Value,
+    call_timeout: Duration,
+) -> Result<serde_json::Value, String> {
+    let request = serde_json::json!({ "id": id, "method": method, "params": params }).to_string();
+
+    let round_trip = async {
+        ws.send(Message::text(request))
+            .await
+            .map_err(|e| e.to_string())?;
+
+        loop {
+            match ws.next().await {
+                Some(Ok(Message::Text(text))) => {
+                    let Ok(msg) = serde_json::from_str::<CdpMessage>(&text) else {
+                        // Not JSON, or not shaped like a CdpMessage - not a
+                        // reply to anything this call sent. Keep waiting,
+                        // same as TS's own JSON.parse inside the listener
+                        // (a parse failure there would throw synchronously
+                        // out of the listener and never reach the `id`
+                        // check; skipping it here is the closer-to-intent
+                        // behaviour and keeps this loop from dying on a
+                        // stray non-JSON frame).
+                        continue;
+                    };
+                    if msg.id != Some(id) {
+                        continue;
+                    }
+                    return match msg.error {
+                        Some(e) => Err(e.message.unwrap_or_else(|| method.to_string())),
+                        None => Ok(msg.result.unwrap_or(serde_json::Value::Null)),
+                    };
+                }
+                // Non-text frames (ping/pong/binary/close) carry no reply -
+                // keep waiting for the one that does.
+                Some(Ok(_)) => continue,
+                Some(Err(e)) => return Err(e.to_string()),
+                None => return Err("DevTools closed the connection".to_string()),
+            }
+        }
+    };
+
+    match tokio::time::timeout(call_timeout, round_trip).await {
+        Ok(result) => result,
+        Err(_) => Err(format!("{method} timed out")),
+    }
+}
 
 #[async_trait]
 impl Cdp for HttpCdp {
-    /// 🔴 UNFINISHED, on purpose - see `NO_WEBSOCKET_CLIENT`'s doc. TS
-    /// `createWindow` (`desk.ts:161-180`) opens a WebSocket to the
-    /// browser-scoped endpoint named by `GET /json/version` and sends
-    /// `Target.createTarget` over it; that half is not here.
-    async fn create_window(&self, _url: &str) -> Result<String, String> {
-        Err(NO_WEBSOCKET_CLIENT.to_string())
+    /// TS `createWindow` (`desk.ts:161-180`): `PUT /json/new` makes a tab,
+    /// but a WINDOW needs `Target.createTarget`, which is browser-scoped,
+    /// so this fetches the browser's own WebSocket endpoint from `GET
+    /// /json/version` first.
+    async fn create_window(&self, url: &str) -> Result<String, String> {
+        #[derive(serde::Deserialize)]
+        struct VersionInfo {
+            #[serde(rename = "webSocketDebuggerUrl")]
+            web_socket_debugger_url: String,
+        }
+
+        let version: VersionInfo = self
+            .http
+            .get(format!("{}/json/version", self.config.cdp))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?
+            .json()
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let (mut ws, _response) =
+            tokio_tungstenite::connect_async(&version.web_socket_debugger_url)
+                .await
+                .map_err(|_| "DevTools refused".to_string())?;
+
+        let reply = once(
+            &mut ws,
+            1,
+            "Target.createTarget",
+            serde_json::json!({ "url": url, "newWindow": true }),
+            self.call_timeout,
+        )
+        .await;
+        let _ = ws.close(None).await;
+
+        let reply = reply?;
+        match reply.get("targetId").and_then(|v| v.as_str()) {
+            Some(id) => Ok(id.to_string()),
+            None => Err("Chromium did not return a window".to_string()),
+        }
     }
 
     /// The one real surface `httpCdp` needed no socket for: `GET
@@ -575,17 +732,36 @@ impl Cdp for HttpCdp {
         list.iter().any(|t| t.id == target_id)
     }
 
-    /// 🔴 UNFINISHED, on purpose - see `NO_WEBSOCKET_CLIENT`'s doc. This is
-    /// the per-target WebSocket round trip (`desk.ts:191-198`) every one of
-    /// `evaluate`/`read_page`/`browse`/`click_text`/`type_into`/
-    /// `screenshot` depends on.
+    /// TS `call` (`desk.ts:191-198`): a fresh WebSocket per call to the
+    /// PER-TARGET endpoint (`/devtools/page/{targetId}`), closed straight
+    /// after - see TS's own doc (`desk.ts:145-148`) for why a long-lived
+    /// connection was not worth the reconnect/bookkeeping cost.
     async fn call(
         &self,
-        _target_id: &str,
-        _method: &str,
-        _params: serde_json::Value,
+        target_id: &str,
+        method: &str,
+        params: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
-        Err(NO_WEBSOCKET_CLIENT.to_string())
+        let ws_url = format!(
+            "{}/devtools/page/{}",
+            cdp_as_ws_scheme(&self.config.cdp),
+            target_id
+        );
+
+        let mut ws = match tokio::time::timeout(
+            self.connect_timeout,
+            tokio_tungstenite::connect_async(&ws_url),
+        )
+        .await
+        {
+            Ok(Ok((ws, _response))) => ws,
+            Ok(Err(_)) => return Err("DevTools refused".to_string()),
+            Err(_) => return Err("DevTools did not accept a connection".to_string()),
+        };
+
+        let result = once(&mut ws, 1, method, params, self.call_timeout).await;
+        let _ = ws.close(None).await;
+        result
     }
 
     /// `GET /json/close/{id}`, errors swallowed - TS's own `.catch(() =>
@@ -624,18 +800,15 @@ pub fn build_cdp() -> Arc<dyn Cdp> {
 //
 // What TS `desk.ts` exports that this file does NOT port, and why - per the
 // S6 header, no ticket in this slice may claim a container/browser/socket
-// actually worked, and this ticket owns no `Cargo.toml`:
+// actually worked:
 //
-// - `httpCdp` (`desk.ts:149-204`), the real DevTools client's WebSocket
-//   HALF: `create_window`'s `Target.createTarget` call, and every `call()`
-//   (the per-target JSON-RPC round trip `evaluate`/`read_page`/`browse`/
-//   `click_text`/`type_into`/`screenshot` all depend on). `HttpCdp` above
-//   ports the HTTP half for real (`has_target`, `close_target`) and
-//   refuses the WebSocket half loudly rather than silently - see
-//   `NO_WEBSOCKET_CLIENT`'s own doc for why a new dependency is needed and
-//   was not added unilaterally. It also could not be exercised here
-//   regardless (no browser on this workstation) even once the dependency
-//   lands.
+// - (S6-W-03/S6-W-05, CLOSED) `httpCdp` (`desk.ts:149-204`) is now fully
+//   ported: S6-W-03 shipped the HTTP half for real (`has_target`,
+//   `close_target`); S6-W-05 added `tokio-tungstenite` (approved, see that
+//   ticket's Results) and shipped the WebSocket half (`create_window`,
+//   `call`). Still unproven against a real browser - a local test listener
+//   is not Chromium - see this file's header and S6-W-05's Results; the
+//   meridian smoke test (S6-SMOKE) is the only thing that can prove that.
 // - `deskShell`/`deskShellStdin`/`deskStatus` ("the terminal"/"status"
 //   sections, `desk.ts:382-461`) and `deskAction`/`DeskAction`
 //   ("coordinate-level input", `desk.ts:463-660`, the `xdotool` computer-use
