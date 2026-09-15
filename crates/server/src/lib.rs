@@ -6,6 +6,7 @@ mod auth;
 pub mod changes;
 pub mod desk;
 pub mod egress;
+pub mod egress_proxy;
 mod error;
 pub mod goals;
 pub mod hooks;
@@ -26,6 +27,7 @@ pub mod spend;
 pub mod teams;
 mod tools;
 pub mod vm;
+pub mod vm_proxy;
 pub mod workers;
 
 pub use error::{ApiResult, AppError};
