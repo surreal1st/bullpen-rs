@@ -451,3 +451,64 @@ fn fixture_db_opens_with_routine_columns() {
 
     let _ = fs::remove_file(&temp);
 }
+
+/// Test 13: 50-routine cap prevents creating more than 50 routines per bot.
+#[test]
+fn create_routine_enforces_50_per_bot_cap() {
+    let db = Db::open(":memory:").expect("open memory db");
+    let bot_id = create_test_bot(&db);
+
+    // Create 50 routines successfully
+    for i in 0..50 {
+        let result = create_routine(
+            &db,
+            &bot_id,
+            &format!("Routine {}", i),
+            "prompt",
+            r#"{"kind":"interval","minutes":15}"#.to_string(),
+            Some("2026-09-14T12:00:00Z".to_string()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            result.is_ok(),
+            "Should successfully create routine {} (count < 50)",
+            i
+        );
+    }
+
+    // The 51st routine should fail
+    let result = create_routine(
+        &db,
+        &bot_id,
+        "Routine 50",
+        "prompt",
+        r#"{"kind":"interval","minutes":15}"#.to_string(),
+        Some("2026-09-14T12:00:00Z".to_string()),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+
+    assert!(result.is_err(), "51st routine should fail");
+    assert_eq!(
+        result.unwrap_err(),
+        "Each bot can have at most 50 routines",
+        "error message matches expected"
+    );
+
+    // Verify the count is still 50
+    let routines = list_routines(&db, Some(&bot_id)).expect("list routines");
+    assert_eq!(routines.len(), 50, "exactly 50 routines exist");
+}

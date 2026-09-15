@@ -250,7 +250,21 @@ pub fn create_routine(
     hook_events: Option<Vec<String>>,
     hook_match: Option<&str>,
     conditions: Option<Vec<Condition>>,
-) -> rusqlite::Result<String> {
+) -> Result<String, String> {
+    // Check the 50-routine cap for this bot
+    let count: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM routines WHERE bot_id = ?1",
+            params![bot_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("Failed to check routine count: {}", e))?;
+
+    if count >= 50 {
+        return Err("Each bot can have at most 50 routines".to_string());
+    }
+
     let id = Uuid::new_v4().to_string();
     let kind_normalized = kind.unwrap_or("prompt");
     let hook_kind_normalized = hook_kind.unwrap_or("raw");
@@ -260,34 +274,38 @@ pub fn create_routine(
     let hook_events_json = hook_events.map(|e| serde_json::to_string(&e).unwrap_or_default());
     let conditions_json = conditions.map(|c| serde_json::to_string(&c).unwrap_or_default());
 
-    db.conn().execute(
-        "INSERT INTO routines (id, bot_id, name, prompt, schedule, active, next_run_at, created_at,
-                               tools, kind, tool, tool_args, hook_kind, hook_events, hook_match, conditions)
-         VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
-        params![
-            &id,
-            bot_id,
-            name,
-            prompt,
-            &schedule,
-            next_run_at,
-            &now,
-            tools_json,
-            kind_normalized,
-            tool,
-            tool_args,
-            hook_kind_normalized,
-            hook_events_json,
-            hook_match,
-            conditions_json,
-        ],
-    )?;
+    db.conn()
+        .execute(
+            "INSERT INTO routines (id, bot_id, name, prompt, schedule, active, next_run_at, created_at,
+                                   tools, kind, tool, tool_args, hook_kind, hook_events, hook_match, conditions)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            params![
+                &id,
+                bot_id,
+                name,
+                prompt,
+                &schedule,
+                next_run_at,
+                &now,
+                tools_json,
+                kind_normalized,
+                tool,
+                tool_args,
+                hook_kind_normalized,
+                hook_events_json,
+                hook_match,
+                conditions_json,
+            ],
+        )
+        .map_err(|e| format!("Failed to insert routine: {}", e))?;
 
     // Set has_routine on the bot
-    db.conn().execute(
-        "UPDATE bots SET has_routine = 1 WHERE id = ?1",
-        params![bot_id],
-    )?;
+    db.conn()
+        .execute(
+            "UPDATE bots SET has_routine = 1 WHERE id = ?1",
+            params![bot_id],
+        )
+        .map_err(|e| format!("Failed to update bot: {}", e))?;
 
     Ok(id)
 }
