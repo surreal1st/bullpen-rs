@@ -132,14 +132,19 @@ fn create_goal_validates_input() {
     assert_eq!(blank_done_when.unwrap_err(), "Say what done looks like.");
 }
 
-/// Test 4 (BITE 1): MAX_ACTIVE_GOALS caps active goals per bot at 20. See
-/// Results for the red-run proving this actually bites.
+/// Test 4 (BITE 1): MAX_ACTIVE_GOALS caps active goals per bot at 20 -
+/// TS's number, hardcoded here rather than read back off the constant, so a
+/// changed constant actually turns this test red (see Results). The
+/// exported `MAX_ACTIVE_GOALS` is asserted equal to the same literal as a
+/// belt-and-braces check.
 #[test]
 fn create_goal_enforces_max_active_goals_cap() {
+    assert_eq!(MAX_ACTIVE_GOALS, 20, "TS's MAX_ACTIVE_GOALS is 20");
+
     let db = Db::open(":memory:").expect("open memory db");
     let bot_id = create_test_bot(&db);
 
-    for i in 0..MAX_ACTIVE_GOALS {
+    for i in 0..20 {
         let result = create_goal(
             &db,
             CreateGoalInput {
@@ -166,14 +171,11 @@ fn create_goal_enforces_max_active_goals_cap() {
 
     assert_eq!(
         result.unwrap_err(),
-        format!(
-            "Already {} active goals, which is the limit. Close or stop some first.",
-            MAX_ACTIVE_GOALS
-        )
+        "Already 20 active goals, which is the limit. Close or stop some first."
     );
 
     let active = list_goals(&db, Some(&bot_id)).expect("list goals");
-    assert_eq!(active.len() as i64, MAX_ACTIVE_GOALS, "cap held at 20");
+    assert_eq!(active.len(), 20, "cap held at exactly 20");
 }
 
 /// Test 5: update_goal changes status/plan, appends a log note, and refuses
