@@ -1,4 +1,4 @@
-use chrono::{DateTime, Datelike, Local, TimeZone, Timelike, Utc, Weekday};
+use chrono::{Datelike, Local, TimeZone, Timelike, Utc, Weekday};
 use server::schedule::{Schedule, describe_schedule, next_run, parse_schedule};
 
 #[test]

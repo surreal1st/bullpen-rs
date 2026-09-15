@@ -502,11 +502,16 @@ mod tests {
 
     #[test]
     fn test_weekdays_skip_weekend() {
-        // Friday 2026-09-11 at 09:00 UTC
-        let friday_utc = DateTime::<Utc>::from_naive_utc_and_offset(
-            DateTime::from_timestamp(1726067400, 0).unwrap().naive_utc(),
-            Utc,
-        );
+        // Friday 2026-09-11 at 09:00 LOCAL, past that day's 08:43 - built in
+        // Local so the weekday is the weekday the schedule sees. (The first
+        // version hand-wrote a UTC epoch that was a Wednesday in 2024.)
+        use chrono::TimeZone;
+        let friday_utc = Local
+            .with_ymd_and_hms(2026, 9, 11, 9, 0, 0)
+            .single()
+            .expect("unambiguous local time")
+            .with_timezone(&Utc);
+        assert_eq!(friday_utc.with_timezone(&Local).weekday(), Weekday::Fri);
         let s = parse_schedule("weekdays at 08:43").expect("parse");
         let next = next_run(&s, friday_utc);
         let next_local = next.with_timezone(&Local);

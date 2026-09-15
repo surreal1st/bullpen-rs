@@ -348,7 +348,7 @@ async fn delete_routine() {
     let app = app_for(db);
 
     // Create routine
-    let (create_status, body) = post_with_auth(
+    let (_create_status, body) = post_with_auth(
         &app,
         "/api/routines",
         &session,
@@ -393,7 +393,7 @@ async fn get_routine_runs_limited() {
     let app = app_for(db);
 
     // Create routine
-    let (status, body) = post_with_auth(
+    let (_status, body) = post_with_auth(
         &app,
         "/api/routines",
         &session,
