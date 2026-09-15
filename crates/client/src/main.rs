@@ -6,6 +6,7 @@ mod avatar;
 mod bubble;
 mod composer;
 mod events;
+mod goals_editor;
 mod markdown;
 mod memory_editor;
 mod message_time;

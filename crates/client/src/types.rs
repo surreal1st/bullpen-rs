@@ -497,11 +497,12 @@ pub struct SharedLogField {
 
 /// One routine, from `GET/POST /api/routines`, `PATCH /api/routines/:id` and
 /// `POST /api/routines/:id/active` (`crates/server/src/routes/routines.rs`,
-/// mirroring `store::Routine`'s camelCase wire shape). A strict subset -
-/// `tools`/`kind`/`tool`/`toolArgs`/`hasHook`/`hookKind`/`hookEvents`/
-/// `hookMatch`/`conditions`/`secondOpinion` are S5b's tool-kind and hook UI,
-/// left off entirely (serde ignores the extra JSON fields rather than
-/// erroring).
+/// mirroring `store::Routine`'s camelCase wire shape). Still a strict subset -
+/// `tools`/`conditions`/`secondOpinion` are left off entirely (serde ignores
+/// the extra JSON fields rather than erroring); `kind`/`tool`/`toolArgs`/
+/// `hasHook`/`hookKind`/`hookEvents`/`hookMatch` were the S5b tool-kind and
+/// hook UI this doc used to call "left off" too - S5b-07 adds them, see the
+/// note below.
 ///
 /// S5-F-02 (F5): `schedule_text` is now a REAL computed description
 /// (`crate::schedule::describe_schedule`, injected server-side by
@@ -515,6 +516,17 @@ pub struct SharedLogField {
 /// discarded by `routines_editor.rs::toggle_active` anyway (it always
 /// re-fetches the list right after), so an empty default there is
 /// harmless rather than a hard deserialize failure.
+///
+/// S5b-07 adds the tool-kind and hook fields the doc above once called out
+/// as skipped: `kind`/`tool`/`tool_args` (a "tool" routine runs a tool
+/// instead of just prompting, `crates/server/src/routines.rs::fire_routine_tool`)
+/// and `has_hook`/`hook_kind`/`hook_events`/`hook_match` (a routine that
+/// fires from an inbound webhook rather than its own schedule,
+/// `crates/server/src/routes/hooks.rs`). `tools`/`conditions`/
+/// `second_opinion` stay off this struct - this ticket's UI has no surface
+/// for a bot-permission list or an AND-group of webhook conditions, and
+/// serde ignores the extra JSON fields on the way in, same as it always has
+/// for `hasHook` etc. before this ticket added them here.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Routine {
@@ -531,9 +543,42 @@ pub struct Routine {
     pub paused_reason: Option<String>,
     pub last_error: Option<String>,
     pub failures: i32,
+    /// "prompt" | "tool" - `#[serde(default)]` covers a server response
+    /// from before this ticket landed (there is none live, but the same
+    /// belt-and-suspenders posture `effort`/`schedule_text` above already
+    /// take), never a value this client invents on its own.
+    #[serde(default = "default_routine_kind")]
+    pub kind: String,
+    #[serde(default)]
+    pub tool: Option<String>,
+    #[serde(default)]
+    pub tool_args: Option<String>,
+    /// Whether a webhook secret exists - the secret itself is NEVER sent
+    /// back over this field or any other (`routes/hooks.rs`'s own doc: shown
+    /// once, at mint time, and never again). See `routines_editor.rs`'s
+    /// minted-secret UI for the one place a secret ever reaches this client.
+    #[serde(default)]
+    pub has_hook: bool,
+    #[serde(default = "default_hook_kind")]
+    pub hook_kind: String,
+    #[serde(default)]
+    pub hook_events: Option<Vec<String>>,
+    #[serde(default)]
+    pub hook_match: Option<String>,
 }
 
-/// One row of `GET /api/routines/:id/runs` (max 20, newest first).
+fn default_routine_kind() -> String {
+    "prompt".to_string()
+}
+
+fn default_hook_kind() -> String {
+    "raw".to_string()
+}
+
+/// One row of `GET /api/routines/:id/runs` and `GET /api/goals/:id/runs`
+/// (max 20, newest first) - the two routes answer the byte-identical shape
+/// (`store::RoutineRun`/`store::goals::GoalRun`), so S5b-07's goals runs
+/// panel reuses this type rather than adding a duplicate.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RoutineRun {
@@ -542,5 +587,43 @@ pub struct RoutineRun {
     pub text: String,
     pub error: Option<String>,
     pub cost_usd: f64,
+    pub created_at: String,
+}
+
+/* ----------------------------------------------------------- S5b-07: goals */
+
+/// One entry in a goal's log - a reflection the bot wrote, a status note (an
+/// edit here or the scheduler's own "status -> X"), or a weekly report line.
+/// Mirrors `store::goals::GoalLogEntry`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalLogEntry {
+    pub at: String,
+    pub kind: String,
+    pub text: String,
+}
+
+/// One goal, from `GET/POST /api/goals` and `PATCH /api/goals/:id`
+/// (`crates/server/src/routes/goals.rs`, mirroring `store::goals::Goal`'s
+/// camelCase wire shape).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Goal {
+    pub id: String,
+    pub bot_id: String,
+    pub bot_name: String,
+    pub objective: String,
+    pub done_when: String,
+    pub status: String,
+    pub budget_tokens: Option<i64>,
+    pub spent_tokens: i64,
+    pub budget_until: Option<String>,
+    pub plan: String,
+    #[serde(default)]
+    pub log: Vec<GoalLogEntry>,
+    pub reason: Option<String>,
+    pub next_session_at: Option<String>,
+    pub last_session_at: Option<String>,
+    pub last_report_at: Option<String>,
     pub created_at: String,
 }

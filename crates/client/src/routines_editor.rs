@@ -1,8 +1,7 @@
-//! Port of `RoutinesEditor.tsx`'s list + create/edit form (774 lines; hooks,
-//! tool-kind routines and conditions are S5b - skipped entirely, same as
-//! `Routine`'s own doc in `types.rs`). A "Routines" button in `thread.rs`'s
-//! `pane-head` opens `RoutinesModal` over the thread, the same `.modal*`
-//! shell `PermissionsModal`/`MemoryModal` already use.
+//! Port of `RoutinesEditor.tsx`'s list + create/edit form (774 lines). A
+//! "Routines" button in `thread.rs`'s `pane-head` opens `RoutinesModal` over
+//! the thread, the same `.modal*` shell `PermissionsModal`/`MemoryModal`
+//! already use.
 //!
 //! 🔴 The TS reference's own edit form only ever PATCHes `prompt` (+ the
 //! tool fields this ticket skips) - `name`/`schedule` are create-only there.
@@ -22,6 +21,18 @@
 //! reject (`new_preview`/`edit_preview` below). `Routine.schedule_text`
 //! (see `types.rs`'s doc) is now a real server-computed description too,
 //! shown in the list in place of the old raw `schedule` text.
+//!
+//! S5b-07 fills in the tool-kind and hook fields this doc used to call
+//! "skipped entirely": a `kind` toggle (prompt/tool) with tool name + JSON
+//! args when "tool" is picked, and a hook section (kind/events/match) plus
+//! "Create webhook" / "Clear webhook" acting on `POST`/`DELETE
+//! /api/routines/:id/hook`. The minted secret is shown exactly once,
+//! per `mint_routine_hook`'s own doc in `api.rs` - `minted_hook` below is
+//! the ONLY place a secret ever touches this client's state, it is never
+//! written into `Routine`/`routines` (the list refetch after minting comes
+//! back with `hasHook: true` and nothing else), and closing or navigating
+//! away from the modal drops it for good (a plain `Signal`, not anything
+//! persisted).
 
 use crate::api;
 use crate::types::{Routine, RoutineRun};
@@ -31,6 +42,17 @@ use js_sys::Date;
 use std::cell::Cell;
 use std::rc::Rc;
 use wasm_bindgen::JsValue;
+
+/// The hook kinds a routine's webhook can verify against - same four named
+/// services plus "raw" (bearer-token) that `routes/hooks.rs::post_webhook`
+/// switches on.
+const HOOK_KINDS: &[(&str, &str)] = &[
+    ("raw", "Raw (bearer token)"),
+    ("github", "GitHub"),
+    ("sentry", "Sentry"),
+    ("linear", "Linear"),
+    ("pagerduty", "PagerDuty"),
+];
 
 /// The modal shell, opened from `thread.rs`'s "Routines" button - reuses
 /// `.modal-scrim`/`.modal`/`.modal-head`/`.modal-x` from `rail.css` plus the
@@ -79,12 +101,28 @@ pub fn RoutinesEditor(bot_id: String) -> Element {
     let mut new_name = use_signal(String::new);
     let mut new_prompt = use_signal(String::new);
     let mut new_schedule = use_signal(String::new);
+    // S5b-07: "prompt" | "tool" - the create form's kind toggle.
+    let mut new_kind = use_signal(|| "prompt".to_string());
+    let mut new_tool = use_signal(String::new);
+    let mut new_tool_args = use_signal(String::new);
     let create_error = use_signal(|| None::<String>);
 
     let mut editing_id = use_signal(|| None::<String>);
     let mut edit_name = use_signal(String::new);
     let mut edit_prompt = use_signal(String::new);
     let mut edit_schedule = use_signal(String::new);
+    let mut edit_kind = use_signal(|| "prompt".to_string());
+    let mut edit_tool = use_signal(String::new);
+    let mut edit_tool_args = use_signal(String::new);
+    // S5b-07: the hook section - kind (which signature the delivery must
+    // carry), events (github only, comma-separated in the field, narrowed
+    // to a `Vec<String>` on save) and match (a regex over the reduced
+    // text). Blank means "leave the field alone" for events/match on save -
+    // see the `Save` handler below and `UpdateRoutineReq`'s own doc on why
+    // that needs an explicit `null` rather than just omitting the key.
+    let mut edit_hook_kind = use_signal(|| "raw".to_string());
+    let mut edit_hook_events = use_signal(String::new);
+    let mut edit_hook_match = use_signal(String::new);
     let mut edit_error = use_signal(|| None::<String>);
 
     let mut runs_open = use_signal(|| None::<String>);
@@ -96,6 +134,13 @@ pub fn RoutinesEditor(bot_id: String) -> Element {
     // "Started run ..." twice, once per routine, since the `if let` had no
     // id to check against).
     let run_status = use_signal(|| None::<(String, String)>);
+    // S5b-07: same per-row gating as `run_status`, for mint/clear webhook
+    // outcomes and errors.
+    let hook_status = use_signal(|| None::<(String, String)>);
+    // The ONE place a webhook secret ever lands in this client's state:
+    // (routine_id, secret, url). Never written into `routines`, never
+    // re-fetched - see this module's own doc above.
+    let mut minted_hook = use_signal(|| None::<(String, String, String)>);
 
     // S5-F-02 (F5): live schedule previews, debounced into the server's own
     // `POST /api/routines/preview` (`api::preview_schedule`) rather than a
@@ -168,9 +213,18 @@ pub fn RoutinesEditor(bot_id: String) -> Element {
         return rsx! { p { class: "muted", "Loading routines…" } };
     };
 
+    // S5b-07: a tool-kind routine needs a tool name, not a prompt - the
+    // server's own validation splits the same way (`validate_tool_kind` in
+    // `routes/routines.rs`), so the "Add routine" button mirrors it rather
+    // than refusing a valid tool routine for want of a prompt nobody asked
+    // for.
     let create_disabled = new_name.read().trim().is_empty()
-        || new_prompt.read().trim().is_empty()
-        || new_schedule.read().trim().is_empty();
+        || new_schedule.read().trim().is_empty()
+        || if *new_kind.read() == "tool" {
+            new_tool.read().trim().is_empty()
+        } else {
+            new_prompt.read().trim().is_empty()
+        };
 
     rsx! {
         div { class: "routines",
@@ -189,6 +243,16 @@ pub fn RoutinesEditor(bot_id: String) -> Element {
                             div { class: "routine-top",
                                 span { class: if routine.active { "routine-dot is-on" } else { "routine-dot" }, "aria-hidden": "true" }
                                 b { "{routine.name}" }
+                                if routine.kind == "tool" {
+                                    span { class: "routine-badge",
+                                        "tool: {routine.tool.clone().unwrap_or_default()}"
+                                    }
+                                }
+                                if routine.has_hook {
+                                    span { class: "routine-badge",
+                                        "webhook · {routine.hook_kind}"
+                                    }
+                                }
                                 span { class: "routine-when", "{routine.schedule_text}" }
                             }
                             p { class: "routine-prompt",
@@ -228,6 +292,7 @@ pub fn RoutinesEditor(bot_id: String) -> Element {
                             if is_editing {
                                 {
                                     let edit_preview = edit_preview.read().clone();
+                                    let is_tool = *edit_kind.read() == "tool";
                                     rsx! {
                                         div { class: "routine-edit",
                                             input {
@@ -235,11 +300,40 @@ pub fn RoutinesEditor(bot_id: String) -> Element {
                                                 "aria-label": "Routine name",
                                                 oninput: move |e| edit_name.set(e.value()),
                                             }
+                                            div { class: "routine-kind-toggle", role: "group", "aria-label": "Kind",
+                                                button {
+                                                    class: if !is_tool { "is-on" } else { "" },
+                                                    onclick: move |_| edit_kind.set("prompt".to_string()),
+                                                    "Prompt"
+                                                }
+                                                button {
+                                                    class: if is_tool { "is-on" } else { "" },
+                                                    onclick: move |_| edit_kind.set("tool".to_string()),
+                                                    "Tool"
+                                                }
+                                            }
                                             textarea {
                                                 value: "{edit_prompt}",
                                                 rows: 3,
+                                                placeholder: if is_tool { "What to tell the bot after the tool runs (optional)" } else { "What it should do each time" },
                                                 "aria-label": "Routine prompt",
                                                 oninput: move |e| edit_prompt.set(e.value()),
+                                            }
+                                            if is_tool {
+                                                input {
+                                                    value: "{edit_tool}",
+                                                    placeholder: "Tool name",
+                                                    "aria-label": "Tool name",
+                                                    oninput: move |e| edit_tool.set(e.value()),
+                                                }
+                                                textarea {
+                                                    value: "{edit_tool_args}",
+                                                    rows: 2,
+                                                    placeholder: r#"{{}} or {{"key": "value"}}"#,
+                                                    "aria-label": "Tool arguments (JSON)",
+                                                    oninput: move |e| edit_tool_args.set(e.value()),
+                                                }
+                                                p { class: "field", small { "Tool arguments must be a JSON object. Blank means " code { "{{}}" } "." } }
                                             }
                                             input {
                                                 value: "{edit_schedule}",
@@ -247,6 +341,31 @@ pub fn RoutinesEditor(bot_id: String) -> Element {
                                                 oninput: move |e| edit_schedule.set(e.value()),
                                             }
                                             {schedule_hint(edit_preview)}
+
+                                            div { class: "routine-hook",
+                                                p { class: "field", small { "Webhook signature" } }
+                                                select {
+                                                    "aria-label": "Webhook signature kind",
+                                                    value: "{edit_hook_kind}",
+                                                    onchange: move |e| edit_hook_kind.set(e.value()),
+                                                    for (value , label) in HOOK_KINDS.iter() {
+                                                        option { key: "{value}", value: "{value}", "{label}" }
+                                                    }
+                                                }
+                                                input {
+                                                    value: "{edit_hook_events}",
+                                                    placeholder: "push, pull_request (GitHub events, blank = all)",
+                                                    "aria-label": "Webhook events",
+                                                    oninput: move |e| edit_hook_events.set(e.value()),
+                                                }
+                                                input {
+                                                    value: "{edit_hook_match}",
+                                                    placeholder: "Match pattern, regex (blank = every delivery)",
+                                                    "aria-label": "Webhook match pattern",
+                                                    oninput: move |e| edit_hook_match.set(e.value()),
+                                                }
+                                            }
+
                                             if let Some(err) = edit_error.read().clone() {
                                                 div { class: "refusal", role: "alert", p { "{err}" } }
                                             }
@@ -258,11 +377,25 @@ pub fn RoutinesEditor(bot_id: String) -> Element {
                                                         let bot_id = bot_id.clone();
                                                         move |_| {
                                                             let id = id.clone();
+                                                            let kind = edit_kind.read().clone();
+                                                            let events: Vec<String> = edit_hook_events
+                                                                .read()
+                                                                .split(',')
+                                                                .map(|s| s.trim().to_string())
+                                                                .filter(|s| !s.is_empty())
+                                                                .collect();
+                                                            let hook_match = edit_hook_match.read().trim().to_string();
                                                             let draft = RoutineDraft {
                                                                 bot_id: bot_id.clone(),
                                                                 name: edit_name.read().trim().to_string(),
                                                                 prompt: edit_prompt.read().trim().to_string(),
                                                                 schedule: edit_schedule.read().trim().to_string(),
+                                                                kind,
+                                                                tool: edit_tool.read().trim().to_string(),
+                                                                tool_args: edit_tool_args.read().clone(),
+                                                                hook_kind: edit_hook_kind.read().clone(),
+                                                                hook_events: if events.is_empty() { None } else { Some(events) },
+                                                                hook_match: if hook_match.is_empty() { None } else { Some(hook_match) },
                                                             };
                                                             spawn(save_edit(id, draft, routines, editing_id, edit_error));
                                                         }
@@ -317,11 +450,39 @@ pub fn RoutinesEditor(bot_id: String) -> Element {
                                             edit_name.set(routine.name.clone());
                                             edit_prompt.set(routine.prompt.clone());
                                             edit_schedule.set(routine.schedule_text.clone());
+                                            edit_kind.set(routine.kind.clone());
+                                            edit_tool.set(routine.tool.clone().unwrap_or_default());
+                                            edit_tool_args.set(routine.tool_args.clone().unwrap_or_default());
+                                            edit_hook_kind.set(routine.hook_kind.clone());
+                                            edit_hook_events.set(routine.hook_events.clone().unwrap_or_default().join(", "));
+                                            edit_hook_match.set(routine.hook_match.clone().unwrap_or_default());
                                             edit_error.set(None);
                                             editing_id.set(Some(routine.id.clone()));
                                         }
                                     },
                                     "Edit"
+                                }
+                                if routine.has_hook {
+                                    button {
+                                        onclick: {
+                                            let id = routine.id.clone();
+                                            let bot_id = bot_id.clone();
+                                            move |_| {
+                                                minted_hook.set(None);
+                                                spawn(clear_hook_action(id.clone(), bot_id.clone(), routines, hook_status));
+                                            }
+                                        },
+                                        "Clear webhook"
+                                    }
+                                } else {
+                                    button {
+                                        onclick: {
+                                            let id = routine.id.clone();
+                                            let bot_id = bot_id.clone();
+                                            move |_| { spawn(mint_hook_action(id.clone(), bot_id.clone(), routines, hook_status, minted_hook)); }
+                                        },
+                                        "Create webhook"
+                                    }
                                 }
                                 button {
                                     class: "danger",
@@ -338,6 +499,49 @@ pub fn RoutinesEditor(bot_id: String) -> Element {
                                 && rid == routine.id
                             {
                                 p { class: "muted", "{status}" }
+                            }
+
+                            if let Some((rid, status)) = hook_status.read().clone()
+                                && rid == routine.id
+                            {
+                                p { class: "muted", "{status}" }
+                            }
+
+                            // The webhook secret, shown exactly once - see
+                            // this module's own doc and `api::mint_routine_hook`'s.
+                            // No "show again" path exists anywhere in this
+                            // client: closing the modal or minting a
+                            // different routine's hook drops this for good.
+                            if let Some((rid, secret, url)) = minted_hook.read().clone()
+                                && rid == routine.id
+                            {
+                                div { class: "hook-secret", role: "alert",
+                                    p { b { "Webhook created. " } "This secret will not be shown again." }
+                                    div { class: "hook-secret-row",
+                                        code { "{secret}" }
+                                        button {
+                                            onclick: {
+                                                let secret = secret.clone();
+                                                move |_| copy_to_clipboard(&secret)
+                                            },
+                                            "Copy secret"
+                                        }
+                                    }
+                                    div { class: "hook-secret-row",
+                                        code { "{url}" }
+                                        button {
+                                            onclick: {
+                                                let url = url.clone();
+                                                move |_| copy_to_clipboard(&url)
+                                            },
+                                            "Copy URL"
+                                        }
+                                    }
+                                    button {
+                                        onclick: move |_| minted_hook.set(None),
+                                        "Done - I saved it"
+                                    }
+                                }
                             }
 
                             if is_runs_open {
@@ -368,68 +572,122 @@ pub fn RoutinesEditor(bot_id: String) -> Element {
                 }
             }
 
-            div { class: "routine-new",
-                input {
-                    value: "{new_name}",
-                    placeholder: "What to call it",
-                    "aria-label": "Routine name",
-                    oninput: move |e| new_name.set(e.value()),
-                }
-                textarea {
-                    value: "{new_prompt}",
-                    rows: 3,
-                    placeholder: "What it should do each time",
-                    "aria-label": "Routine prompt",
-                    oninput: move |e| new_prompt.set(e.value()),
-                }
-                input {
-                    value: "{new_schedule}",
-                    placeholder: "daily at 07:30",
-                    "aria-label": "Schedule",
-                    oninput: move |e| new_schedule.set(e.value()),
-                }
-                p { class: "field",
-                    small {
-                        "Say it plainly: "
-                        code { "every 15 minutes" }
-                        ", "
-                        code { "hourly" }
-                        ", "
-                        code { "daily at 07:30" }
-                        ", "
-                        code { "weekdays at 08:43" }
-                        ". It starts paused."
-                    }
-                }
-                {schedule_hint(new_preview.read().clone())}
-                if let Some(err) = create_error.read().clone() {
-                    div { class: "refusal", role: "alert", p { "{err}" } }
-                }
-                button {
-                    class: "stg-btn primary",
-                    disabled: create_disabled,
-                    onclick: {
-                        let bot_id = bot_id.clone();
-                        move |_| {
-                            let draft = RoutineDraft {
-                                bot_id: bot_id.clone(),
-                                name: new_name.read().trim().to_string(),
-                                prompt: new_prompt.read().trim().to_string(),
-                                schedule: new_schedule.read().trim().to_string(),
-                            };
-                            let form = NewRoutineForm {
-                                name: new_name,
-                                prompt: new_prompt,
-                                schedule: new_schedule,
-                                error: create_error,
-                            };
-                            spawn(create_routine_action(draft, routines, form));
+            {
+                let new_is_tool = *new_kind.read() == "tool";
+                rsx! {
+                    div { class: "routine-new",
+                        input {
+                            value: "{new_name}",
+                            placeholder: "What to call it",
+                            "aria-label": "Routine name",
+                            oninput: move |e| new_name.set(e.value()),
                         }
-                    },
-                    "Add routine"
+                        div { class: "routine-kind-toggle", role: "group", "aria-label": "Kind",
+                            button {
+                                class: if !new_is_tool { "is-on" } else { "" },
+                                onclick: move |_| new_kind.set("prompt".to_string()),
+                                "Prompt"
+                            }
+                            button {
+                                class: if new_is_tool { "is-on" } else { "" },
+                                onclick: move |_| new_kind.set("tool".to_string()),
+                                "Tool"
+                            }
+                        }
+                        textarea {
+                            value: "{new_prompt}",
+                            rows: 3,
+                            placeholder: if new_is_tool { "What to tell the bot after the tool runs (optional)" } else { "What it should do each time" },
+                            "aria-label": "Routine prompt",
+                            oninput: move |e| new_prompt.set(e.value()),
+                        }
+                        if new_is_tool {
+                            input {
+                                value: "{new_tool}",
+                                placeholder: "Tool name",
+                                "aria-label": "Tool name",
+                                oninput: move |e| new_tool.set(e.value()),
+                            }
+                            textarea {
+                                value: "{new_tool_args}",
+                                rows: 2,
+                                placeholder: r#"{{}} or {{"key": "value"}}"#,
+                                "aria-label": "Tool arguments (JSON)",
+                                oninput: move |e| new_tool_args.set(e.value()),
+                            }
+                            p { class: "field", small { "Tool arguments must be a JSON object. Blank means " code { "{{}}" } "." } }
+                        }
+                        input {
+                            value: "{new_schedule}",
+                            placeholder: "daily at 07:30",
+                            "aria-label": "Schedule",
+                            oninput: move |e| new_schedule.set(e.value()),
+                        }
+                        p { class: "field",
+                            small {
+                                "Say it plainly: "
+                                code { "every 15 minutes" }
+                                ", "
+                                code { "hourly" }
+                                ", "
+                                code { "daily at 07:30" }
+                                ", "
+                                code { "weekdays at 08:43" }
+                                ". It starts paused."
+                            }
+                        }
+                        {schedule_hint(new_preview.read().clone())}
+                        if let Some(err) = create_error.read().clone() {
+                            div { class: "refusal", role: "alert", p { "{err}" } }
+                        }
+                        button {
+                            class: "stg-btn primary",
+                            disabled: create_disabled,
+                            onclick: {
+                                let bot_id = bot_id.clone();
+                                move |_| {
+                                    let draft = RoutineDraft {
+                                        bot_id: bot_id.clone(),
+                                        name: new_name.read().trim().to_string(),
+                                        prompt: new_prompt.read().trim().to_string(),
+                                        schedule: new_schedule.read().trim().to_string(),
+                                        kind: new_kind.read().clone(),
+                                        tool: new_tool.read().trim().to_string(),
+                                        tool_args: new_tool_args.read().clone(),
+                                        hook_kind: "raw".to_string(),
+                                        hook_events: None,
+                                        hook_match: None,
+                                    };
+                                    let form = NewRoutineForm {
+                                        name: new_name,
+                                        prompt: new_prompt,
+                                        schedule: new_schedule,
+                                        kind: new_kind,
+                                        tool: new_tool,
+                                        tool_args: new_tool_args,
+                                        error: create_error,
+                                    };
+                                    spawn(create_routine_action(draft, routines, form));
+                                }
+                            },
+                            "Add routine"
+                        }
+                    }
                 }
             }
         }
+    }
+}
+
+/// Best-effort copy to the OS clipboard via `navigator.clipboard.writeText`.
+/// Fire-and-forget: the returned `Promise` is dropped rather than awaited -
+/// there is nothing more useful to do with a copy failure here than what
+/// happens today with no copy button at all (the secret is still on screen,
+/// selectable by hand), and awaiting it would need a second `spawn` for a
+/// plain button click that has no other async work to do.
+fn copy_to_clipboard(text: &str) {
+    if let Some(window) = web_sys::window() {
+        let _ = window.navigator().clipboard().write_text(text);
     }
 }
 
@@ -451,20 +709,40 @@ fn schedule_hint(preview: Option<Result<String, String>>) -> Element {
 
 /// The typed-out fields behind a create or an edit save - bundled so the
 /// two async actions below stay under clippy's `too_many_arguments` without
-/// losing any of name/prompt/schedule (`bot_id` too, for `reload` after).
+/// losing any of name/prompt/schedule/kind/tool/tool_args/hook-*
+/// (`bot_id` too, for `reload` after). S5b-07 widened this past the S5-05
+/// trio - `tool`/`tool_args` are sent only when `kind == "tool"` (see
+/// `create_routine_action`/`save_edit` below, mirroring the server's own
+/// `kind`-gated validation), and `hook_kind`/`hook_events`/`hook_match` ride
+/// along on both create and edit (a routine can be born with a hook
+/// pre-configured, same as TS's own `CreateRoutineBody` allows) - only the
+/// SECRET itself needs the separate mint/clear round trip, not the kind
+/// config around it.
 struct RoutineDraft {
     bot_id: String,
     name: String,
     prompt: String,
     schedule: String,
+    kind: String,
+    tool: String,
+    tool_args: String,
+    hook_kind: String,
+    hook_events: Option<Vec<String>>,
+    hook_match: Option<String>,
 }
 
 /// The create form's own signals, reset together on a successful save -
-/// bundled for the same reason `RoutineDraft` is.
+/// bundled for the same reason `RoutineDraft` is. Hook fields are not reset
+/// here - the create form has no hook section (see this module's own doc:
+/// minting needs an id, so hook config on a brand-new routine happens after
+/// creation, in the edit form).
 struct NewRoutineForm {
     name: Signal<String>,
     prompt: Signal<String>,
     schedule: Signal<String>,
+    kind: Signal<String>,
+    tool: Signal<String>,
+    tool_args: Signal<String>,
     error: Signal<Option<String>>,
 }
 
@@ -473,11 +751,24 @@ async fn create_routine_action(
     routines: Signal<Option<Vec<Routine>>>,
     mut form: NewRoutineForm,
 ) {
-    match api::create_routine(&draft.bot_id, &draft.name, &draft.prompt, &draft.schedule).await {
+    let is_tool = draft.kind == "tool";
+    let req = api::CreateRoutineReq {
+        bot_id: &draft.bot_id,
+        name: &draft.name,
+        prompt: &draft.prompt,
+        schedule: &draft.schedule,
+        kind: Some(draft.kind.as_str()),
+        tool: is_tool.then_some(draft.tool.as_str()),
+        tool_args: is_tool.then_some(draft.tool_args.as_str()),
+    };
+    match api::create_routine(&req).await {
         Ok(_) => {
             form.name.set(String::new());
             form.prompt.set(String::new());
             form.schedule.set(String::new());
+            form.kind.set("prompt".to_string());
+            form.tool.set(String::new());
+            form.tool_args.set(String::new());
             form.error.set(None);
             reload(draft.bot_id, routines).await;
         }
@@ -492,13 +783,65 @@ async fn save_edit(
     mut editing_id: Signal<Option<String>>,
     mut edit_error: Signal<Option<String>>,
 ) {
-    match api::update_routine(&id, &draft.name, &draft.prompt, &draft.schedule).await {
+    let is_tool = draft.kind == "tool";
+    let req = api::UpdateRoutineReq {
+        name: &draft.name,
+        prompt: &draft.prompt,
+        schedule: &draft.schedule,
+        kind: Some(draft.kind.as_str()),
+        tool: is_tool.then_some(draft.tool.as_str()),
+        tool_args: is_tool.then_some(draft.tool_args.as_str()),
+        hook_kind: Some(draft.hook_kind.as_str()),
+        hook_events: Some(draft.hook_events.clone()),
+        hook_match: Some(draft.hook_match.as_deref()),
+    };
+    match api::update_routine(&id, &req).await {
         Ok(_) => {
             editing_id.set(None);
             edit_error.set(None);
             reload(draft.bot_id, routines).await;
         }
         Err(e) => edit_error.set(Some(e)),
+    }
+}
+
+/// `POST /api/routines/:id/hook` - mints a fresh secret and shows it via
+/// `minted_hook` (see this module's own doc on why that is the only place a
+/// secret is ever written into this client's state). Reloads the list
+/// afterward so the row's badge flips to `hasHook: true` without a second
+/// manual refresh - the reloaded `Routine` never carries the secret itself
+/// (`api::mint_routine_hook`'s doc), so this is safe to do unconditionally.
+async fn mint_hook_action(
+    id: String,
+    bot_id: String,
+    routines: Signal<Option<Vec<Routine>>>,
+    mut hook_status: Signal<Option<(String, String)>>,
+    mut minted_hook: Signal<Option<(String, String, String)>>,
+) {
+    match api::mint_routine_hook(&id).await {
+        Ok((secret, url)) => {
+            minted_hook.set(Some((id.clone(), secret, url)));
+            hook_status.set(None);
+            reload(bot_id, routines).await;
+        }
+        Err(e) => hook_status.set(Some((id, e))),
+    }
+}
+
+/// `DELETE /api/routines/:id/hook` - clears the secret; the routine stops
+/// accepting deliveries until a fresh one is minted.
+async fn clear_hook_action(
+    id: String,
+    bot_id: String,
+    routines: Signal<Option<Vec<Routine>>>,
+    mut hook_status: Signal<Option<(String, String)>>,
+) {
+    match api::clear_routine_hook(&id).await {
+        Ok(()) => {
+            hook_status.set(None);
+            reload(bot_id, routines).await;
+        }
+        Err(e) => hook_status.set(Some((id, e))),
     }
 }
 

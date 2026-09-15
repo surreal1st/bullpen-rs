@@ -1273,8 +1273,14 @@ button.effort-glyph:disabled {
 
 .routine-edit input,
 .routine-edit textarea,
+.routine-edit select,
 .routine-new input,
-.routine-new textarea {
+.routine-new textarea,
+.goal-edit input,
+.goal-edit textarea,
+.goal-edit select,
+.goal-new input,
+.goal-new textarea {
   width: 100%;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -1286,6 +1292,229 @@ button.effort-glyph:disabled {
 }
 
 .routine-edit textarea,
-.routine-new textarea {
+.routine-new textarea,
+.goal-edit textarea,
+.goal-new textarea {
   resize: vertical;
+}
+
+/* --------------------------------------------------------- S5b-07: .goal */
+/* Companion to `.routine*` above - the Goals modal (`goals_editor.rs`'s
+   `GoalsModal`) reuses the SAME shell and act-button styling (`.routine-acts`,
+   `.routine-runs`, `.routine-run*`: a goal's own run history is the
+   byte-identical `RoutineRun` shape, see that type's own doc), with `.goal*`
+   only for what is actually shaped differently - the status/budget
+   furniture a routine has no equivalent of. */
+
+.goals-modal {
+  width: min(40rem, calc(100vw - 2rem));
+  max-height: min(34rem, calc(100vh - 4rem));
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.goals,
+.goals * {
+  box-sizing: border-box;
+}
+
+.goals {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+.goal {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #0f151d;
+  padding: 0.6rem 0.75rem;
+}
+
+.goal-top {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.goal-dot {
+  flex: none;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 999px;
+  background: var(--line-strong);
+}
+
+.goal-dot.is-on {
+  background: var(--seam);
+}
+
+.goal-status {
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.goal-status-active {
+  color: var(--ok);
+}
+
+.goal-status-stopped {
+  color: var(--danger);
+}
+
+.goal-done-when {
+  margin: 0;
+  color: var(--ink-dim);
+  font-size: 0.85rem;
+}
+
+.goal-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.7rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.goal-stopped {
+  margin: 0;
+  border-radius: 8px;
+  padding: 0.5rem 0.6rem;
+  font-size: 0.82rem;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--muted) 8%, var(--panel));
+  color: var(--ink-dim);
+}
+
+.goal-log {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.goal-log-line {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--ink-dim);
+}
+
+.goal-log-kind {
+  color: var(--muted);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-right: 0.3rem;
+}
+
+.goal-edit,
+.goal-new {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.6rem 0.7rem;
+}
+
+.goal-new {
+  border-style: dashed;
+}
+
+.goal-budget-row {
+  display: flex;
+  gap: 0.45rem;
+}
+
+.goal-budget-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ------------------------------------------------- S5b-07: routine tool/hook */
+/* The kind toggle (Prompt/Tool) and the badges next to a routine's name in
+   the list - `.routine-badge` reuses `.bot-flag`'s posture (a small outlined
+   pill, `rail.css`) rather than inventing a second badge language. */
+
+.routine-badge {
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 38%, transparent);
+  border-radius: 4px;
+  padding: 0.05rem 0.32rem;
+}
+
+.routine-kind-toggle {
+  display: flex;
+  gap: 0.3rem;
+}
+
+.routine-kind-toggle button {
+  flex: 1;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  border-radius: 7px;
+  padding: 0.3rem 0.5rem;
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.routine-kind-toggle button.is-on {
+  border-color: var(--seam);
+  color: var(--seam);
+}
+
+.routine-hook {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  border-top: 1px dashed var(--line);
+  padding-top: 0.45rem;
+}
+
+/* The minted webhook secret - shown exactly once (`api::mint_routine_hook`'s
+   own doc). Deliberately styled like a warning, not a quiet success line: it
+   is the one thing on this screen Josh must act on before he can ever see it
+   again. */
+.hook-secret {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  border: 1px solid color-mix(in srgb, var(--ok) 42%, var(--line));
+  background: color-mix(in srgb, var(--ok) 9%, var(--panel));
+  border-radius: 8px;
+  padding: 0.55rem 0.65rem;
+}
+
+.hook-secret p {
+  margin: 0;
+  font-size: 0.82rem;
+}
+
+.hook-secret-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.hook-secret-row code {
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  white-space: nowrap;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.25rem 0.4rem;
+  font-size: 0.78rem;
 }

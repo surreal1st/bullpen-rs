@@ -84,6 +84,19 @@
   align-items: center;
   gap: 0.55rem;
   width: 100%;
+  /* D8 (`tickets/DEFERRED.md`, `shots/ship-s4.png`): every `.bot` row is a
+     GRID ITEM of `.roster` (`display: grid` above) - a grid item's default
+     `min-width` is `auto`, which resolves to its content's max-content
+     width, not `0`. `.bot-main`/`.bot-name` already carry `min-width: 0` +
+     ellipsis (below), but that only lets THEM shrink inside a `.bot` that
+     is already free to grow - it does nothing if `.bot` itself, the grid
+     item, refuses to shrink below its longest child's natural width first.
+     A short bot name never showed it; a long GROUP CHAT title (one arbitrary
+     sentence, `white-space: nowrap` below) pushed `.bot`'s max-content width
+     past the rail, which blew out `.roster`'s track and drew a horizontal
+     scrollbar under the whole rail. `min-width: 0` here is the actual fix -
+     `.bot-main`'s own `min-width: 0` was already correct and stays. */
+  min-width: 0;
   border: 0;
   background: transparent;
   color: var(--ink);

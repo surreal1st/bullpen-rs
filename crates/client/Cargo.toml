@@ -33,7 +33,17 @@ pulldown-cmark = "0.13"
 # S1-F-11: `RequestCredentials` - the gate's login POST is explicit about
 # sending cookies (`api.rs::login`) rather than relying on fetch's
 # same-origin default.
-web-sys = { version = "0.3", features = ["ReadableStreamDefaultReader", "RequestCredentials"] }
+# S5b-07: `Window`/`Navigator`/`Clipboard` - the "Copy secret"/"Copy URL"
+# buttons on a freshly minted webhook secret (`routines_editor.rs::
+# copy_to_clipboard`) call `navigator.clipboard.writeText`, each type gated
+# behind its own web-sys feature.
+web-sys = { version = "0.3", features = [
+    "ReadableStreamDefaultReader",
+    "RequestCredentials",
+    "Window",
+    "Navigator",
+    "Clipboard",
+] }
 js-sys = "0.3"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"

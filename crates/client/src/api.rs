@@ -5,7 +5,7 @@
 
 use crate::types::{
     ApprovalsResponse, AuthStatus, AutoReviewLogEntry, AutoReviewLogResponse, AutoReviewState, Bot,
-    BotPatchResponse, BotToolsField, ConversationView, CoreStatus, MadeTool, MemoryEntry,
+    BotPatchResponse, BotToolsField, ConversationView, CoreStatus, Goal, MadeTool, MemoryEntry,
     MemoryEntryField, MemoryView, ModelError, ModelField, ModelsResponse, OpenQuestion,
     PendingApproval, PermissionsField, ProjectField, ProjectSummary, ProjectsField,
     QuestionsResponse, RoomResponse, RoomSummary, RoomsResponse, Routine, RoutineRun, RoutingState,
@@ -1047,30 +1047,32 @@ pub async fn fetch_routines(bot_id: &str) -> Result<Vec<Routine>, String> {
         .map_err(|e| e.to_string())
 }
 
+/// `POST /api/routines`'s body. `kind`/`tool`/`tool_args` are S5b-07's
+/// addition - `None` (the field skipped entirely) is a prompt-kind routine,
+/// same as before this ticket (`CreateRoutineBody::kind` on the server
+/// defaults to `"prompt"` when the key is absent). Public so
+/// `routines_editor.rs` can build one directly rather than this module
+/// growing a same-shaped positional-argument function for every new field
+/// S5b lands (the ticket adds three at once).
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct CreateRoutineReq<'a> {
-    bot_id: &'a str,
-    name: &'a str,
-    prompt: &'a str,
-    schedule: &'a str,
+pub struct CreateRoutineReq<'a> {
+    pub bot_id: &'a str,
+    pub name: &'a str,
+    pub prompt: &'a str,
+    pub schedule: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_args: Option<&'a str>,
 }
 
-/// `POST /api/routines` - a prompt-kind routine only (`kind` omitted, the
-/// store defaults it to `"prompt"`); tool/hook/condition fields are S5b.
-pub async fn create_routine(
-    bot_id: &str,
-    name: &str,
-    prompt: &str,
-    schedule: &str,
-) -> Result<Routine, String> {
+/// `POST /api/routines`.
+pub async fn create_routine(req: &CreateRoutineReq<'_>) -> Result<Routine, String> {
     let resp = Request::post("/api/routines")
-        .json(&CreateRoutineReq {
-            bot_id,
-            name,
-            prompt,
-            schedule,
-        })
+        .json(req)
         .map_err(|e| e.to_string())?
         .send()
         .await
@@ -1078,34 +1080,91 @@ pub async fn create_routine(
     routine_result(resp).await
 }
 
+/// `PATCH /api/routines/:id`'s body. S5b-07 widens this past the S5-05
+/// name/prompt/schedule trio with the tool and hook fields (`conditions`
+/// stays out - no UI for it here). `hook_events`/`hook_match` are nested
+/// `Option<Option<_>>` on purpose, mirroring `UpdateRoutineBody` on the
+/// server: the OUTER `None` (skipped by `skip_serializing_if`) means "do not
+/// touch this field"; `Some(None)` serializes to JSON `null` (serde's
+/// ordinary `Option<T>` behaviour on the INNER option), which the route
+/// reads as "clear it"; `Some(Some(v))` sets it. `routines_editor.rs`'s hook
+/// form always sends one of the three explicitly, never leaves this to
+/// chance.
 #[derive(Serialize)]
-struct UpdateRoutineReq<'a> {
-    name: &'a str,
-    prompt: &'a str,
-    schedule: &'a str,
+#[serde(rename_all = "camelCase")]
+pub struct UpdateRoutineReq<'a> {
+    pub name: &'a str,
+    pub prompt: &'a str,
+    pub schedule: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_args: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hook_kind: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hook_events: Option<Option<Vec<String>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hook_match: Option<Option<&'a str>>,
 }
 
-/// `PATCH /api/routines/:id` - the edit form's name/prompt/schedule trio;
-/// every other field on `UpdateRoutineBody` (kind/tool/hook/conditions) is
-/// left untouched since this client never sends them.
-pub async fn update_routine(
-    id: &str,
-    name: &str,
-    prompt: &str,
-    schedule: &str,
-) -> Result<Routine, String> {
+/// `PATCH /api/routines/:id`.
+pub async fn update_routine(id: &str, req: &UpdateRoutineReq<'_>) -> Result<Routine, String> {
     let url = format!("/api/routines/{id}");
     let resp = Request::patch(&url)
-        .json(&UpdateRoutineReq {
-            name,
-            prompt,
-            schedule,
-        })
+        .json(req)
         .map_err(|e| e.to_string())?
         .send()
         .await
         .map_err(|e| e.to_string())?;
     routine_result(resp).await
+}
+
+/// `{"secret": "...", "url": "..."}"`, `POST /api/routines/:id/hook`'s 201
+/// body.
+#[derive(Deserialize)]
+struct HookMintField {
+    secret: String,
+    url: String,
+}
+
+/// `POST /api/routines/:id/hook` - mints a fresh webhook secret, returned
+/// ONCE (`routes/hooks.rs`'s own doc: `GET /api/routines` only ever says
+/// `hasHook: true` afterward). The caller (`routines_editor.rs`'s
+/// minted-secret UI) must show it immediately, offer a copy button, and
+/// never persist or log it - there is no second chance to fetch it.
+pub async fn mint_routine_hook(id: &str) -> Result<(String, String), String> {
+    let url = format!("/api/routines/{id}/hook");
+    let resp = Request::post(&url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return match resp.json::<RoutineError>().await {
+            Ok(err) => Err(err.error),
+            Err(_) => Err(format!("{url} -> {}", resp.status())),
+        };
+    }
+    resp.json::<HookMintField>()
+        .await
+        .map(|b| (b.secret, b.url))
+        .map_err(|e| e.to_string())
+}
+
+/// `DELETE /api/routines/:id/hook` - clears the webhook secret so the
+/// routine no longer accepts deliveries.
+pub async fn clear_routine_hook(id: &str) -> Result<(), String> {
+    let url = format!("/api/routines/{id}/hook");
+    let resp = Request::delete(&url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("{url} -> {}", resp.status()));
+    }
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -1211,6 +1270,170 @@ pub async fn run_routine_now(id: &str) -> Result<String, String> {
         .map_err(|e| e.to_string())?;
     if !resp.ok() {
         return match resp.json::<RoutineError>().await {
+            Ok(err) => Err(err.error),
+            Err(_) => Err(format!("{url} -> {}", resp.status())),
+        };
+    }
+    resp.json::<RunIdField>()
+        .await
+        .map(|b| b.run_id)
+        .map_err(|e| e.to_string())
+}
+
+/* ----------------------------------------------------------- S5b-07: goals */
+
+/// `GET /api/goals?bot=...`'s response shape.
+#[derive(Deserialize, Default)]
+struct GoalsField {
+    #[serde(default)]
+    goals: Vec<Goal>,
+}
+
+/// `POST /api/goals` and `PATCH /api/goals/:id`'s success shape
+/// (`crates/server/src/routes/goals.rs` always answers `{"goal": {...}}` on
+/// both).
+#[derive(Deserialize)]
+struct GoalField {
+    goal: Goal,
+}
+
+/// A rejected create/patch's shape, e.g. "Say what the goal is." or the
+/// done-needs-a-note refusal: `{"error": "..."}"`.
+#[derive(Deserialize)]
+struct GoalError {
+    error: String,
+}
+
+async fn goal_result(resp: Response) -> Result<Goal, String> {
+    if resp.ok() {
+        let body = resp.json::<GoalField>().await.map_err(|e| e.to_string())?;
+        return Ok(body.goal);
+    }
+    let status = resp.status();
+    match resp.json::<GoalError>().await {
+        Ok(err) => Err(err.error),
+        Err(_) => Err(format!("/api/goals -> {status}")),
+    }
+}
+
+/// `GET /api/goals?bot=:botId` - one bot's goals only, same `bot` query
+/// param `GET /api/routines` reads.
+pub async fn fetch_goals(bot_id: &str) -> Result<Vec<Goal>, String> {
+    let url = format!("/api/goals?bot={bot_id}");
+    let resp = Request::get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("{url} -> {}", resp.status()));
+    }
+    resp.json::<GoalsField>()
+        .await
+        .map(|b| b.goals)
+        .map_err(|e| e.to_string())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateGoalReq<'a> {
+    bot_id: &'a str,
+    objective: &'a str,
+    done_when: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    budget_tokens: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    budget_until: Option<&'a str>,
+}
+
+/// `POST /api/goals`.
+pub async fn create_goal(
+    bot_id: &str,
+    objective: &str,
+    done_when: &str,
+    budget_tokens: Option<f64>,
+    budget_until: Option<&str>,
+) -> Result<Goal, String> {
+    let resp = Request::post("/api/goals")
+        .json(&CreateGoalReq {
+            bot_id,
+            objective,
+            done_when,
+            budget_tokens,
+            budget_until,
+        })
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    goal_result(resp).await
+}
+
+/// `PATCH /api/goals/:id` - a raw JSON patch, same reason
+/// `routes/goals.rs::patch_goal` reads a raw `serde_json::Value` server-side:
+/// `budgetTokens`/`budgetUntil` need "key absent" (leave), "key + null"
+/// (clear) and "key + value" (set) to stay three distinguishable cases,
+/// which a typed `Option<Option<T>>` struct field cannot reproduce through
+/// serde's derive on ITS OWN either - see that module's doc. `goals_editor.rs`
+/// builds the object with `serde_json::json!` at each call site instead of a
+/// second typed struct here, since every caller already knows exactly which
+/// keys it wants present.
+pub async fn patch_goal(id: &str, body: serde_json::Value) -> Result<Goal, String> {
+    let url = format!("/api/goals/{id}");
+    let resp = Request::patch(&url)
+        .json(&body)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    goal_result(resp).await
+}
+
+/// `DELETE /api/goals/:id`.
+pub async fn delete_goal(id: &str) -> Result<(), String> {
+    let url = format!("/api/goals/{id}");
+    let resp = Request::delete(&url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("{url} -> {}", resp.status()));
+    }
+    Ok(())
+}
+
+/// `GET /api/goals/:id/runs` - the last 20 sessions, newest first. Reuses
+/// `RoutineRun` (see that type's own doc) - `store::goals::GoalRun` is a
+/// byte-identical wire shape to `store::RoutineRun`.
+pub async fn fetch_goal_runs(id: &str) -> Result<Vec<RoutineRun>, String> {
+    #[derive(Deserialize, Default)]
+    struct RunsField {
+        #[serde(default)]
+        runs: Vec<RoutineRun>,
+    }
+    let url = format!("/api/goals/{id}/runs");
+    let resp = Request::get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("{url} -> {}", resp.status()));
+    }
+    resp.json::<RunsField>()
+        .await
+        .map(|b| b.runs)
+        .map_err(|e| e.to_string())
+}
+
+/// `POST /api/goals/:id/run` - "Run now": fires regardless of the goal's own
+/// schedule, 201 with `{"runId": "..."}"`. Same posture as
+/// `run_routine_now` above.
+pub async fn run_goal_now(id: &str) -> Result<String, String> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct RunIdField {
+        run_id: String,
+    }
+    let url = format!("/api/goals/{id}/run");
+    let resp = Request::post(&url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return match resp.json::<GoalError>().await {
             Ok(err) => Err(err.error),
             Err(_) => Err(format!("{url} -> {}", resp.status())),
         };

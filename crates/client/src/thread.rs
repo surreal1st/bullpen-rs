@@ -11,6 +11,7 @@ use crate::api;
 use crate::approvals::Approvals;
 use crate::bubble::Bubble;
 use crate::composer::Composer;
+use crate::goals_editor::GoalsModal;
 use crate::memory_editor::MemoryModal;
 use crate::message_time::{day_key, format_day, format_time, now_iso};
 use crate::model_chip::ModelChip;
@@ -201,6 +202,9 @@ pub fn ChatPane(
     // S5-05: the routines pane, same placement again - see
     // `routines_editor.rs`'s `RoutinesModal`.
     let mut routines_open = use_signal(|| false);
+    // S5b-07: the goals pane, same placement again - see
+    // `goals_editor.rs`'s `GoalsModal`.
+    let mut goals_open = use_signal(|| false);
 
     rsx! {
         div { class: "pane",
@@ -224,6 +228,11 @@ pub fn ChatPane(
                             class: "pane-perms-btn",
                             onclick: move |_| routines_open.set(true),
                             "Routines"
+                        }
+                        button {
+                            class: "pane-perms-btn",
+                            onclick: move |_| goals_open.set(true),
+                            "Goals"
                         }
                         ModelChip {
                             bot: current,
@@ -251,6 +260,13 @@ pub fn ChatPane(
                     bot_id: bot_id.clone(),
                     bot_name: bot_name.clone(),
                     on_close: move |_| routines_open.set(false),
+                }
+            }
+            if *goals_open.read() {
+                GoalsModal {
+                    bot_id: bot_id.clone(),
+                    bot_name: bot_name.clone(),
+                    on_close: move |_| goals_open.set(false),
                 }
             }
             if let Some(err) = load_error.read().clone() {
