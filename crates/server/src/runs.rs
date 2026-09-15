@@ -934,6 +934,10 @@ were doing unless he changed it."
                 // (an unattended trigger, nobody there to approve) - the
                 // Deny arm below swaps in the auto-review wording.
                 let mut judge_deny_reason: Option<String> = None;
+                // S4-F-03/F9: whether the judge has already run for THIS
+                // call (either arm below) - guards the end-of-chain check
+                // after the rules block so a call is never judged twice.
+                let mut judge_ran = false;
 
                 if decision == Decision::Allow && judge::is_risky(&call.name) {
                     let enabled = {
@@ -941,6 +945,7 @@ were doing unless he changed it."
                         judge::judge_enabled(&db)
                     };
                     if enabled {
+                        judge_ran = true;
                         match judge::judge_call(self.port.as_ref(), &call.name, &call.arguments)
                             .await
                         {
@@ -1015,7 +1020,15 @@ were doing unless he changed it."
                                             &call.name,
                                             &call.arguments,
                                         ),
-                                        verdict: judge::Verdict::Safe.as_str().to_string(),
+                                        // S4-R F2: a fail-open is NOT a
+                                        // "safe" judgement - nothing judged
+                                        // this call, so the log says so with
+                                        // a verdict of its own rather than
+                                        // reusing `Verdict::Safe`, which
+                                        // made an outage indistinguishable
+                                        // from a clean safe verdict once the
+                                        // run's own Notice scrolled away.
+                                        verdict: "unavailable".to_string(),
                                         reason: notice,
                                         decision: Decision::Allow.as_str().to_string(),
                                         created_at: now_iso(),
@@ -1100,6 +1113,128 @@ were doing unless he changed it."
                             );
                         }
                         decision = resolved.decision;
+                    }
+                }
+
+                // S4-R F9: the block above only ever sees a grid Allow
+                // BEFORE `permissions::tighten_set` pulls a stored Allow
+                // back to Ask for an unattended trigger, and before a bot
+                // rule can lift that tightened Ask back to Allow - so
+                // `shell`/`ssh`/`read_file`/`desk_shell` under a routine
+                // never reached the judge at all, which is exactly the
+                // scenario S4 was built for (a standing "allow shell" rule,
+                // a 06:00 routine, a destructive command, nobody awake).
+                // Judging BEFORE the tightening would be worse: a `safe`
+                // verdict would re-widen a door the unattended floor
+                // deliberately closed. So judge once more here, at the END
+                // of the chain, on whatever decision everything above
+                // landed on: if it is Allow for a risky tool and the judge
+                // has not already run for this call (`judge_ran`), judge it
+                // now. `risky` -> Allow (rules-on-top already won by the
+                // time we get here, so this does not re-park what Josh's
+                // own rule just lifted); `dangerous` -> the same
+                // Ask-for-Chat/Deny-otherwise split as the first pass.
+                if decision == Decision::Allow && judge::is_risky(&call.name) && !judge_ran {
+                    let enabled = {
+                        let db = self.db();
+                        judge::judge_enabled(&db)
+                    };
+                    if enabled {
+                        match judge::judge_call(self.port.as_ref(), &call.name, &call.arguments)
+                            .await
+                        {
+                            Ok(judgement) => {
+                                let new_decision = match judgement.verdict {
+                                    judge::Verdict::Safe | judge::Verdict::Risky => Decision::Allow,
+                                    judge::Verdict::Dangerous => {
+                                        judge::decision_for(judgement.verdict, Some(&trigger))
+                                    }
+                                };
+                                if judgement.verdict != judge::Verdict::Safe {
+                                    self.emit(
+                                        run_id,
+                                        RunEvent::Notice {
+                                            message: format!(
+                                                "Auto review: {} - {}",
+                                                judgement.verdict.as_str(),
+                                                judgement.reason
+                                            ),
+                                        },
+                                    );
+                                }
+                                {
+                                    let db = self.db();
+                                    if let Err(err) = judge::log_judgement(
+                                        &db,
+                                        store::auto_review::LogEntry {
+                                            id: Uuid::new_v4().to_string(),
+                                            bot_id: bot_id.to_string(),
+                                            run_id: run_id.to_string(),
+                                            tool_name: call.name.clone(),
+                                            description: rules::describe_call(
+                                                &call.name,
+                                                &call.arguments,
+                                            ),
+                                            verdict: judgement.verdict.as_str().to_string(),
+                                            reason: judgement.reason.clone(),
+                                            decision: new_decision.as_str().to_string(),
+                                            created_at: now_iso(),
+                                        },
+                                    ) {
+                                        tracing::error!(
+                                            "run {run_id}: failed to log end-of-chain auto-review judgement: {err}"
+                                        );
+                                    }
+                                }
+                                if judgement.verdict == judge::Verdict::Dangerous
+                                    && new_decision == Decision::Deny
+                                {
+                                    judge_deny_reason = Some(judgement.reason.clone());
+                                }
+                                judge_verdict = Some(judgement.verdict.as_str().to_string());
+                                judge_reason = Some(judgement.reason);
+                                decision = new_decision;
+                            }
+                            Err(reason) => {
+                                let notice = format!(
+                                    "Auto review unavailable: {reason}; ran on the grid's allow."
+                                );
+                                self.emit(
+                                    run_id,
+                                    RunEvent::Notice {
+                                        message: notice.clone(),
+                                    },
+                                );
+                                let db = self.db();
+                                if let Err(err) = judge::log_judgement(
+                                    &db,
+                                    store::auto_review::LogEntry {
+                                        id: Uuid::new_v4().to_string(),
+                                        bot_id: bot_id.to_string(),
+                                        run_id: run_id.to_string(),
+                                        tool_name: call.name.clone(),
+                                        description: rules::describe_call(
+                                            &call.name,
+                                            &call.arguments,
+                                        ),
+                                        // S4-R F2 (same fix as the first
+                                        // pass above): a fail-open is not a
+                                        // "safe" judgement.
+                                        verdict: "unavailable".to_string(),
+                                        reason: notice,
+                                        decision: Decision::Allow.as_str().to_string(),
+                                        created_at: now_iso(),
+                                    },
+                                ) {
+                                    tracing::error!(
+                                        "run {run_id}: failed to log end-of-chain fail-open auto-review judgement: {err}"
+                                    );
+                                }
+                                // Fails OPEN: `decision` is already Allow at
+                                // this point in the chain, so an outage
+                                // never widens anything here either.
+                            }
+                        }
                     }
                 }
 

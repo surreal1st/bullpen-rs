@@ -21,6 +21,19 @@ pub fn is_risky(tool: &str) -> bool {
     RISKY_TOOLS.contains(&tool)
 }
 
+/// Cap on any text a model's own reply can put into a Notice or the
+/// `auto_review_log` - S4-R F3. `rules::describe_call` caps the ACTION side
+/// of this same call at this length; without a matching cap on the
+/// JUDGE's reply, a cheap model that rambles, loops, or echoes the fenced
+/// description back dumps all of it, uncapped, into a user-visible line
+/// and a stored row - the one uncapped string on a path where everything
+/// else already has this exact limit.
+const REASON_CAP: usize = 300;
+
+fn capped(text: &str) -> String {
+    text.trim().chars().take(REASON_CAP).collect()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Verdict {
@@ -124,15 +137,15 @@ pub async fn judge_call(
             let reason = obj
                 .get("reason")
                 .and_then(|v| v.as_str())
-                .unwrap_or("no reason given")
-                .to_string();
+                .map(capped)
+                .unwrap_or_else(|| "no reason given".to_string());
 
             let verdict = Verdict::parse(verdict_str)
-                .ok_or_else(|| format!("invalid verdict: {}", verdict_str))?;
+                .ok_or_else(|| format!("invalid verdict: {}", capped(verdict_str)))?;
 
             Ok(Judgement { verdict, reason })
         }
-        _ => Err(format!("unparseable reply: {}", text)),
+        _ => Err(format!("unparseable reply: {}", capped(&text))),
     }
 }
 

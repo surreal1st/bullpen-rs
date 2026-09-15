@@ -184,6 +184,20 @@ fn classify_reply(ids: &[&str]) -> Vec<ModelEvent> {
     text_script(&serde_json::to_string(ids).expect("serialize rule ids"))
 }
 
+/// `common::drain` stops only on `Done`/`Error` - never on a park - so a
+/// regression that makes a call park instead of finishing (S4-R F5: S4-04's
+/// own bite on `decision_for` did exactly this to test (d)) hangs the drain
+/// forever rather than failing. S4-04's Result reported that bite's red as
+/// a shell-level `timeout 30`'s exit code 143 - the test never actually
+/// failed, it stalled, which would hang `scripts/gate.sh` on a future
+/// regression instead of going red. Wrapping every drain in this file
+/// turns that hang into a named, bounded panic instead.
+async fn drain_bounded(rx: tokio::sync::mpsc::UnboundedReceiver<RunEvent>) -> Vec<RunEvent> {
+    tokio::time::timeout(Duration::from_secs(10), drain(rx))
+        .await
+        .expect("run never reached Done/Error within 10s - it parked instead of finishing")
+}
+
 /// How many of `port`'s requests were the judge's own utility call - its
 /// system message is the only one carrying "verdict" (the classifier's own
 /// asks for a JSON array of rule ids instead, and a plain turn's first
@@ -245,7 +259,7 @@ async fn safe_verdict_runs_the_tool_with_no_approval() {
     let manager = Arc::new(RunManager::new(Arc::clone(&db), as_port_arc(&port)));
     let run_id = start_run(&manager, &db, "arthur", Trigger::Chat);
 
-    let events = drain(manager.subscribe(&run_id)).await;
+    let events = drain_bounded(manager.subscribe(&run_id)).await;
     assert!(
         matches!(events.last(), Some(RunEvent::Done { .. })),
         "expected the run to finish, got {events:?}"
@@ -308,7 +322,7 @@ async fn dangerous_verdict_at_an_unattended_trigger_denies_outright() {
     let manager = Arc::new(RunManager::new(Arc::clone(&db), as_port_arc(&port)));
     let run_id = start_run(&manager, &db, "arthur", Trigger::Routine);
 
-    let events = drain(manager.subscribe(&run_id)).await;
+    let events = drain_bounded(manager.subscribe(&run_id)).await;
     assert!(
         matches!(events.last(), Some(RunEvent::Done { .. })),
         "a denied call must not park the run, got {events:?}"
@@ -367,7 +381,7 @@ async fn risky_verdict_lifted_by_a_matching_allow_rule_runs_the_tool() {
     let manager = Arc::new(RunManager::new(Arc::clone(&db), as_port_arc(&port)));
     let run_id = start_run(&manager, &db, "arthur", Trigger::Chat);
 
-    let events = drain(manager.subscribe(&run_id)).await;
+    let events = drain_bounded(manager.subscribe(&run_id)).await;
     assert!(
         matches!(events.last(), Some(RunEvent::Done { .. })),
         "expected the run to finish, got {events:?}"
@@ -441,7 +455,7 @@ async fn judge_model_error_fails_open_and_says_so() {
     let manager = Arc::new(RunManager::new(Arc::clone(&db), as_port_arc(&port)));
     let run_id = start_run(&manager, &db, "arthur", Trigger::Chat);
 
-    let events = drain(manager.subscribe(&run_id)).await;
+    let events = drain_bounded(manager.subscribe(&run_id)).await;
     assert!(
         matches!(events.last(), Some(RunEvent::Done { .. })),
         "a judge outage must not widen into a stuck run, got {events:?}"
@@ -462,7 +476,64 @@ async fn judge_model_error_fails_open_and_says_so() {
     let log = log_rows(&db);
     assert_eq!(log.len(), 1);
     assert_eq!(log[0].decision, "allow");
+    // S4-R F2: a fail-open is not a "safe" judgement - nothing judged this
+    // call, so the log says so with its own verdict rather than reusing
+    // `Verdict::Safe`, which made a clean safe verdict and an outage
+    // indistinguishable once the run's own Notice scrolled away.
+    assert_eq!(log[0].verdict, "unavailable");
     assert!(log[0].reason.contains("Auto review unavailable"));
+}
+
+// ---- S4-R F3: a rambling/unparseable judge reply is capped before it
+// reaches a Notice or the log, same 300-char cap `describe_call` puts on
+// the action side of this same call ----
+
+#[tokio::test]
+async fn a_rambling_unparseable_judge_reply_is_capped_in_the_notice_and_log() {
+    let db = open_db();
+    seed_bot(&db, "arthur", "Arthur");
+    allow_tool(&db, "arthur", "shell");
+
+    // 2 KB of plain text, not valid JSON - hits `judge_call`'s catch-all
+    // "unparseable reply" branch with the whole model reply as `text`.
+    let rambling = "x".repeat(2000);
+    let port = Arc::new(common::ScriptedPort::new(vec![
+        tool_call_script("call-1", "shell", r#"{"command":"ls"}"#),
+        text_script(&rambling),
+        text_script("Listed them."),
+    ]));
+    let manager = Arc::new(RunManager::new(Arc::clone(&db), as_port_arc(&port)));
+    let run_id = start_run(&manager, &db, "arthur", Trigger::Chat);
+
+    let events = drain_bounded(manager.subscribe(&run_id)).await;
+    assert!(
+        matches!(events.last(), Some(RunEvent::Done { .. })),
+        "a judge outage must not widen into a stuck run, got {events:?}"
+    );
+
+    let notice = events
+        .iter()
+        .find_map(|event| match event {
+            RunEvent::Notice { message } if message.contains("Auto review unavailable") => {
+                Some(message.clone())
+            }
+            _ => None,
+        })
+        .expect("expected an 'Auto review unavailable' Notice");
+    assert!(
+        notice.len() < 450,
+        "the model's own 2 KB reply must be capped before it reaches a Notice, got {} chars: {notice}",
+        notice.len()
+    );
+
+    let log = log_rows(&db);
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0].verdict, "unavailable");
+    assert!(
+        log[0].reason.len() < 450,
+        "the model's own 2 KB reply must be capped before it reaches the log, got {} chars",
+        log[0].reason.len()
+    );
 }
 
 // ---- (h) toggle off -> zero judge requests ----
@@ -484,7 +555,7 @@ async fn toggle_off_skips_the_judge_entirely() {
     let manager = Arc::new(RunManager::new(Arc::clone(&db), as_port_arc(&port)));
     let run_id = start_run(&manager, &db, "arthur", Trigger::Chat);
 
-    let events = drain(manager.subscribe(&run_id)).await;
+    let events = drain_bounded(manager.subscribe(&run_id)).await;
     assert!(
         matches!(events.last(), Some(RunEvent::Done { .. })),
         "expected the run to finish, got {events:?}"
@@ -519,4 +590,185 @@ async fn a_grid_ask_never_reaches_the_judge() {
     assert_eq!(judge_request_count(&port), 0);
     assert_eq!(port.requests().len(), 1);
     assert!(log_rows(&db).is_empty());
+}
+
+// ---- S4-R F9: judged once more at the END of the decision chain, for a
+// risky call whose GRID decision was "ask" - not lifted to Allow until a
+// bot rule fires - so the first (top) judge check never sees it at all (its
+// own guard only fires on a grid Allow already in hand at line 910).
+//
+// `shell`/`ssh`/`read_file`/`desk_shell` cannot actually show this under an
+// unattended trigger: `rules::resolve_decision` already holds
+// `permissions::cannot_be_lifted_unattended` (== `tighten_set`) against a
+// rule's own Allow whenever `trigger != Chat` (`rules.rs:507-512`, S2-07,
+// well before S4) - a rule can never lift THOSE FOUR back to Allow while
+// nobody is watching, full stop, so testing them here would just prove the
+// call stays parked and never reaches either judge. `message_bot` is (like
+// S4-04's own test (d)) the risky tool that floor does not cover - not
+// because it is tightened and lifted, but because Josh's own grid setting
+// for it can simply BE "ask", same as any tool, with nothing unattended
+// about the mechanism that lifts it. Explicitly asking it (rather than
+// relying on its "allow" default) plus a matching rule reproduces exactly
+// the gap F9 names: a risky call that goes grid-Ask -> rule-Allow with no
+// judge involvement until this end-of-chain check exists. ----
+
+fn seed_allow_rule(db: &Arc<Mutex<Db>>, bot_id: &str) -> String {
+    let locked = db.lock().expect("db mutex poisoned");
+    rules::add_rule(
+        &locked,
+        Some(bot_id.to_string()),
+        "Arthur may message a colleague about routine handoffs",
+        RuleBehavior::Allow,
+    )
+    .expect("seed rule")
+    .id
+}
+
+fn ask_tool(db: &Arc<Mutex<Db>>, bot_id: &str, tool: &str) {
+    let db = db.lock().expect("db mutex poisoned");
+    let mut perms = HashMap::new();
+    perms.insert(tool.to_string(), Decision::Ask);
+    permissions::set_permissions(&db, bot_id, &perms).expect("set permissions");
+}
+
+// ---- (j) a grid-Ask risky call, lifted to Allow by a rule, end-of-chain
+// judge says dangerous -> denies outright, no approval row ----
+
+#[tokio::test]
+async fn end_of_chain_judge_denies_a_rule_lifted_call_it_finds_dangerous() {
+    let db = open_db();
+    seed_bot(&db, "arthur", "Arthur");
+    ask_tool(&db, "arthur", "message_bot");
+    let rule_id = seed_allow_rule(&db, "arthur");
+
+    let port = Arc::new(common::ScriptedPort::new(vec![
+        tool_call_script(
+            "call-1",
+            "message_bot",
+            r#"{"bot_id":"colleague","text":"wire the funds today"}"#,
+        ),
+        classify_reply(&[rule_id.as_str()]),
+        judge_reply("dangerous", "asks a colleague to move money unsupervised"),
+        text_script("Understood, I won't send it."),
+    ]));
+    let manager = Arc::new(RunManager::new(Arc::clone(&db), as_port_arc(&port)));
+    // Routine, matching the ticket's "unattended" framing for this hole,
+    // even though nothing about `message_bot`'s own reaching Allow here
+    // depends on the trigger - see the block doc above.
+    let run_id = start_run(&manager, &db, "arthur", Trigger::Routine);
+
+    let events = drain_bounded(manager.subscribe(&run_id)).await;
+    assert!(
+        matches!(events.last(), Some(RunEvent::Done { .. })),
+        "a denied call must not park the run, got {events:?}"
+    );
+
+    let deny_result = events.iter().find_map(|event| match event {
+        RunEvent::ToolResult { name, result } if name == "message_bot" => Some(result.clone()),
+        _ => None,
+    });
+    assert_eq!(
+        deny_result,
+        Some(
+            "Not allowed: auto review judged message_bot dangerous (asks a colleague to move \
+money unsupervised). Carry on without it."
+                .to_string()
+        )
+    );
+    assert!(
+        pending_approval(&db, &run_id).is_none(),
+        "an outright deny must not also park an approval"
+    );
+
+    // Tool call, rules classifier (lifting the grid's own Ask), the
+    // end-of-chain judge, then the final answer - one judge request, never
+    // two, because the top judge check's own guard (a grid Allow already in
+    // hand) never fired for this call.
+    assert_eq!(judge_request_count(&port), 1);
+    assert_eq!(port.requests().len(), 4);
+
+    let log = log_rows(&db);
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0].tool_name, "message_bot");
+    assert_eq!(log[0].verdict, "dangerous");
+    assert_eq!(log[0].decision, "deny");
+}
+
+// ---- (k) same setup, end-of-chain judge says risky -> rules-on-top wins,
+// tool RUNS, log records the judge's own "allow" ----
+
+#[tokio::test]
+async fn end_of_chain_judge_allows_a_rule_lifted_call_it_finds_risky() {
+    let db = open_db();
+    seed_bot(&db, "arthur", "Arthur");
+    ask_tool(&db, "arthur", "message_bot");
+    let rule_id = seed_allow_rule(&db, "arthur");
+
+    let port = Arc::new(common::ScriptedPort::new(vec![
+        tool_call_script(
+            "call-1",
+            "message_bot",
+            r#"{"bot_id":"colleague","text":"here's today's handoff notes"}"#,
+        ),
+        classify_reply(&[rule_id.as_str()]),
+        judge_reply("risky", "delegates work to another bot"),
+        text_script("Sent the handoff."),
+    ]));
+    let manager = Arc::new(RunManager::new(Arc::clone(&db), as_port_arc(&port)));
+    let run_id = start_run(&manager, &db, "arthur", Trigger::Routine);
+
+    let events = drain_bounded(manager.subscribe(&run_id)).await;
+    assert!(
+        matches!(events.last(), Some(RunEvent::Done { .. })),
+        "expected the run to finish, got {events:?}"
+    );
+    assert!(pending_approval(&db, &run_id).is_none());
+    assert_eq!(judge_request_count(&port), 1);
+    assert_eq!(port.requests().len(), 4);
+
+    let log = log_rows(&db);
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0].tool_name, "message_bot");
+    assert_eq!(log[0].verdict, "risky");
+    // Rules-on-top wins: the end-of-chain judge's own "risky" reads as
+    // Allow here, unlike the top check's "risky" (which reads as Ask) -
+    // Josh's own rule already lifted this, and a risky GUESS does not
+    // re-park what his standing rule just decided.
+    assert_eq!(log[0].decision, "allow");
+}
+
+// ---- (l) a matching rule on file, but `shell` at a Chat trigger with its
+// grid decision already stored Allow (no lift needed) - the top judge
+// check owns this call as before, parks it, and the end-of-chain check
+// must not run a second time ----
+
+#[tokio::test]
+async fn a_chat_trigger_dangerous_verdict_is_judged_only_once_even_with_a_matching_rule() {
+    let db = open_db();
+    seed_bot(&db, "arthur", "Arthur");
+    allow_tool(&db, "arthur", "shell");
+    seed_allow_rule(&db, "arthur");
+
+    let port = Arc::new(common::ScriptedPort::new(vec![
+        tool_call_script("call-1", "shell", r#"{"command":"rm -rf /"}"#),
+        judge_reply("dangerous", "wipes the whole disk"),
+    ]));
+    let manager = Arc::new(RunManager::new(Arc::clone(&db), as_port_arc(&port)));
+    let run_id = start_run(&manager, &db, "arthur", Trigger::Chat);
+
+    let row = wait_for_pending(&db, &run_id).await;
+    assert_eq!(row.judge_verdict.as_deref(), Some("dangerous"));
+    assert_eq!(row.judge_reason.as_deref(), Some("wipes the whole disk"));
+
+    // Only the top check's own request - a Chat trigger is never
+    // tightened, so `decision` was already Allow going in, the top check
+    // judged it directly, and its own Ask-first "skip the rules" means the
+    // rules classifier (and so the end-of-chain check) never ran either.
+    assert_eq!(judge_request_count(&port), 1);
+    assert_eq!(port.requests().len(), 2);
+
+    let log = log_rows(&db);
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0].verdict, "dangerous");
+    assert_eq!(log[0].decision, "ask");
 }
