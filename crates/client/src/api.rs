@@ -8,8 +8,9 @@ use crate::types::{
     BotPatchResponse, BotToolsField, ConversationView, CoreStatus, MadeTool, MemoryEntry,
     MemoryEntryField, MemoryView, ModelError, ModelField, ModelsResponse, OpenQuestion,
     PendingApproval, PermissionsField, ProjectField, ProjectSummary, ProjectsField,
-    QuestionsResponse, RoomResponse, RoomSummary, RoomsResponse, RoutingState, RulesField,
-    SharedCoreField, SharedLogField, Tier1Models, Tier1Response, WorkingBot, WorkingResponse,
+    QuestionsResponse, RoomResponse, RoomSummary, RoomsResponse, Routine, RoutineRun, RoutingState,
+    RulesField, SharedCoreField, SharedLogField, Tier1Models, Tier1Response, WorkingBot,
+    WorkingResponse,
 };
 use gloo_net::http::{Request, Response};
 use serde::{Deserialize, Serialize};
@@ -988,6 +989,201 @@ pub async fn delete_shared_memory_entry(entry_id: &str) -> Result<(), String> {
         return Err(format!("{url} -> {}", resp.status()));
     }
     Ok(())
+}
+
+/* --------------------------------------------------------- S5-05: routines */
+
+/// `GET /api/routines?bot=...`'s response shape.
+#[derive(Deserialize, Default)]
+struct RoutinesField {
+    #[serde(default)]
+    routines: Vec<Routine>,
+}
+
+/// `POST /api/routines`, `PATCH /api/routines/:id` and `POST /api/routines/
+/// :id/active`'s success shape (`crates/server/src/routes/routines.rs`
+/// always answers `{"routine": {...}}` on all three).
+#[derive(Deserialize)]
+struct RoutineField {
+    routine: Routine,
+}
+
+/// A rejected create/update/patch's shape (a bad schedule, a missing name):
+/// `{"error": "..."}"` from `crates/server/src/error.rs::AppError`. This is
+/// the "live description" the create/edit form ultimately trusts -
+/// `routines_editor.rs`'s own client-side preview is best-effort only, see
+/// that module's doc.
+#[derive(Deserialize)]
+struct RoutineError {
+    error: String,
+}
+
+async fn routine_result(resp: Response) -> Result<Routine, String> {
+    if resp.ok() {
+        let body = resp
+            .json::<RoutineField>()
+            .await
+            .map_err(|e| e.to_string())?;
+        return Ok(body.routine);
+    }
+    let status = resp.status();
+    match resp.json::<RoutineError>().await {
+        Ok(err) => Err(err.error),
+        Err(_) => Err(format!("/api/routines -> {status}")),
+    }
+}
+
+/// `GET /api/routines?bot=:botId` - one bot's routines only, same query
+/// param `ListQuery` in the route reads.
+pub async fn fetch_routines(bot_id: &str) -> Result<Vec<Routine>, String> {
+    let url = format!("/api/routines?bot={bot_id}");
+    let resp = Request::get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("{url} -> {}", resp.status()));
+    }
+    resp.json::<RoutinesField>()
+        .await
+        .map(|b| b.routines)
+        .map_err(|e| e.to_string())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateRoutineReq<'a> {
+    bot_id: &'a str,
+    name: &'a str,
+    prompt: &'a str,
+    schedule: &'a str,
+}
+
+/// `POST /api/routines` - a prompt-kind routine only (`kind` omitted, the
+/// store defaults it to `"prompt"`); tool/hook/condition fields are S5b.
+pub async fn create_routine(
+    bot_id: &str,
+    name: &str,
+    prompt: &str,
+    schedule: &str,
+) -> Result<Routine, String> {
+    let resp = Request::post("/api/routines")
+        .json(&CreateRoutineReq {
+            bot_id,
+            name,
+            prompt,
+            schedule,
+        })
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    routine_result(resp).await
+}
+
+#[derive(Serialize)]
+struct UpdateRoutineReq<'a> {
+    name: &'a str,
+    prompt: &'a str,
+    schedule: &'a str,
+}
+
+/// `PATCH /api/routines/:id` - the edit form's name/prompt/schedule trio;
+/// every other field on `UpdateRoutineBody` (kind/tool/hook/conditions) is
+/// left untouched since this client never sends them.
+pub async fn update_routine(
+    id: &str,
+    name: &str,
+    prompt: &str,
+    schedule: &str,
+) -> Result<Routine, String> {
+    let url = format!("/api/routines/{id}");
+    let resp = Request::patch(&url)
+        .json(&UpdateRoutineReq {
+            name,
+            prompt,
+            schedule,
+        })
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    routine_result(resp).await
+}
+
+#[derive(Serialize)]
+struct ActiveReq {
+    active: bool,
+}
+
+/// `POST /api/routines/:id/active` - `active: true` also clears any pause
+/// reason server-side (`routes/routines.rs::post_routine_active` calls
+/// `resume_routine` first).
+pub async fn set_routine_active(id: &str, active: bool) -> Result<Routine, String> {
+    let url = format!("/api/routines/{id}/active");
+    let resp = Request::post(&url)
+        .json(&ActiveReq { active })
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    routine_result(resp).await
+}
+
+/// `DELETE /api/routines/:id`.
+pub async fn delete_routine(id: &str) -> Result<(), String> {
+    let url = format!("/api/routines/{id}");
+    let resp = Request::delete(&url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("{url} -> {}", resp.status()));
+    }
+    Ok(())
+}
+
+/// `GET /api/routines/:id/runs` - the last 20 runs, newest first.
+pub async fn fetch_routine_runs(id: &str) -> Result<Vec<RoutineRun>, String> {
+    #[derive(Deserialize, Default)]
+    struct RunsField {
+        #[serde(default)]
+        runs: Vec<RoutineRun>,
+    }
+    let url = format!("/api/routines/{id}/runs");
+    let resp = Request::get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("{url} -> {}", resp.status()));
+    }
+    resp.json::<RunsField>()
+        .await
+        .map(|b| b.runs)
+        .map_err(|e| e.to_string())
+}
+
+/// `POST /api/routines/:id/run` - "Run now": fires regardless of schedule
+/// or active state, 201 with `{"runId": "..."}`. Not in the TS reference
+/// (`RoutinesEditor.tsx` has no such button) - this ticket adds it since
+/// the route already exists (S5-03/04) and a routine that starts paused
+/// with nothing to show yet is a worse first run than one Josh can poke.
+pub async fn run_routine_now(id: &str) -> Result<String, String> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct RunIdField {
+        run_id: String,
+    }
+    let url = format!("/api/routines/{id}/run");
+    let resp = Request::post(&url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return match resp.json::<RoutineError>().await {
+            Ok(err) => Err(err.error),
+            Err(_) => Err(format!("{url} -> {}", resp.status())),
+        };
+    }
+    resp.json::<RunIdField>()
+        .await
+        .map(|b| b.run_id)
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

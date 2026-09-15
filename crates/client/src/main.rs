@@ -14,6 +14,7 @@ mod permissions_editor;
 mod questions;
 mod rail;
 mod room_picker;
+mod routines_editor;
 mod settings;
 mod thread;
 mod types;

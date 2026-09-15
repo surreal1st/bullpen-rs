@@ -492,3 +492,49 @@ pub struct SharedLogField {
     #[serde(default)]
     pub log: Vec<MemoryEntry>,
 }
+
+/* --------------------------------------------------------- S5-05: routines */
+
+/// One routine, from `GET/POST /api/routines`, `PATCH /api/routines/:id` and
+/// `POST /api/routines/:id/active` (`crates/server/src/routes/routines.rs`,
+/// mirroring `store::Routine`'s camelCase wire shape). A strict subset -
+/// `tools`/`kind`/`tool`/`toolArgs`/`hasHook`/`hookKind`/`hookEvents`/
+/// `hookMatch`/`conditions`/`secondOpinion` are S5b's tool-kind and hook UI,
+/// left off entirely (serde ignores the extra JSON fields rather than
+/// erroring).
+///
+/// 🔴 `schedule_text` is NOT a computed description today -
+/// `crates/store/src/routines.rs` hardcodes it to `""` (a TODO, not yet
+/// wired to `crates/server/src/schedule.rs::describe_schedule`) - so it is
+/// not carried here at all. `routines_editor.rs` shows `schedule` (the raw
+/// text Josh typed, e.g. "every 15 minutes") in the list instead; that text
+/// is already the human phrase the schedule grammar accepts, not cron, so
+/// showing it as-is loses nothing for the four canonical shapes.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Routine {
+    pub id: String,
+    pub bot_id: String,
+    pub bot_name: String,
+    pub name: String,
+    pub prompt: String,
+    pub schedule: String,
+    pub active: bool,
+    pub next_run_at: Option<String>,
+    pub last_run_at: Option<String>,
+    pub paused_reason: Option<String>,
+    pub last_error: Option<String>,
+    pub failures: i32,
+}
+
+/// One row of `GET /api/routines/:id/runs` (max 20, newest first).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoutineRun {
+    pub id: String,
+    pub status: String,
+    pub text: String,
+    pub error: Option<String>,
+    pub cost_usd: f64,
+    pub created_at: String,
+}

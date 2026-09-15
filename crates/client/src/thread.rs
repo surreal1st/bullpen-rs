@@ -16,6 +16,7 @@ use crate::message_time::{day_key, format_day, format_time, now_iso};
 use crate::model_chip::ModelChip;
 use crate::permissions_editor::PermissionsModal;
 use crate::questions::Questions;
+use crate::routines_editor::RoutinesModal;
 use crate::types::{Bot, Message, Role};
 use crate::working_bar::WorkingBar;
 use dioxus::prelude::*;
@@ -197,6 +198,9 @@ pub fn ChatPane(
     // S3-05: the memory pane, same placement as "Permissions" beside it in
     // `pane-head-meta` - see `memory_editor.rs`'s `MemoryModal`.
     let mut mem_open = use_signal(|| false);
+    // S5-05: the routines pane, same placement again - see
+    // `routines_editor.rs`'s `RoutinesModal`.
+    let mut routines_open = use_signal(|| false);
 
     rsx! {
         div { class: "pane",
@@ -215,6 +219,11 @@ pub fn ChatPane(
                             class: "pane-perms-btn",
                             onclick: move |_| mem_open.set(true),
                             "Memory"
+                        }
+                        button {
+                            class: "pane-perms-btn",
+                            onclick: move |_| routines_open.set(true),
+                            "Routines"
                         }
                         ModelChip {
                             bot: current,
@@ -235,6 +244,13 @@ pub fn ChatPane(
                     bot_id: bot_id.clone(),
                     bot_name: bot_name.clone(),
                     on_close: move |_| mem_open.set(false),
+                }
+            }
+            if *routines_open.read() {
+                RoutinesModal {
+                    bot_id: bot_id.clone(),
+                    bot_name: bot_name.clone(),
+                    on_close: move |_| routines_open.set(false),
                 }
             }
             if let Some(err) = load_error.read().clone() {

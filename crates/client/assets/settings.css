@@ -1085,3 +1085,207 @@ button.effort-glyph:disabled {
   background: rgb(255 255 255 / 6%);
   color: var(--ink);
 }
+
+/* --------------------------------------------------------- S5-05: .routine */
+/* The "Routines" modal (`routines_editor.rs`'s `RoutinesModal`) - opens
+   over the thread from `thread.rs`'s "Permissions"/"Memory" pair, reusing
+   `.pane-perms-btn` as-is (no separate button class, same call `.mem`
+   already made above). Class names match `RoutinesEditor.tsx`'s own
+   (`.routine*`) rather than inventing a bullpen-rs vocabulary, since a
+   later full port (hooks/tools/conditions, S5b) extends this markup rather
+   than replacing it. Reuses `.field`/`.refusal`/`.stg-btn`/`.muted` from
+   the settings card and `.mem-modal`'s box-sizing fix (S3-F-01c) below. */
+
+.routines-modal {
+  width: min(40rem, calc(100vw - 2rem));
+  max-height: min(34rem, calc(100vh - 4rem));
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.routines,
+.routines * {
+  box-sizing: border-box;
+}
+
+.routines {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+.routine {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #0f151d;
+  padding: 0.6rem 0.75rem;
+}
+
+.routine-top {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.routine-dot {
+  flex: none;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 999px;
+  background: var(--line-strong);
+}
+
+.routine-dot.is-on {
+  background: var(--seam);
+}
+
+.routine-when {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+
+.routine-prompt {
+  margin: 0;
+  color: var(--ink-dim);
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+}
+
+/* 🔴 A routine Bullpen switched off must not read as one Josh paused - see
+   `RoutinesEditor.tsx`'s own comment on this row (ported verbatim as this
+   one). */
+.routine-stopped {
+  margin: 0;
+  border-radius: 8px;
+  padding: 0.5rem 0.6rem;
+  font-size: 0.82rem;
+  border: 1px solid color-mix(in srgb, var(--danger) 42%, var(--line));
+  background: color-mix(in srgb, var(--danger) 9%, var(--panel));
+}
+
+.routine-stopped-why {
+  display: block;
+  margin-top: 0.2rem;
+  color: var(--muted);
+}
+
+.routine-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.7rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.routine-warn {
+  color: var(--danger);
+}
+
+.routine-preview {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.routine-acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.routine-acts button {
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink-dim);
+  border-radius: 7px;
+  padding: 0.25rem 0.6rem;
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.routine-acts button:hover {
+  border-color: var(--line-strong);
+  color: var(--ink);
+}
+
+.routine-acts button.primary {
+  border-color: var(--seam);
+  color: var(--seam);
+}
+
+.routine-acts button.danger {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 42%, var(--line));
+}
+
+.routine-runs {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.routine-run {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  padding: 0.4rem 0.55rem;
+}
+
+.routine-run-top {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.routine-run-status {
+  font-weight: 620;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.routine-run p {
+  margin: 0.25rem 0 0;
+  font-size: 0.82rem;
+  white-space: pre-wrap;
+}
+
+.routine-edit,
+.routine-new {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.6rem 0.7rem;
+}
+
+.routine-new {
+  border-style: dashed;
+}
+
+.routine-edit input,
+.routine-edit textarea,
+.routine-new input,
+.routine-new textarea {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--ink);
+  padding: 0.4rem 0.55rem;
+  font: inherit;
+  font-size: 0.85rem;
+}
+
+.routine-edit textarea,
+.routine-new textarea {
+  resize: vertical;
+}
