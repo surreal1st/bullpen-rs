@@ -34,8 +34,9 @@ pub use questions::{OpenQuestion, answer_question, insert_question, list_all_ope
 pub use rooms::{create_room, get_room, list_rooms, mark_room_seen, mark_room_unread, update_room};
 pub use roster::{first_line, list_roster};
 pub use routines::{
-    Condition, HealthOutcome, Routine, RoutineRow, RoutineRun, UpdateRoutineFields, create_routine,
-    delete_routine, due_routines, list_routines, record_routine_run, resume_routine, routine_by_id,
+    Condition, HealthOutcome, Routine, RoutineRow, RoutineRun, UpdateRoutineFields,
+    clear_routine_hook, create_routine, delete_routine, due_routines, list_routines,
+    mint_routine_hook, record_routine_run, resume_routine, routine_by_id, routine_row_by_id,
     routine_runs, set_routine_active, update_routine,
 };
 

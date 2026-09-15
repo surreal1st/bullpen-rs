@@ -1,5 +1,6 @@
 use crate::Db;
 use chrono::Utc;
+use rusqlite::OptionalExtension;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -228,6 +229,40 @@ pub fn list_routines(db: &Db, bot_id: Option<&str>) -> rusqlite::Result<Vec<Rout
 }
 
 /// Get a single routine by ID.
+/// Get a routine row by ID, including the raw hook_secret field.
+pub fn routine_row_by_id(db: &Db, id: &str) -> rusqlite::Result<Option<RoutineRow>> {
+    db.conn()
+        .prepare(
+            "SELECT id, bot_id, name, prompt, schedule, active, next_run_at, last_run_at, tools, kind, tool, tool_args, hook_secret, hook_kind, hook_events, hook_match, conditions, second_opinion, consecutive_failures, paused_reason, last_error FROM routines WHERE id = ?1",
+        )?
+        .query_row([id], |row| {
+            Ok(RoutineRow {
+                id: row.get(0)?,
+                bot_id: row.get(1)?,
+                name: row.get(2)?,
+                prompt: row.get(3)?,
+                schedule: row.get(4)?,
+                active: row.get(5)?,
+                next_run_at: row.get(6)?,
+                last_run_at: row.get(7)?,
+                tools: row.get(8)?,
+                kind: row.get(9)?,
+                tool: row.get(10)?,
+                tool_args: row.get(11)?,
+                hook_secret: row.get(12)?,
+                hook_kind: row.get(13)?,
+                hook_events: row.get(14)?,
+                hook_match: row.get(15)?,
+                conditions: row.get(16)?,
+                second_opinion: row.get(17)?,
+                consecutive_failures: row.get(18)?,
+                paused_reason: row.get(19)?,
+                last_error: row.get(20)?,
+            })
+        })
+        .optional()
+}
+
 pub fn routine_by_id(db: &Db, id: &str) -> rusqlite::Result<Option<Routine>> {
     let mut stmt = db.conn().prepare(
         "SELECT id, bot_id, name, prompt, schedule, active, next_run_at, last_run_at,
@@ -589,6 +624,41 @@ pub fn resume_routine(db: &Db, routine_id: &str) -> rusqlite::Result<()> {
         params![routine_id],
     )?;
     Ok(())
+}
+
+/// Mints a fresh webhook secret for a routine. Returns None if the routine
+/// doesn't exist. The secret is returned ONCE and never again - `GET /api/
+/// routines` only ever says `hasHook: true`.
+pub fn mint_routine_hook(db: &Db, id: &str) -> rusqlite::Result<Option<String>> {
+    // Check if routine exists
+    let exists = db
+        .conn()
+        .query_row("SELECT 1 FROM routines WHERE id = ?1", params![id], |_| {
+            Ok(())
+        });
+
+    if exists.is_err() {
+        return Ok(None);
+    }
+
+    // Generate a 32-byte secret: concatenate two UUIDs (each is 128 bits) and
+    // encode as hex. This matches the TS `randomBytes(32).toString("hex")`.
+    let secret = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+    db.conn().execute(
+        "UPDATE routines SET hook_secret = ?1 WHERE id = ?2",
+        params![&secret, id],
+    )?;
+    Ok(Some(secret))
+}
+
+/// Clears the webhook secret from a routine. Returns true if the routine
+/// existed and was updated, false if the routine doesn't exist.
+pub fn clear_routine_hook(db: &Db, id: &str) -> rusqlite::Result<bool> {
+    let changes = db.conn().execute(
+        "UPDATE routines SET hook_secret = NULL WHERE id = ?1",
+        params![id],
+    )?;
+    Ok(changes > 0)
 }
 
 // Helper function to convert a database row into a Routine.
