@@ -118,9 +118,9 @@ pub fn reduce_github(event: &str, payload: &Value) -> Option<String> {
             let issue_number = as_str(&issue["number"]);
             let body = as_str(&comment["body"]);
             let truncated = if body.len() > 200 {
-                &body[..200]
+                body.chars().take(200).collect::<String>()
             } else {
-                &body
+                body
             };
             return Some(format!(
                 "comment by {} on #{}: {}",
@@ -288,9 +288,9 @@ pub fn reduce_slack(event: &Value) -> Option<String> {
         let text = as_str(&event["text"]);
         if !text.is_empty() {
             let truncated = if text.len() > 500 {
-                &text[..500]
+                text.chars().take(500).collect::<String>()
             } else {
-                &text
+                text
             };
             return Some(format!("Slack: {} mentioned the app: {}", user, truncated));
         }
@@ -305,9 +305,9 @@ pub fn reduce_slack(event: &Value) -> Option<String> {
                 "a channel"
             };
             let truncated = if text.len() > 500 {
-                &text[..500]
+                text.chars().take(500).collect::<String>()
             } else {
-                &text
+                text
             };
             return Some(format!(
                 "Slack: {} said in {}: {}",
@@ -319,7 +319,7 @@ pub fn reduce_slack(event: &Value) -> Option<String> {
     if kind == "reaction_added" {
         let reaction = as_str(&event["reaction"]);
         if !reaction.is_empty() {
-            return Some(format!("Slack: {} reacted :{}: ", user, reaction));
+            return Some(format!("Slack: {} reacted :{}", user, reaction));
         }
     }
 

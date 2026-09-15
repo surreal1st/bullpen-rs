@@ -108,7 +108,7 @@ fn reduce_github_issue_comment() {
 
 #[test]
 fn reduce_github_issue_comment_truncated() {
-    let long_body = "x".repeat(300);
+    let long_body = "é".repeat(150);
     let payload = json!({
         "action": "created",
         "comment": {
@@ -122,8 +122,29 @@ fn reduce_github_issue_comment_truncated() {
         }
     });
     let result = reduce_github("issue_comment", &payload);
-    let expected = format!("comment by dave on #55: {}", "x".repeat(200));
+    let expected = format!("comment by dave on #55: {}", "é".repeat(150));
     assert_eq!(result, Some(expected));
+}
+
+#[test]
+fn reduce_github_issue_comment_emoji_at_the_boundary() {
+    let body = format!("{}😀extra", "x".repeat(198));
+    let payload = json!({
+        "action": "created",
+        "comment": {
+            "body": &body,
+            "user": {
+                "login": "dave"
+            }
+        },
+        "issue": {
+            "number": 55
+        }
+    });
+    let result = reduce_github("issue_comment", &payload);
+    assert!(result.is_some());
+    let result_str = result.unwrap();
+    assert!(result_str.contains("comment by dave on #55:"));
 }
 
 #[test]
@@ -341,6 +362,20 @@ fn reduce_slack_app_mention() {
 }
 
 #[test]
+fn reduce_slack_app_mention_emoji_at_the_boundary() {
+    let text = format!("{}😀extra", "x".repeat(498));
+    let event = json!({
+        "type": "app_mention",
+        "user": "U01234567",
+        "text": &text
+    });
+    let result = reduce_slack(&event);
+    assert!(result.is_some());
+    let result_str = result.unwrap();
+    assert!(result_str.contains("Slack: U01234567 mentioned the app:"));
+}
+
+#[test]
 fn reduce_slack_message_in_channel() {
     let event = json!({
         "type": "message",
@@ -378,8 +413,10 @@ fn reduce_slack_reaction_added() {
         "reaction": "thumbsup"
     });
     let result = reduce_slack(&event);
-    assert!(result.is_some());
-    assert!(result.unwrap().contains("thumbsup"));
+    assert_eq!(
+        result,
+        Some("Slack: U22222222 reacted :thumbsup".to_string())
+    );
 }
 
 #[test]
