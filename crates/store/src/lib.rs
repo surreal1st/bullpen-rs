@@ -92,6 +92,16 @@ impl Db {
         // `ensureConversationRoomColumns` (threads.ts:26-35),
         // `ensureMessageAuthorColumn` (routine-health.ts) and
         // `ensureMessageReactionColumn` (store.ts).
+        // S6-W-02 (converted from a numbered migration by the orchestrator):
+        // a bot's egress policy. Self-creating for the same reason every
+        // other self-added column here is - a numbered migration bumps
+        // user_version on a database the live TypeScript Bullpen also opens,
+        // and `tests/migrations.rs` went red the moment one was added.
+        db.ensure_column(
+            Table::Bots,
+            "egress",
+            r#"ALTER TABLE bots ADD COLUMN egress TEXT NOT NULL DEFAULT '{"mode":"off","allow":[]}'"#,
+        )?;
         db.ensure_column(
             Table::Conversations,
             "kind",

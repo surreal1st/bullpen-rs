@@ -435,7 +435,4 @@ pub const MIGRATIONS: &[&str] = &[
   ALTER TABLE approvals ADD COLUMN judge_verdict TEXT;
   ALTER TABLE approvals ADD COLUMN judge_reason TEXT;
   "#,
-    // 21. S6-W-02: per-bot egress policy (mode + allow list), stored as JSON
-    // string. Defaults to OFF mode with no allow list.
-    r#"ALTER TABLE bots ADD COLUMN egress TEXT NOT NULL DEFAULT '{"mode":"off","allow":[]}';"#,
 ];
