@@ -4,6 +4,7 @@
 pub mod approvals;
 mod auth;
 pub mod changes;
+pub mod egress;
 mod error;
 pub mod goals;
 pub mod hooks;
