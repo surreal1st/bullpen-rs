@@ -18,6 +18,7 @@ pub mod rules;
 pub mod runs;
 pub mod sandbox;
 pub mod schedule;
+pub mod settings_secrets;
 pub mod spend;
 mod tools;
 
