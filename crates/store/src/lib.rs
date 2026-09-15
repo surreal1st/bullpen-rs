@@ -14,6 +14,7 @@ pub mod rooms;
 pub mod roster;
 pub mod routines;
 pub mod slack;
+pub mod vms;
 
 pub use auth::{
     PasswordRecord, create_session, destroy_session, is_configured, password_record, session_valid,
@@ -157,6 +158,7 @@ impl Db {
         // `ensure_goal_tables` above, moved to the central choke point every
         // `Db` passes through.
         slack::ensure_slack_tables(&db)?;
+        vms::ensure_vm_tables(&db)?;
 
         Ok(db)
     }
