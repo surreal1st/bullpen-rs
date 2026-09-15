@@ -21,6 +21,7 @@ pub mod schedule;
 pub mod settings_secrets;
 pub mod slack;
 pub mod spend;
+pub mod teams;
 mod tools;
 
 pub use error::{ApiResult, AppError};
@@ -29,12 +30,28 @@ use axum::extract::{Request, State};
 use axum::response::{IntoResponse, Response};
 use axum::{Router, http::StatusCode};
 use model::Catalog;
+use rusqlite::OptionalExtension;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use store::Db;
 use tower::Service;
 use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
+
+/// S5c-03: what the `on_run_done` reply-posting hook (wired in `AppState::
+/// build` below) needs once a Slack DM/mention run settles - the bot token
+/// (plaintext, held only in memory for the run's lifetime; never logged,
+/// never written back to disk here) plus the channel/thread to post back
+/// into. Port of the TS `pendingSlackReplies` map's value shape
+/// (`app.ts:2688`). `pub(crate)` so `routes/slack.rs` can construct one when
+/// it starts a run from a DM/mention.
+#[derive(Clone)]
+pub(crate) struct PendingSlackReply {
+    pub(crate) bot_token: String,
+    pub(crate) channel: String,
+    pub(crate) thread_ts: String,
+}
 
 /// Shared state handed to every route: one guarded connection to `bullpen.db`,
 /// plus the run manager and room engine every run-touching route drives.
@@ -66,6 +83,20 @@ pub struct AppState {
     /// S6L-01: the sandbox for executing bot commands, chosen based on
     /// `BULLPEN_SANDBOX` env var at startup.
     pub sandbox: Arc<dyn sandbox::Sandbox>,
+    /// S5c-03: the Slack API seam (`auth.test`/`chat.postMessage`/
+    /// `chat.delete`) - a real `slack::ReqwestSlackApi` in production,
+    /// swapped for a scripted fake in tests via `with_slack_api`/
+    /// `with_port_and_slack_api`. `+ Send + Sync` spelled out (not just
+    /// `dyn SlackApi`) because `routes/slack.rs`'s connect route moves this
+    /// into a `spawn_blocking` closure - see that route's own doc for why
+    /// `connect_slack` cannot be `.await`ed directly from an axum handler.
+    pub slack_api: Arc<dyn slack::SlackApi + Send + Sync>,
+    /// S5c-03: run id -> what to post back to Slack once that run settles.
+    /// Registered by `routes/slack.rs`'s DM/mention branch immediately
+    /// after `runs.start` returns (no `.await` in between); drained by the
+    /// `on_run_done` hook `build` wires below. See that hook's doc for the
+    /// race this ordering does and does not close.
+    pending_slack_replies: Arc<Mutex<HashMap<String, PendingSlackReply>>>,
 }
 
 impl AppState {
@@ -77,6 +108,7 @@ impl AppState {
             default_catalog(),
             default_credits(),
             default_sandbox(),
+            default_slack_api(),
         )
     }
 
@@ -88,6 +120,7 @@ impl AppState {
             default_catalog(),
             default_credits(),
             default_sandbox(),
+            default_slack_api(),
         )
     }
 
@@ -103,6 +136,7 @@ impl AppState {
             default_catalog(),
             default_credits(),
             default_sandbox(),
+            default_slack_api(),
         )
     }
 
@@ -115,6 +149,7 @@ impl AppState {
             catalog,
             default_credits(),
             default_sandbox(),
+            default_slack_api(),
         )
     }
 
@@ -129,6 +164,7 @@ impl AppState {
             default_catalog(),
             credits,
             default_sandbox(),
+            default_slack_api(),
         )
     }
 
@@ -142,6 +178,7 @@ impl AppState {
             default_catalog(),
             default_credits(),
             sandbox,
+            default_slack_api(),
         )
     }
 
@@ -161,9 +198,45 @@ impl AppState {
             default_catalog(),
             credits,
             default_sandbox(),
+            default_slack_api(),
         )
     }
 
+    /// S5c-03: lets a test swap in a scripted `SlackApi` fake while keeping
+    /// the same port/catalog/credits/sandbox `new` uses - the config/status/
+    /// connect route tests that only care about the Slack seam.
+    pub fn with_slack_api(db: Db, slack_api: Arc<dyn slack::SlackApi + Send + Sync>) -> Self {
+        Self::build(
+            db,
+            default_client_root(),
+            default_port(),
+            default_catalog(),
+            default_credits(),
+            default_sandbox(),
+            slack_api,
+        )
+    }
+
+    /// S5c-03: lets a test swap in BOTH a scripted `ModelPort` and a
+    /// scripted `SlackApi` - the DM/mention bite (a run actually drives, and
+    /// its answer actually reaches `chat.postMessage`) needs both at once.
+    pub fn with_port_and_slack_api(
+        db: Db,
+        port: Arc<dyn model::ModelPort>,
+        slack_api: Arc<dyn slack::SlackApi + Send + Sync>,
+    ) -> Self {
+        Self::build(
+            db,
+            default_client_root(),
+            port,
+            default_catalog(),
+            default_credits(),
+            default_sandbox(),
+            slack_api,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn build(
         db: Db,
         client_root: String,
@@ -171,6 +244,7 @@ impl AppState {
         catalog: Arc<dyn Catalog>,
         credits: Arc<dyn spend::CreditsPort>,
         sandbox: Arc<dyn sandbox::Sandbox>,
+        slack_api: Arc<dyn slack::SlackApi + Send + Sync>,
     ) -> Self {
         // F1: `routing_log` is self-creating (same convention as
         // `rules::ensure_table`), but nothing in production ever called it -
@@ -192,6 +266,23 @@ impl AppState {
             Arc::clone(&sandbox),
         ));
         let room_engine = rooms::RoomEngine::install(Arc::clone(&db), Arc::clone(&runs));
+
+        // S5c-03: self-creating, same discipline `store::slack::
+        // ensure_slack_tables`'s own doc explains ("to avoid concurrent
+        // builder conflicts on the MIGRATIONS array"). S5c-02 left the
+        // central `store::Db::open` wiring for the orchestrator
+        // (`store/src/lib.rs:141`, not yet landed as of this ticket); called
+        // here instead so `routes/slack.rs` never hits "no such table:
+        // slack_threads" on a fresh db in the meantime - idempotent
+        // (`CREATE TABLE IF NOT EXISTS`), so it costs nothing once the
+        // central wiring lands too.
+        {
+            let guard = db.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Err(err) = store::slack::ensure_slack_tables(&guard) {
+                tracing::error!("failed to ensure slack_threads table exists: {err}");
+            }
+        }
+
         let state = AppState {
             db,
             client_root: Arc::new(client_root),
@@ -201,6 +292,8 @@ impl AppState {
             catalog,
             credits,
             sandbox,
+            slack_api,
+            pending_slack_replies: Arc::new(Mutex::new(HashMap::new())),
         };
 
         // S5b-04b: chains `settle_goal_run` onto `on_run_done` ADDITIVELY,
@@ -220,6 +313,99 @@ impl AppState {
                 goals::settle_goal_run(&goal_state, run_id, chrono::Utc::now());
             });
 
+        // S5c-03: the reply half of the TS `onRunDone` (`app.ts:886-918`) -
+        // a run started from a Slack DM/mention posts its answer back to
+        // Slack instead of a browser SSE stream. `add_on_run_done` (not
+        // `set_on_run_done`) so this chains AFTER `settle_goal_run` above
+        // without displacing it, same additive posture that doc explains.
+        //
+        // Fire-and-forget by design, matching the TS comment on
+        // `pendingSlackReplies` verbatim: "this callback is sync, and a
+        // failed post is nothing more than a missed reply - there is nobody
+        // watching a stream to show an error to." The hook itself stays
+        // synchronous (it runs inside `RunManager`'s own settle path); the
+        // actual `chat.postMessage` network call happens on a `tokio::spawn`
+        // task so a slow/failing Slack API call never blocks the run
+        // manager's own settle machinery. No `recordUndo` (W10 is not
+        // ported yet) - the TS comment at `app.ts:905-907` names exactly
+        // where that would go: the channel + ts `chat.postMessage`'s own
+        // response carries, once posted.
+        //
+        // Judgment call (see this ticket's Results): `run_id` only exists
+        // once `runs.start`/`start_routine` RETURNS, so the pending entry
+        // cannot be registered before that call the way `RoomEngine::
+        // register`'s own doc explains a `conversation_id`-keyed map can
+        // (`rooms.rs:74-76` - "registered BEFORE runs.start ... cannot fire
+        // on_run_done before this entry exists"). This ticket's design
+        // fixes the map's key as `run_id` (`Arc<Mutex<HashMap<run_id,
+        // PendingReply>>>`), so `routes/slack.rs` instead registers
+        // immediately after `start` returns, with no `.await` in between -
+        // the same ordering the TS `pendingSlackReplies.set(runId, ...)`
+        // uses right after `runs.start({...})`. TS never races this (single-
+        // threaded); here the window is real but narrow: every model call
+        // this run manager drives needs at least one genuine async
+        // suspension (an HTTP request to OpenRouter, or a scripted test
+        // port's own await point) before it can reach `settle`, and no
+        // `.await` sits between `start` returning and the registration
+        // call, so nothing on this thread yields control in between. A
+        // pathological multi-threaded scheduling that lets `settle` run on
+        // another OS thread before this thread's very next synchronous line
+        // executes would still lose the race; closing that for real needs a
+        // `start_with_pending_slack_reply`-shaped entry point on
+        // `RunManager` (the same treatment `start_routine`/`start_goal`
+        // already got for `routine_id`/`goal_id`, see those docs), which
+        // `runs.rs` is out of this ticket's owned files to add.
+        let slack_state = state.clone();
+        state
+            .runs
+            .add_on_run_done(move |run_id, _bot_id, _conversation_id| {
+                let pending = slack_state
+                    .pending_slack_replies
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(run_id);
+                let Some(pending) = pending else { return };
+
+                let finished: Option<(String, String)> = {
+                    let db = slack_state.db();
+                    db.conn()
+                        .query_row(
+                            "SELECT text, status FROM runs WHERE id = ?1",
+                            rusqlite::params![run_id],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        )
+                        .optional()
+                        .unwrap_or(None)
+                };
+                let Some((text, status)) = finished else {
+                    return;
+                };
+                // Only a `done` run with something to say gets posted - a
+                // `failed` run (or a `done` run whose model said nothing
+                // usable) is a missed reply, silently, exactly matching the
+                // TS `finished.status === "done" && finished.text.trim() !==
+                // ""` guard.
+                if status != "done" || text.trim().is_empty() {
+                    return;
+                }
+
+                let api = Arc::clone(&slack_state.slack_api);
+                let run_id_owned = run_id.to_string();
+                tokio::spawn(async move {
+                    if let Err(err) = slack::post_slack_message(
+                        api.as_ref(),
+                        &pending.bot_token,
+                        &pending.channel,
+                        &text,
+                        Some(&pending.thread_ts),
+                    )
+                    .await
+                    {
+                        tracing::warn!("missed Slack reply for run {run_id_owned}: {err}");
+                    }
+                });
+            });
+
         state
     }
 
@@ -230,6 +416,36 @@ impl AppState {
     /// `unwrap_or_else(PoisonError::into_inner)` recovers the guard instead.
     pub(crate) fn db(&self) -> MutexGuard<'_, Db> {
         self.db.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// S5c-03: a clone of the raw `Arc<Mutex<Db>>` handle, for
+    /// `routes/slack.rs`'s connect route only - `slack::connect_slack` holds
+    /// its `&Db` argument live across an internal `.await` (the `auth.test`
+    /// call, before its `put_setting`s), which makes ITS OWN generated
+    /// future `!Send` (`Db` wraps a `rusqlite::Connection`, `Send` but not
+    /// `Sync`, so `&Db` is never `Send`) - axum requires a handler's future
+    /// to be `Send`, so `.await`ing `connect_slack` directly inside an async
+    /// handler does not compile. The route instead moves this `Arc` into a
+    /// `tokio::task::spawn_blocking` closure, locks it there, and drives
+    /// `connect_slack` to completion with `futures::executor::block_on` -
+    /// entirely on one blocking-pool thread, so the `!Send` future itself
+    /// never needs to cross a thread boundary as a value. Proven against a
+    /// standalone probe before this ticket wrote the real route (see this
+    /// ticket's Results).
+    pub(crate) fn db_arc(&self) -> Arc<Mutex<Db>> {
+        Arc::clone(&self.db)
+    }
+
+    /// S5c-03: registers what `routes/slack.rs`'s DM/mention branch should
+    /// post back to Slack once `run_id` settles. See the `add_on_run_done`
+    /// hook above (in `build`) for why this is called immediately after
+    /// `runs.start` returns, with no `.await` in between, and what race that
+    /// does and does not close.
+    pub(crate) fn register_pending_slack_reply(&self, run_id: String, reply: PendingSlackReply) {
+        self.pending_slack_replies
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(run_id, reply);
     }
 }
 
@@ -264,6 +480,15 @@ fn default_catalog() -> Arc<dyn Catalog> {
 /// already treat as "unreadable" rather than a panic.
 fn default_credits() -> Arc<dyn spend::CreditsPort> {
     Arc::new(spend::OpenRouterCredits::new(model::KeySource::Env))
+}
+
+/// S5c-03: the real Slack API - what a production server's `PUT /api/slack`
+/// and the reply-posting `on_run_done` hook call through. No key/config
+/// needed at construction time (unlike `default_credits`/`default_catalog`):
+/// `slack::ReqwestSlackApi` takes the bot token per-call, read out of
+/// storage by the caller.
+fn default_slack_api() -> Arc<dyn slack::SlackApi + Send + Sync> {
+    Arc::new(slack::ReqwestSlackApi)
 }
 
 /// S6L-01: the sandbox for executing bot commands. Reads `BULLPEN_SANDBOX`
