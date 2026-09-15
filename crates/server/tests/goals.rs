@@ -646,9 +646,11 @@ async fn settle_goal_run_is_a_noop_when_the_goal_is_already_closed() {
         now,
     )
     .expect("create goal");
-    let mut patch = store::goals::UpdateGoalPatch::default();
-    patch.status = Some("done".to_string());
-    patch.note = Some("finished already".to_string());
+    let patch = store::goals::UpdateGoalPatch {
+        status: Some("done".to_string()),
+        note: Some("finished already".to_string()),
+        ..Default::default()
+    };
     store::goals::update_goal(&db, &goal.id, &patch, None, now).expect("close goal");
 
     let port: Arc<dyn model::ModelPort> = Arc::new(ScriptedPort::new(vec![]));
