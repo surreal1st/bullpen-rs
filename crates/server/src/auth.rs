@@ -112,10 +112,18 @@ fn is_secure(headers: &HeaderMap) -> bool {
 /// ticket and stays that way, and `auth/check` is listed open here because
 /// its own handler (`routes/mod.rs::auth_check`) already re-checks
 /// `session_valid` and answers 401 itself - gating it here too would only
-/// ever repeat the same answer in two places. `slack/events`, `teams/events`,
-/// `stripe/webhook` and the `hooks/` prefix are the TS list's webhook routes;
-/// none of those features exist in bullpen-rs yet, so they are left out
-/// rather than naming paths nothing serves.
+/// ever repeat the same answer in two places. `stripe/webhook` is the TS
+/// list's one remaining webhook route with no feature behind it yet in
+/// bullpen-rs, so it stays left out rather than naming a path nothing
+/// serves.
+///
+/// S5c-03: `slack/events` and `teams/events` join the open list - both are
+/// unauthenticated-by-design (Slack/Graph deliveries carry no session
+/// cookie), each gated by its OWN signature/token check instead
+/// (`routes/slack.rs::post_slack_events` verifies `verify_slack_signature`
+/// over the raw body before parsing anything, same discipline as
+/// `/api/hooks/:routineId`; `teams/events` is a stub behind `BULLPEN_TEAMS`
+/// that refuses everything real - see `crate::teams`'s doc).
 const OPEN_PATHS: &[&str] = &[
     "/api/health",
     "/api/version",
@@ -123,6 +131,8 @@ const OPEN_PATHS: &[&str] = &[
     "/api/auth/login",
     "/api/auth/logout",
     "/api/auth/check",
+    "/api/slack/events",
+    "/api/teams/events",
 ];
 
 const OPEN_PREFIXES: &[&str] = &["/api/hooks/", "/api/invites/"];
