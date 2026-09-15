@@ -178,7 +178,7 @@ async fn exec_refuses_a_one_shot_command_when_asleep_without_touching_run() {
 
 #[tokio::test]
 async fn exec_runs_the_command_when_online() {
-    let docker: Arc<dyn DockerRun> = Arc::new(FakeDocker::new(|n, _| {
+    let docker = Arc::new(FakeDocker::new(|n, _| {
         if n == 0 {
             ok_version()
         } else {
@@ -190,15 +190,51 @@ async fn exec_runs_the_command_when_online() {
         }
     }));
     let jobs: Arc<dyn JobEvents> = Arc::new(FakeJobEvents::default());
-    let sb = sandbox(docker, jobs);
+    let sb = sandbox(docker.clone(), jobs);
     let result = sb.exec("bot1", "echo hi", None).await;
     assert_eq!(result.exit_code, 0);
     assert_eq!(result.stdout, "hi\n");
+
+    // Guard-present world: `exec_args` (workers.rs:1061-1093) always builds
+    // the full sandbox flag set - `--network none` above everything else,
+    // since a worker-routed sandbox has "no network, full stop" as its
+    // entire isolation story (workers.rs:983-987). Guard-removed world:
+    // delete any one of these flags from `exec_args` and every previous
+    // assertion in this test (exit code, stdout) still passes, because none
+    // of them look past `args[0]`. The observable that differs is the
+    // recorded argv itself.
+    let calls = docker.calls();
+    assert_eq!(calls.len(), 2, "expected one ping + one run: {calls:?}");
+    let argv = &calls[1];
+    assert_eq!(argv[0], "run");
+    assert!(
+        argv.windows(2)
+            .any(|w| w[0] == "--network" && w[1] == "none"),
+        "missing --network none in {argv:?}"
+    );
+    assert!(
+        argv.iter().any(|a| a == "--read-only"),
+        "missing --read-only in {argv:?}"
+    );
+    assert!(
+        argv.windows(2)
+            .any(|w| w[0] == "--cap-drop" && w[1] == "ALL"),
+        "missing --cap-drop ALL in {argv:?}"
+    );
+    assert!(
+        argv.windows(2)
+            .any(|w| w[0] == "--security-opt" && w[1] == "no-new-privileges"),
+        "missing --security-opt no-new-privileges in {argv:?}"
+    );
+    assert!(
+        argv.iter().any(|a| a == "--pids-limit"),
+        "missing --pids-limit in {argv:?}"
+    );
 }
 
 #[tokio::test]
 async fn spawn_starts_immediately_when_online() {
-    let docker: Arc<dyn DockerRun> = Arc::new(FakeDocker::new(|n, _| {
+    let docker = Arc::new(FakeDocker::new(|n, _| {
         if n == 0 {
             ok_version()
         } else {
@@ -210,11 +246,44 @@ async fn spawn_starts_immediately_when_online() {
         }
     }));
     let jobs: Arc<dyn JobEvents> = Arc::new(FakeJobEvents::default());
-    let sb = sandbox(docker, jobs);
+    let sb = sandbox(docker.clone(), jobs);
     let result = sb.spawn("bot1", "job-1", "sleep 1").await;
     assert!(result.ok);
     assert_eq!(result.detail, "started");
     assert_eq!(result.handle, "bullpen-job-job-1");
+
+    // Same bite as `exec_runs_the_command_when_online` above, for the
+    // `spawn` path's own argv builder (`spawn_args`, workers.rs:1095-1134),
+    // which additionally must pin the container to `--name
+    // bullpen-job-job-1` so `probe`/`kill` can find it again.
+    let calls = docker.calls();
+    assert_eq!(calls.len(), 2, "expected one ping + one run: {calls:?}");
+    let argv = &calls[1];
+    assert_eq!(argv[0], "run");
+    assert!(
+        argv.windows(2)
+            .any(|w| w[0] == "--name" && w[1] == "bullpen-job-job-1"),
+        "missing --name bullpen-job-job-1 in {argv:?}"
+    );
+    assert!(
+        argv.windows(2)
+            .any(|w| w[0] == "--network" && w[1] == "none"),
+        "missing --network none in {argv:?}"
+    );
+    assert!(
+        argv.iter().any(|a| a == "--read-only"),
+        "missing --read-only in {argv:?}"
+    );
+    assert!(
+        argv.windows(2)
+            .any(|w| w[0] == "--cap-drop" && w[1] == "ALL"),
+        "missing --cap-drop ALL in {argv:?}"
+    );
+    assert!(
+        argv.windows(2)
+            .any(|w| w[0] == "--security-opt" && w[1] == "no-new-privileges"),
+        "missing --security-opt no-new-privileges in {argv:?}"
+    );
 }
 
 #[tokio::test]
@@ -339,6 +408,91 @@ async fn wait_then_spawn_reclaims_exactly_once_after_the_timeout() {
     );
     assert_eq!(finished[0].0, "job-1");
     assert!(finished[0].1.contains("never woke up"));
+}
+
+/// Drives the PRODUCTION path (`spawn`, not `try_claim_for_test`) with two
+/// calls for the SAME job id while the worker is asleep. Guard-present
+/// world: `spawn`'s `if let Some(state) = self.inner.claims.try_claim(...)`
+/// (workers.rs:1260) only starts a `wait_then_spawn` background task for the
+/// FIRST call; the second call's `try_claim` returns `None` and it starts no
+/// task of its own - both calls still answer "queued" (that part of
+/// `spawn`'s contract does not change), but only one wait loop exists, so
+/// once the worker wakes exactly one `docker run` starts the job. Guard-
+/// removed world: `spawn` ignores `try_claim`'s `None` and starts a second
+/// wait loop anyway - both loops independently observe the worker waking up
+/// and both call `real_spawn`, so `bullpen-job-job-1` gets started (and
+/// billed, and occupies the name) TWICE. The observable that differs is the
+/// count of recorded `docker` calls whose `args[0] == "run"`: 1 with the
+/// guard, 2 without it. `two_concurrent_claimants_cannot_both_win` above
+/// does not cover this - it calls `try_claim_for_test` directly and never
+/// goes through `spawn` at all.
+#[tokio::test]
+async fn spawn_called_twice_for_the_same_job_id_starts_the_wait_loop_only_once() {
+    // Pings 0 and 1 (spawn's own check, once per call) are asleep. Every
+    // ping from then on (the background wait loop's retries) is awake, so
+    // whichever wait loop(s) exist will see the worker wake on their very
+    // first retry.
+    let ping_calls = Arc::new(AtomicU64::new(0));
+    let ping_calls_r = ping_calls.clone();
+    let docker = Arc::new(FakeDocker::new(move |_, args| {
+        if args[0] == "version" {
+            let v = ping_calls_r.fetch_add(1, Ordering::SeqCst);
+            if v < 2 {
+                DockerResult {
+                    ok: false,
+                    stdout: String::new(),
+                    stderr: "refused".to_string(),
+                }
+            } else {
+                ok_version()
+            }
+        } else {
+            assert_eq!(args[0], "run");
+            DockerResult {
+                ok: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            }
+        }
+    }));
+    let jobs = Arc::new(FakeJobEvents::default());
+    let clock = FakeClock::new();
+    let sb = WorkerSandbox::with_deps(
+        "w1",
+        "Workstation",
+        docker.clone(),
+        jobs.clone(),
+        clock,
+        1,
+        WORKER_WAKE_TIMEOUT_MS,
+    );
+
+    let first = sb.spawn("bot1", "job-1", "sleep 1").await;
+    let second = sb.spawn("bot1", "job-1", "sleep 1").await;
+    assert!(first.detail.contains("queued"));
+    assert!(second.detail.contains("queued"));
+
+    // Let any background wait loop(s) settle - the fake clock never really
+    // sleeps, so a correct single loop finishes almost immediately. Keep
+    // polling a bit past the first "run" so a SECOND loop (the bug) has room
+    // to also fire before we count.
+    let mut run_calls = 0;
+    for _ in 0..300 {
+        run_calls = docker.calls().iter().filter(|c| c[0] == "run").count();
+        if run_calls >= 1 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            run_calls = docker.calls().iter().filter(|c| c[0] == "run").count();
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+
+    assert_eq!(
+        run_calls, 1,
+        "job-1 must be started exactly once even though spawn() was called \
+         twice with the same job id while the worker was asleep - the \
+         second call's try_claim(None) must not start its own wait loop"
+    );
 }
 
 /* ----------------------------------------------------- the concurrency bite */

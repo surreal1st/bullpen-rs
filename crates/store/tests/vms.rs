@@ -49,52 +49,76 @@ fn config_volume_for_sanitizes_bot_id() {
     assert_eq!(config_volume_for("my@bot"), "bullpen-vmcfg-my_bot");
 }
 
+// The three tests below used to assert only `!container.starts_with("-")`
+// against ids made of nothing but `-` and ASCII letters (`"--rm"`, `"-rm"`,
+// `"-it"`, `"-v"`, `"---"`, `"-"`). `sanitize_for_docker` passes every one of
+// those characters through UNCHANGED, so the literal `"bullpen-vm-"` prefix
+// in `container_for` (`vms.rs:191`) is the only thing making them pass -
+// replacing the sanitiser body with `id.to_string()` left all three green,
+// `assert_eq!(container, "bullpen-vm---rm")` included, because a leading `-`
+// can never happen regardless of what the sanitiser does.
+//
+// The sanitiser's real job is different: turning a SPACE (or any other
+// non-docker-name character) into `_` so a bot id can never split what a
+// caller treats as one docker argument into two - e.g. a volume name of
+// `bullpen-vmcfg-x --privileged` handed unquoted to something that splits on
+// whitespace becomes the two tokens `bullpen-vmcfg-x` and `--privileged`.
+// Guard-present world: `sanitize_for_docker`'s wildcard arm (`vms.rs:207`)
+// replaces the space, so no whitespace survives into the container name.
+// Guard-removed world: widen that arm to also pass `' '` through unchanged
+// and the space survives - `.split_whitespace().count()` goes from 1 to 2.
+// That is the observable these three now assert.
+
 #[test]
 fn sanitizer_prevents_flag_injection() {
-    // Test that even with hyphen allowed, a crafted id cannot produce
-    // a container name that starts with a docker flag character
-    let malicious_id = "--rm";
+    let malicious_id = "--rm x";
     let container = container_for(malicious_id);
-    // The container name should always start with 'b' (bullpen-vm-),
-    // never with a '-', so it cannot be mistaken for a docker flag
-    assert!(
-        !container.starts_with("-"),
-        "Container name must not start with '-'"
+    assert_eq!(container, "bullpen-vm---rm_x");
+    assert_eq!(
+        container.split_whitespace().count(),
+        1,
+        "a space in the bot id must not survive into the container name: {container:?}"
     );
-    assert_eq!(container, "bullpen-vm---rm");
 }
 
 #[test]
 fn sanitizer_prevents_flag_injection_at_start() {
-    // Test that hyphen at start of bot id is preserved but cannot create a flag
-    let malicious_id = "-rm";
+    let malicious_id = "-rm y";
     let container = container_for(malicious_id);
-    // Even though hyphen is allowed in the bot id, the container name
-    // starts with 'b' (bullpen-vm-), never with '-'
-    assert!(
-        !container.starts_with("-"),
-        "Container name must not start with '-'"
+    assert_eq!(container, "bullpen-vm--rm_y");
+    assert_eq!(
+        container.split_whitespace().count(),
+        1,
+        "a space in the bot id must not survive into the container name: {container:?}"
     );
-    assert_eq!(container, "bullpen-vm--rm");
 }
 
 #[test]
 fn crafted_id_cannot_produce_flag_like_container() {
-    // Demonstrate that NO crafted bot id can produce a container name
-    // beginning with a docker flag character, even with hyphen allowed.
-    // This test goes RED if the sanitiser is broken.
+    // This test goes RED if the sanitiser stops replacing spaces: widen
+    // `sanitize_for_docker`'s wildcard arm to pass `' '` through and every
+    // case below produces a container name that splits into 2+ whitespace
+    // tokens instead of 1.
+    let test_cases = vec![
+        ("--rm x", "bullpen-vm---rm_x"),
+        ("--network host", "bullpen-vm---network_host"),
+        ("-it -v", "bullpen-vm--it_-v"),
+        ("y --privileged", "bullpen-vm-y_--privileged"),
+        ("a b c", "bullpen-vm-a_b_c"),
+    ];
 
-    let test_cases = vec!["--rm", "--network", "-it", "-v", "---", "-"];
-
-    for malicious_id in test_cases {
+    for (malicious_id, expected) in test_cases {
         let container = container_for(malicious_id);
-        // Every container name must start with 'b' (from bullpen-vm-)
-        // It can NEVER start with '-', which is what docker flags start with
-        assert!(
-            !container.starts_with("-"),
-            "Container name for bot_id '{}' is '{}', which starts with '-'",
-            malicious_id,
-            container
+        assert_eq!(
+            container, expected,
+            "container_for({malicious_id:?}) did not sanitize as expected"
+        );
+        assert_eq!(
+            container.split_whitespace().count(),
+            1,
+            "bot_id '{malicious_id}' produced a container name with an \
+             embedded space, '{container}' - a downstream whitespace-split \
+             would see this as more than one docker argument"
         );
     }
 }
@@ -482,5 +506,57 @@ fn next_slot_must_return_none_on_exhaustion() {
     assert!(
         slot.is_none(),
         "next_slot must return None when all slots are exhausted, not return a slot"
+    );
+}
+
+/// Pins the `vms` table's column types, NOT NULL flags and primary key -
+/// this must stay byte-compatible with the live TypeScript Bullpen's
+/// database (`vms.rs:1-2`).
+///
+/// Guard-present world: `ensure_vm_tables`'s DDL (`vms.rs:140-148`)
+/// declares `cdp_port`/`web_port` `INTEGER NOT NULL` and
+/// `container`/`state`/`last_used_at` `TEXT NOT NULL`, with `bot_id` the
+/// primary key. Guard-removed world: `ensure_vm_tables_creates_table`
+/// (above) only inserts one well-formed row, so changing `cdp_port INTEGER`
+/// to `cdp_port TEXT` - SQLite is dynamically typed and accepts the exact
+/// same INSERT either way - or dropping any `NOT NULL` leaves it green.
+/// The observable that differs is `PRAGMA table_info(vms)`: this test reads
+/// each column's declared type and NOT NULL flag directly from sqlite's own
+/// catalog instead of inferring them from what one INSERT happens to accept.
+#[test]
+fn ensure_vm_tables_pins_the_schema() {
+    let db = Db::open(":memory:").expect("open :memory:");
+    let mut stmt = db
+        .conn()
+        .prepare("PRAGMA table_info(vms)")
+        .expect("prepare pragma");
+    let cols: Vec<(String, String, bool, bool)> = stmt
+        .query_map([], |row| {
+            let name: String = row.get(1)?;
+            let ty: String = row.get(2)?;
+            let notnull: i64 = row.get(3)?;
+            let pk: i64 = row.get(5)?;
+            Ok((name, ty, notnull != 0, pk != 0))
+        })
+        .expect("query pragma")
+        .filter_map(|r| r.ok())
+        .collect();
+
+    assert_eq!(
+        cols,
+        vec![
+            // bot_id TEXT PRIMARY KEY - SQLite does not set the NOT NULL
+            // flag on a non-INTEGER primary key unless declared explicitly
+            // (a documented SQLite quirk), so notnull is false here even
+            // though it is the key.
+            ("bot_id".to_string(), "TEXT".to_string(), false, true),
+            ("container".to_string(), "TEXT".to_string(), true, false),
+            ("cdp_port".to_string(), "INTEGER".to_string(), true, false),
+            ("web_port".to_string(), "INTEGER".to_string(), true, false),
+            ("state".to_string(), "TEXT".to_string(), true, false),
+            ("last_used_at".to_string(), "TEXT".to_string(), true, false),
+        ],
+        "vms table schema drifted from what must stay byte-compatible with \
+         the live TS Bullpen database"
     );
 }

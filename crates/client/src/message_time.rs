@@ -65,3 +65,36 @@ pub fn parse_epoch_ms(iso: &str) -> Option<f64> {
         .ok()
         .map(|d| d.timestamp_millis() as f64)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// This is now the live web client's pause-divider logic (S6-R F2): the
+    /// "15+ minutes since the last message" check in `thread.rs::paused`
+    /// only ever diffs two of these against each other, so a millisecond
+    /// count that is simply WRONG - not just off-by-timezone, an actual
+    /// wrong epoch - is the failure mode this pins.
+    #[test]
+    fn parse_epoch_ms_reads_milliseconds_since_the_unix_epoch() {
+        assert_eq!(parse_epoch_ms("1970-01-01T00:00:00.000Z"), Some(0.0));
+        assert_eq!(
+            parse_epoch_ms("2026-01-15T19:05:30.250Z"),
+            Some(1768503930250.0)
+        );
+    }
+
+    #[test]
+    fn parse_epoch_ms_diff_matches_a_known_interval() {
+        let earlier = parse_epoch_ms("2026-01-15T19:00:00.000Z").expect("parses");
+        let later = parse_epoch_ms("2026-01-15T19:16:00.000Z").expect("parses");
+        assert_eq!(later - earlier, 16.0 * 60_000.0);
+    }
+
+    #[test]
+    fn parse_epoch_ms_returns_none_for_unparsable_input() {
+        assert_eq!(parse_epoch_ms("not-a-timestamp"), None);
+        assert_eq!(parse_epoch_ms(""), None);
+        assert_eq!(parse_epoch_ms("2026-01-15"), None); // date only, no RFC3339 time
+    }
+}
