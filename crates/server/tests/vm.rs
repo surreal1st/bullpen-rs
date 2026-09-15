@@ -1,15 +1,36 @@
-//! Integration tests for VM lifecycle.
+//! Integration tests for VM lifecycle (S6-06) and the per-bot screen half
+//! (S6-06b: `create_args`, `start_vm_reaper`, `vm_desk`, `desk_for`,
+//! `is_png`, `thumbnail`/`clear_thumbnail_cache`, `viewer_target`,
+//! `proxy_response_headers`, `build_upgrade_request`, `attach_vm_proxy`).
 //!
-//! Tests the provision, hibernation, reset, and doctor operations.
-//! All docker calls go through a recorded fake, not a real daemon.
+//! All docker calls go through a recorded fake, not a real daemon - there
+//! is no Docker and no browser on this workstation. Nothing here proves a
+//! container, a screen capture or a socket actually worked; that is a
+//! smoke test on meridian, not this file.
+//!
+//! Three tests below are RENAMED from S6-06 (`6f20b3a`): they were named
+//! for `reset`/`doctor`, which do not exist in the TS source and were
+//! never built. The bodies are unchanged; only the names now say what they
+//! actually assert.
 
-use server::vm::{DockerRun, ensure_vm, hibernate_idle, refresh_vm, touch_vm};
+use axum::http::{HeaderMap, HeaderValue};
+use server::desk::DeskConfig;
+use server::vm::{
+    DockerRun, FrameCapture, create_args, desk_for, ensure_vm, hibernate_idle, is_png, refresh_vm,
+    start_vm_reaper, thumbnail, touch_vm, vm_desk,
+};
+use server::vm_proxy::{
+    ProxyOutcome, attach_vm_proxy, build_upgrade_request, proxy_response_headers, viewer_target,
+};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use store::{
     Db,
-    vms::{DockerResult, VmConfig, get_vm},
+    vms::{DockerResult, VmConfig, VmRow, get_vm},
 };
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 
 /// Fake docker runner for integration tests. Records every call.
 struct RecordingDockerRun {
@@ -148,8 +169,13 @@ async fn provision_reports_running_when_already_up() {
     assert_eq!(calls[0][0], "inspect");
 }
 
+/// RENAMED from `reset_removes_container_but_preserves_config_volume` -
+/// there is no `reset` function; this only asserts that (a) `create_args`
+/// mounts the bot's config volume and (b) a manual `docker rm -f` this
+/// test issues itself is recorded as a plain `rm`, never a `volume`
+/// subcommand (nothing in this codebase issues one).
 #[tokio::test]
-async fn reset_removes_container_but_preserves_config_volume() {
+async fn create_args_mounts_config_volume_and_manual_rm_leaves_it_alone() {
     let db = Db::open(":memory:").expect("open :memory: db");
 
     let docker = Arc::new(RecordingDockerRun::new());
@@ -200,10 +226,13 @@ async fn reset_removes_container_but_preserves_config_volume() {
     }
 }
 
+/// RENAMED from `bite_reset_volume_removal` - there is no `reset`
+/// function and this is not one of S6-06b's two required bites (see
+/// `viewer_target_rejects_a_decoded_traversal_into_a_neighbouring_bot`
+/// and `proxy_response_headers_strips_transfer_encoding` below for those).
+/// This asserts `create_args` mounts a config volume scoped to the bot id.
 #[tokio::test]
-async fn bite_reset_volume_removal() {
-    // BITE: This test FAILS if config volume mount is not recorded in create args.
-    // Makes reset skip the volume removal check and show the test go red.
+async fn create_args_config_volume_mount_is_bot_scoped() {
     let db = Db::open(":memory:").expect("open :memory: db");
 
     let docker = Arc::new(RecordingDockerRun::new());
@@ -240,8 +269,14 @@ async fn bite_reset_volume_removal() {
     );
 }
 
+/// RENAMED from `doctor_detects_unhealthy_container` - there is no
+/// `doctor` function; this calls `ensure_vm` (to get a real container
+/// name) and then just `parse_container_state`, asserting it correctly
+/// reads a stopped container's `docker inspect` output. Nothing here
+/// compares that reading against the row's OWN `state` column - a
+/// "doctor" would.
 #[tokio::test]
-async fn doctor_detects_unhealthy_container() {
+async fn parse_container_state_reports_stopped_after_inspect() {
     let db = Db::open(":memory:").expect("open :memory: db");
 
     let docker = Arc::new(RecordingDockerRun::new());
@@ -395,4 +430,496 @@ async fn touch_updates_last_used() {
     let vm_after = get_vm(&db, "touch-bot").expect("get_vm").expect("vm");
 
     assert!(vm_after.last_used_at >= vm_before.last_used_at);
+}
+
+/* ============================================================ S6-06b ============================================================ */
+
+/// Writes a `vms` row directly, bypassing `ensure_vm`/docker, for tests
+/// that only care about a row already existing.
+fn insert_vm_row(db: &Db, row: &VmRow) {
+    db.conn()
+        .execute(
+            "INSERT INTO vms (bot_id, container, cdp_port, web_port, state, last_used_at)
+             VALUES (?, ?, ?, ?, ?, ?)",
+            rusqlite::params![
+                &row.bot_id,
+                &row.container,
+                &row.cdp_port,
+                &row.web_port,
+                &row.state,
+                &row.last_used_at,
+            ],
+        )
+        .expect("insert vm row");
+}
+
+/* ---------------------------------------------------------- create_args ---------------------------------------------------------- */
+
+#[test]
+fn create_args_mounts_work_and_init_volumes_with_expected_ports() {
+    let row = VmRow {
+        bot_id: "nozdormu".to_string(),
+        container: "bullpen-vm-nozdormu".to_string(),
+        cdp_port: 9301,
+        web_port: 6201,
+        state: "new".to_string(),
+        last_used_at: "2026-09-15T00:00:00Z".to_string(),
+    };
+    let cfg = test_config();
+
+    let args = create_args(&row, "Nozdormu", &cfg);
+
+    assert!(args.iter().any(|a| a == "bullpen-vm-nozdormu"));
+    assert!(args.iter().any(|a| a.contains("bullpen-vmcfg-nozdormu")));
+    assert!(args.iter().any(|a| a == "127.0.0.1:9301:9223"));
+    assert!(args.iter().any(|a| a == "127.0.0.1:6201:3000"));
+    assert!(args.iter().any(|a| a == "TITLE=Nozdormu's screen"));
+    assert_eq!(args.last().map(String::as_str), Some("test-image:latest"));
+}
+
+/* ------------------------------------------------------------ start_vm_reaper ------------------------------------------------------------ */
+
+#[tokio::test]
+async fn start_vm_reaper_stops_an_idle_vm_on_tick() {
+    let db = Arc::new(Mutex::new(Db::open(":memory:").expect("open :memory: db")));
+    let docker = Arc::new(RecordingDockerRun::new());
+    docker.push_response(true, "", ""); // the reaper's own "stop"
+
+    {
+        let guard = db.lock().unwrap();
+        insert_vm_row(
+            &guard,
+            &VmRow {
+                bot_id: "idle-bot".to_string(),
+                container: "bullpen-vm-idle-bot".to_string(),
+                cdp_port: 9301,
+                web_port: 6201,
+                state: "running".to_string(),
+                last_used_at: "2020-01-01T00:00:00Z".to_string(),
+            },
+        );
+    }
+
+    let mut cfg = test_config();
+    cfg.idle_ms = 1_000; // anything older than 1s is idle
+
+    let handle = start_vm_reaper(db.clone(), docker.clone(), cfg, Duration::from_millis(15));
+
+    // Real-time wait for at least one tick; this is timing-sensitive but
+    // needs no docker/browser, only the fake and a short sleep.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    handle.abort();
+
+    let calls = docker.recorded_calls();
+    assert!(
+        calls
+            .iter()
+            .any(|call| call[0] == "stop" && call.contains(&"bullpen-vm-idle-bot".to_string())),
+        "reaper should have stopped the idle container, calls: {calls:?}"
+    );
+
+    let row = {
+        let guard = db.lock().unwrap();
+        get_vm(&guard, "idle-bot").expect("get_vm").expect("row")
+    };
+    assert_eq!(row.state, "stopped");
+}
+
+/* -------------------------------------------------------------- vm_desk / desk_for -------------------------------------------------------------- */
+
+#[test]
+fn vm_desk_points_at_the_bots_own_ports() {
+    let row = VmRow {
+        bot_id: "arthur".to_string(),
+        container: "bullpen-vm-arthur".to_string(),
+        cdp_port: 9305,
+        web_port: 6205,
+        state: "running".to_string(),
+        last_used_at: "2026-09-15T00:00:00Z".to_string(),
+    };
+    let cfg = test_config();
+
+    let desk = vm_desk(&row, &cfg);
+
+    assert_eq!(desk.cdp, "http://127.0.0.1:9305");
+    assert_eq!(desk.view, "http://127.0.0.1:6205");
+    assert_eq!(desk.container, "bullpen-vm-arthur");
+    assert_eq!(desk.docker_host, cfg.docker_host);
+}
+
+#[tokio::test]
+async fn desk_for_returns_fallback_when_vms_disabled() {
+    let db = Db::open(":memory:").expect("open :memory: db");
+    let docker = Arc::new(RecordingDockerRun::new());
+    let cfg = test_config();
+    let fallback = DeskConfig {
+        cdp: "http://127.0.0.1:9223".to_string(),
+        view: "http://127.0.0.1:6101".to_string(),
+        container: "bullpen-desk".to_string(),
+        docker_host: cfg.docker_host.clone(),
+    };
+
+    let desk = desk_for(
+        &db,
+        docker.clone(),
+        "bot-x",
+        "Bot X",
+        fallback.clone(),
+        &cfg,
+        false,
+    )
+    .await
+    .expect("desk_for");
+
+    assert_eq!(desk, fallback);
+    assert!(
+        docker.recorded_calls().is_empty(),
+        "disabled VMs must never touch docker"
+    );
+}
+
+#[tokio::test]
+async fn desk_for_returns_the_bots_own_desk_when_enabled() {
+    let db = Db::open(":memory:").expect("open :memory: db");
+    let docker = Arc::new(RecordingDockerRun::new());
+    docker.push_response(true, "running true", "");
+    let cfg = test_config();
+    let fallback = DeskConfig {
+        cdp: "http://127.0.0.1:9223".to_string(),
+        view: "http://127.0.0.1:6101".to_string(),
+        container: "bullpen-desk".to_string(),
+        docker_host: cfg.docker_host.clone(),
+    };
+
+    insert_vm_row(
+        &db,
+        &VmRow {
+            bot_id: "bot-y".to_string(),
+            container: "bullpen-vm-bot-y".to_string(),
+            cdp_port: 9310,
+            web_port: 6210,
+            state: "running".to_string(),
+            last_used_at: "2026-09-15T00:00:00Z".to_string(),
+        },
+    );
+
+    let desk = desk_for(
+        &db,
+        docker.clone(),
+        "bot-y",
+        "Bot Y",
+        fallback.clone(),
+        &cfg,
+        true,
+    )
+    .await
+    .expect("desk_for");
+
+    assert_ne!(desk, fallback);
+    assert_eq!(desk.cdp, "http://127.0.0.1:9310");
+    assert_eq!(desk.container, "bullpen-vm-bot-y");
+}
+
+/* ------------------------------------------------------------------ is_png ------------------------------------------------------------------ */
+
+#[test]
+fn is_png_accepts_real_signature_with_body() {
+    let mut bytes = vec![0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+    bytes.extend_from_slice(&[0u8; 16]);
+    assert!(is_png(&bytes));
+}
+
+#[test]
+fn is_png_rejects_short_buffers_and_wrong_signature() {
+    assert!(!is_png(&[]));
+    assert!(!is_png(
+        b"not a png at all, just an error message"[..8].as_ref()
+    ));
+    // Right signature, but truncated before the 16-byte floor.
+    assert!(!is_png(&[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+}
+
+/* --------------------------------------------------------------- thumbnail --------------------------------------------------------------- */
+
+/// Records every call it receives, same convention as `RecordingDockerRun`.
+struct FakeFrameCapture {
+    calls: Mutex<Vec<String>>,
+    png: Vec<u8>,
+}
+
+impl FakeFrameCapture {
+    fn new() -> Self {
+        let mut png = vec![0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+        png.extend_from_slice(&[0u8; 16]);
+        Self {
+            calls: Mutex::new(Vec::new()),
+            png,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl FrameCapture for FakeFrameCapture {
+    async fn capture(&self, container: &str, _cfg: &VmConfig) -> Option<Vec<u8>> {
+        self.calls.lock().unwrap().push(container.to_string());
+        Some(self.png.clone())
+    }
+}
+
+#[tokio::test]
+async fn thumbnail_reuses_a_cached_frame_inside_the_ttl() {
+    server::vm::clear_thumbnail_cache();
+    let cfg = test_config();
+    let capture = FakeFrameCapture::new();
+
+    let first = thumbnail("bullpen-vm-cached", &cfg, &capture, 1_000).await;
+    let second = thumbnail("bullpen-vm-cached", &cfg, &capture, 1_500).await; // +500ms, inside 5s TTL
+
+    assert!(first.is_some());
+    assert_eq!(first, second);
+    assert_eq!(
+        capture.calls.lock().unwrap().len(),
+        1,
+        "a cache hit must not call capture again"
+    );
+}
+
+#[tokio::test]
+async fn thumbnail_recaptures_once_the_ttl_expires() {
+    server::vm::clear_thumbnail_cache();
+    let cfg = test_config();
+    let capture = FakeFrameCapture::new();
+
+    thumbnail("bullpen-vm-expiring", &cfg, &capture, 1_000).await;
+    thumbnail("bullpen-vm-expiring", &cfg, &capture, 6_001).await; // +5001ms, past the 5s TTL
+
+    assert_eq!(
+        capture.calls.lock().unwrap().len(),
+        2,
+        "an expired entry must be recaptured"
+    );
+}
+
+/* -------------------------------------------------------------- viewer_target -------------------------------------------------------------- */
+
+#[test]
+fn viewer_target_parses_the_bot_id_and_rest_of_path() {
+    let target = viewer_target("/api/bots/nozdormu/vm/view/websockets").expect("should match");
+    assert_eq!(target.bot_id, "nozdormu");
+    assert_eq!(target.rest, "websockets");
+}
+
+#[test]
+fn viewer_target_allows_one_mount_prefix_segment() {
+    // The lazy `(?:/[^/]+)??` outer group: an app mounted under one path
+    // segment (e.g. a reverse proxy prefix) still matches.
+    let target = viewer_target("/app/api/bots/nozdormu/vm/view").expect("should match");
+    assert_eq!(target.bot_id, "nozdormu");
+    assert_eq!(target.rest, "");
+}
+
+#[test]
+fn viewer_target_returns_none_for_non_viewer_paths() {
+    assert!(viewer_target("/api/bots/nozdormu/messages").is_none());
+    assert!(viewer_target("/").is_none());
+}
+
+/// S6-06b bite (a). Two worlds:
+/// - GUARD PRESENT (shipped `viewer_target`): a decoded bot id that
+///   contains a path separator is REJECTED - `None`.
+/// - GUARD REMOVED (the guard's `if` deleted, as TS's literal body does):
+///   `%2e%2e%2fother-bot` decodes to `../other-bot` and is accepted as a
+///   bot id, wired straight into `get_vm`'s exact lookup and, if anything
+///   downstream ever compares this by prefix instead of equality, into a
+///   neighbouring bot's screen.
+///
+/// Observable that differs: `viewer_target(...).is_none()`.
+#[test]
+fn viewer_target_rejects_a_decoded_traversal_into_a_neighbouring_bot() {
+    let path = "/api/bots/%2e%2e%2fother-bot/vm/view";
+    assert!(
+        viewer_target(path).is_none(),
+        "a decoded bot id containing '/' must never be accepted"
+    );
+}
+
+/* ---------------------------------------------------------- proxy_response_headers ---------------------------------------------------------- */
+
+#[test]
+fn proxy_response_headers_keeps_ordinary_headers_and_forces_no_store() {
+    let mut source = HeaderMap::new();
+    source.insert("content-type", HeaderValue::from_static("image/png"));
+    source.insert("etag", HeaderValue::from_static("\"abc\""));
+
+    let out = proxy_response_headers(&source);
+
+    assert_eq!(out.get("content-type").unwrap(), "image/png");
+    assert_eq!(out.get("etag").unwrap(), "\"abc\"");
+    assert_eq!(out.get("cache-control").unwrap(), "no-store");
+}
+
+/// S6-06b bite (b). Two worlds:
+/// - GUARD PRESENT (shipped `proxy_response_headers`): every header in
+///   `HOP_BY_HOP` (`connection`, `transfer-encoding`, ...) is stripped
+///   before the response reaches a caller.
+/// - GUARD REMOVED (the `HOP_BY_HOP` filter deleted): a hop-by-hop header
+///   describing ONE connection's framing (`transfer-encoding`) passes
+///   straight through to a client that has no business seeing it, per
+///   RFC 9110.
+///
+/// Observable that differs: `out.get("transfer-encoding").is_none()`.
+#[test]
+fn proxy_response_headers_strips_transfer_encoding() {
+    let mut source = HeaderMap::new();
+    source.insert("transfer-encoding", HeaderValue::from_static("chunked"));
+    source.insert("connection", HeaderValue::from_static("keep-alive"));
+
+    let out = proxy_response_headers(&source);
+
+    assert!(out.get("transfer-encoding").is_none());
+    assert!(out.get("connection").is_none());
+}
+
+/* --------------------------------------------------------------- build_upgrade_request --------------------------------------------------------------- */
+
+#[test]
+fn build_upgrade_request_rewrites_host_and_drops_the_session() {
+    let mut headers = HeaderMap::new();
+    headers.insert("host", HeaderValue::from_static("bullpen.example.com"));
+    headers.insert("cookie", HeaderValue::from_static("bullpen_session=secret"));
+    headers.insert("authorization", HeaderValue::from_static("Bearer secret"));
+    headers.insert("upgrade", HeaderValue::from_static("websocket"));
+    headers.insert(
+        "sec-websocket-key",
+        HeaderValue::from_static("dGhlIHNhbXBsZSBub25jZQ=="),
+    );
+
+    let request = build_upgrade_request("/websockets", &headers, 6201);
+
+    assert!(request.starts_with("GET /websockets HTTP/1.1\r\n"));
+    assert!(request.contains("Host: 127.0.0.1:6201\r\n"));
+    assert!(request.contains("sec-websocket-key: dGhlIHNhbXBsZSBub25jZQ==\r\n"));
+    assert!(!request.contains("bullpen.example.com"));
+    assert!(!request.to_lowercase().contains("cookie:"));
+    assert!(!request.to_lowercase().contains("authorization:"));
+    assert!(request.ends_with("\r\n\r\n"));
+}
+
+/* --------------------------------------------------------------- attach_vm_proxy --------------------------------------------------------------- */
+
+#[tokio::test]
+async fn attach_vm_proxy_ignores_a_non_viewer_path() {
+    let db = Db::open(":memory:").expect("open :memory: db");
+    let (client, _held) = tokio::io::duplex(64);
+
+    let outcome =
+        attach_vm_proxy(client, "/api/conversations/1", &HeaderMap::new(), &db, true).await;
+
+    assert_eq!(outcome, ProxyOutcome::NotAViewerPath);
+}
+
+#[tokio::test]
+async fn attach_vm_proxy_refuses_without_a_valid_session() {
+    let db = Db::open(":memory:").expect("open :memory: db");
+    let (client, mut held) = tokio::io::duplex(256);
+
+    let outcome = attach_vm_proxy(
+        client,
+        "/api/bots/some-bot/vm/view",
+        &HeaderMap::new(),
+        &db,
+        true,
+    )
+    .await;
+
+    assert_eq!(outcome, ProxyOutcome::Unauthorized);
+
+    let mut response = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_millis(200), held.read_to_end(&mut response)).await;
+    let text = String::from_utf8_lossy(&response);
+    assert!(text.starts_with("HTTP/1.1 401"));
+}
+
+#[tokio::test]
+async fn attach_vm_proxy_reports_unknown_bot_when_auth_is_off() {
+    let db = Db::open(":memory:").expect("open :memory: db");
+    let (client, _held) = tokio::io::duplex(256);
+
+    let outcome = attach_vm_proxy(
+        client,
+        "/api/bots/nobody-here/vm/view",
+        &HeaderMap::new(),
+        &db,
+        false,
+    )
+    .await;
+
+    assert_eq!(outcome, ProxyOutcome::UnknownBot);
+}
+
+#[tokio::test]
+async fn attach_vm_proxy_relays_bytes_between_client_and_the_bots_upstream() {
+    let db = Db::open(":memory:").expect("open :memory: db");
+
+    // A real loopback listener stands in for the container's web desktop -
+    // this proves the RELAY wiring (connect, send the handshake, pipe both
+    // directions), not that a real container or browser is on the other
+    // end of it.
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let web_port = listener.local_addr().expect("local_addr").port() as i32;
+
+    insert_vm_row(
+        &db,
+        &VmRow {
+            bot_id: "relay-bot".to_string(),
+            container: "bullpen-vm-relay-bot".to_string(),
+            cdp_port: 9399,
+            web_port,
+            state: "running".to_string(),
+            last_used_at: "2026-09-15T00:00:00Z".to_string(),
+        },
+    );
+
+    let upstream_task = tokio::spawn(async move {
+        let (mut upstream, _addr) = listener.accept().await.expect("accept");
+        let mut buf = [0u8; 4096];
+        let n = upstream.read(&mut buf).await.expect("read handshake");
+        let handshake = String::from_utf8_lossy(&buf[..n]).to_string();
+        upstream
+            .write_all(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\nHELLO")
+            .await
+            .expect("write response");
+        handshake
+    });
+
+    let (client, mut held) = tokio::io::duplex(4096);
+
+    let outcome = attach_vm_proxy(
+        client,
+        "/api/bots/relay-bot/vm/view/websockets",
+        &HeaderMap::new(),
+        &db,
+        false,
+    )
+    .await;
+
+    assert_eq!(outcome, ProxyOutcome::Proxying);
+
+    let handshake = tokio::time::timeout(Duration::from_secs(2), upstream_task)
+        .await
+        .expect("upstream task did not finish")
+        .expect("upstream task panicked");
+    assert!(handshake.starts_with("GET /websockets HTTP/1.1\r\n"));
+    assert!(handshake.contains("Host: 127.0.0.1"));
+
+    // The upstream's own handshake response is relayed byte for byte, same
+    // as TS's `upstream.pipe(socket)` - so the client sees the 101 line
+    // FIRST, then the body, not just the body.
+    let expected = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\nHELLO";
+    let mut relayed = vec![0u8; expected.len()];
+    tokio::time::timeout(Duration::from_secs(2), held.read_exact(&mut relayed))
+        .await
+        .expect("timed out waiting for relayed bytes")
+        .expect("read relayed bytes");
+    assert_eq!(relayed.as_slice(), expected.as_slice());
 }
