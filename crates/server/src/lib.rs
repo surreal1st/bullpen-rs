@@ -24,6 +24,7 @@ pub mod slack;
 pub mod spend;
 pub mod teams;
 mod tools;
+pub mod workers;
 
 pub use error::{ApiResult, AppError};
 
