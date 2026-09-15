@@ -13,7 +13,7 @@ use crate::bubble::Bubble;
 use crate::composer::Composer;
 use crate::goals_editor::GoalsModal;
 use crate::memory_editor::MemoryModal;
-use crate::message_time::{day_key, format_day, format_time, now_iso};
+use crate::message_time::{day_key, format_day, format_time, now_iso, parse_epoch_ms};
 use crate::model_chip::ModelChip;
 use crate::permissions_editor::PermissionsModal;
 use crate::questions::Questions;
@@ -21,7 +21,6 @@ use crate::routines_editor::RoutinesModal;
 use crate::types::{Bot, Message, Role};
 use crate::working_bar::WorkingBar;
 use dioxus::prelude::*;
-use js_sys::Date;
 use std::rc::Rc;
 
 /// Owns one bot's (or room's) conversation: fetches it, renders it, and
@@ -326,7 +325,7 @@ fn Thread(
 
     let msgs = messages.read();
     let live_text = streaming.read().clone();
-    let now = Date::new_0();
+    let now = now_iso();
 
     // A date/pause divider is a property of a PAIR of messages, so this is
     // computed once here rather than inside the `rsx!` loop below - same
@@ -392,12 +391,16 @@ fn Thread(
 }
 
 /// 15+ minutes between two messages reads as "came back later" rather than
-/// "still talking" - ported from `App.tsx:1151-1153`.
+/// "still talking" - ported from `App.tsx:1151-1153`. S13a-01b: was
+/// `js_sys::Date` directly; now `message_time::parse_epoch_ms`, the same
+/// portable (wasm/native) parse this file's other date handling already
+/// goes through, since a ms diff has no locale dependency to split on.
 fn paused(prev: &Message, current: &Message) -> bool {
-    let prev_ms = Date::new(&wasm_bindgen::JsValue::from_str(&prev.created_at)).get_time();
-    let current_ms = Date::new(&wasm_bindgen::JsValue::from_str(&current.created_at)).get_time();
-    if prev_ms.is_nan() || current_ms.is_nan() {
+    let (Some(prev_ms), Some(current_ms)) = (
+        parse_epoch_ms(&prev.created_at),
+        parse_epoch_ms(&current.created_at),
+    ) else {
         return false;
-    }
+    };
     current_ms - prev_ms >= 15.0 * 60_000.0
 }

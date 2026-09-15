@@ -49,16 +49,18 @@ pub fn Questions(bot_id: String, bot_name: String) -> Element {
     let items = use_signal(Vec::<OpenQuestion>::new);
 
     use_effect(move || {
-        wasm_bindgen_futures::spawn_local(reload(items));
+        crate::transport::spawn_task(reload(items));
     });
 
-    // 🔴 `wasm_bindgen_futures::spawn_local`, not `dioxus::prelude::spawn` -
-    // see `approvals.rs`'s identical subscription for why (`working_bar.rs`
-    // documents the underlying wasm-abort bug this avoids).
+    // 🔴 `crate::transport::spawn_task`, not `dioxus::prelude::spawn` - see
+    // `approvals.rs`'s identical subscription for why (`working_bar.rs`
+    // documents the underlying wasm-abort bug this avoids; `transport/mod.rs`
+    // documents native's own reason for not using `dioxus::prelude::spawn`
+    // or `tokio::spawn` either).
     let _events = use_signal(move || {
         subscribe_events(move |kind| {
             if kind == ChangeKind::Questions {
-                wasm_bindgen_futures::spawn_local(reload(items));
+                crate::transport::spawn_task(reload(items));
             }
         })
     });

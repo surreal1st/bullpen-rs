@@ -22,9 +22,9 @@
 //! `regex_matches_or_fails_open` in S5c-03 (see that file's own doc).
 
 use crate::message_time::format_time;
+use crate::transport::{Request, Response};
 use crate::types::{Bot, Roster};
 use dioxus::prelude::*;
-use gloo_net::http::{Request, Response};
 use serde::{Deserialize, Serialize};
 
 /// `GET /api/slack`'s response shape (`crates/server/src/slack.rs::

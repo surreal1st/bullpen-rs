@@ -11,9 +11,9 @@ use crate::api;
 use crate::message_time::format_time;
 use crate::model_chip::short_model;
 use crate::slack_card::SlackCard;
+use crate::transport::sleep;
 use crate::types::{AutoReviewLogEntry, AutoReviewState, CatalogEntry, RoutingState};
 use dioxus::prelude::*;
-use gloo_timers::future::TimeoutFuture;
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -287,7 +287,7 @@ fn ModelPickerField(value: String, on_change: EventHandler<String>) -> Element {
         load_error.set(None);
         let generation = generation.clone();
         spawn(async move {
-            TimeoutFuture::new(180).await;
+            sleep(180).await;
             if generation.get() != my_gen {
                 return;
             }

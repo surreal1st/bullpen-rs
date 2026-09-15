@@ -26,9 +26,9 @@ use crate::rail::Rail;
 use crate::room_picker::{PickerMode, RoomPicker};
 use crate::settings::SettingsModal;
 use crate::thread::ChatPane;
+use crate::transport::Request;
 use crate::types::{RoomSummary, Roster};
 use dioxus::prelude::*;
-use gloo_net::http::Request;
 
 async fn fetch_roster() -> Result<Roster, String> {
     let resp = Request::get("/api/roster")
@@ -207,20 +207,21 @@ fn AppShell() -> Element {
     // same `use_signal`-not-`use_hook` reasoning: `EventsHandle` is not
     // `Clone`.
     //
-    // 🔴 `wasm_bindgen_futures::spawn_local`, not `dioxus::prelude::spawn`,
-    // for the two fetches below: this callback runs from `events.rs`'s bare
-    // `wasm_bindgen_futures::spawn_local(run())` loop, which Dioxus never
-    // considers a "current scope" - `spawn()` there `.unwrap()`s an empty
-    // scope stack and aborts the whole wasm instance, silently, on the
-    // first "roster" change (see `working_bar.rs`'s `reload`, which hit the
-    // exact same failure and is documented there in more depth).
+    // 🔴 `crate::transport::spawn_task`, not `dioxus::prelude::spawn`, for
+    // the two fetches below: this callback runs from `events.rs`'s bare
+    // `spawn_task(run())` loop, which Dioxus never considers a "current
+    // scope" - `spawn()` there `.unwrap()`s an empty scope stack and aborts
+    // the whole wasm instance, silently, on the first "roster" change (see
+    // `working_bar.rs`'s `reload`, which hit the exact same failure and is
+    // documented there in more depth; `transport/mod.rs` documents why
+    // native's `spawn_task` needs a different escape hatch again).
     let _events = use_signal(|| {
         subscribe_events(move |kind| {
             if kind == ChangeKind::Roster {
-                wasm_bindgen_futures::spawn_local(async move {
+                crate::transport::spawn_task(async move {
                     roster.set(Some(fetch_roster().await));
                 });
-                wasm_bindgen_futures::spawn_local(async move {
+                crate::transport::spawn_task(async move {
                     if let Ok(list) = api::fetch_rooms().await {
                         rooms.set(list);
                     }

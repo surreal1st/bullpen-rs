@@ -24,9 +24,8 @@
 use crate::api;
 use crate::events::{ChangeKind, subscribe_events};
 use crate::types::{MemoryEntry, MemoryView, ProjectSummary};
+use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
-use js_sys::Date;
-use wasm_bindgen::JsValue;
 
 /// Add-note TTL choices: label -> seconds. Default index is 1 ("1d"),
 /// matching the `note` TOOL's own default (`tools/note.rs:25`) - S3-F-01c
@@ -36,17 +35,22 @@ use wasm_bindgen::JsValue;
 const TTL_CHOICES: &[(&str, u64)] = &[("1h", 3_600), ("1d", 86_400), ("1w", 604_800)];
 const DEFAULT_TTL_INDEX: usize = 1;
 
+/// S13a-01b: was `js_sys::Date` - no locale/browser dependency here at all
+/// (the output is plain English, "expires in 3h"), so this is `chrono` on
+/// both platforms rather than a wasm/native split - unlike `message_time.rs`,
+/// there is no behaviour to preserve on web and document as changed on
+/// desktop.
 fn parse_iso_ms(iso: &str) -> Option<f64> {
-    let date = Date::new(&JsValue::from_str(iso));
-    let t = date.get_time();
-    if t.is_nan() { None } else { Some(t) }
+    DateTime::parse_from_rfc3339(iso)
+        .ok()
+        .map(|d| d.timestamp_millis() as f64)
 }
 
 /// "expires in 3h" for a note's `expires_at`. `None` when the entry carries
 /// none - every entry today, see this module's doc on the server gap.
 fn format_ttl(expires_at: &str) -> Option<String> {
     let target = parse_iso_ms(expires_at)?;
-    let remaining_ms = target - Date::now();
+    let remaining_ms = target - Utc::now().timestamp_millis() as f64;
     if remaining_ms <= 0.0 {
         return Some("expired".to_string());
     }
@@ -215,10 +219,12 @@ fn MemoryEditor(bot_id: String) -> Element {
         spawn(load_shared(shared));
     });
 
-    // 🔴 `wasm_bindgen_futures::spawn_local`, not `dioxus::prelude::spawn`:
-    // this fires from `events.rs`'s bare `spawn_local(run())` loop, outside
-    // any Dioxus scope - `approvals.rs`'s own subscription doc explains the
-    // silent wasm abort `dioxus::prelude::spawn` hits there.
+    // 🔴 `crate::transport::spawn_task`, not `dioxus::prelude::spawn`: this
+    // fires from `events.rs`'s bare `spawn_task(run())` loop, outside any
+    // Dioxus scope - `approvals.rs`'s own subscription doc explains the
+    // silent wasm abort `dioxus::prelude::spawn` hits there, and
+    // `transport/mod.rs`'s doc on `spawn_task` explains why native needs a
+    // different (but equally scope-independent) escape hatch.
     let events_bot_id = bot_id.clone();
     let _events = use_signal(move || {
         let bot_id = events_bot_id.clone();
@@ -226,11 +232,9 @@ fn MemoryEditor(bot_id: String) -> Element {
             if kind == ChangeKind::Memory {
                 let bot_id = bot_id.clone();
                 let query = search_query.read().clone();
-                wasm_bindgen_futures::spawn_local(load_view(
-                    bot_id, query, view, core_text, core_saved,
-                ));
-                wasm_bindgen_futures::spawn_local(load_projects(projects));
-                wasm_bindgen_futures::spawn_local(load_shared(shared));
+                crate::transport::spawn_task(load_view(bot_id, query, view, core_text, core_saved));
+                crate::transport::spawn_task(load_projects(projects));
+                crate::transport::spawn_task(load_shared(shared));
             }
         })
     });

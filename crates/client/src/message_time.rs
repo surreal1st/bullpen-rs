@@ -3,136 +3,65 @@
 //! ISO strings; formatting the stored string directly (e.g. slicing the
 //! first 10 characters for a day key) puts anything after 8pm Eastern on the
 //! following calendar day, which is why every function here goes through a
-//! real `Date` rather than string-slicing.
+//! real parsed timestamp rather than string-slicing.
 //!
-//! Built on `js_sys::Date` rather than `chrono`: `toLocaleTimeString` /
-//! `toLocaleDateString` are exactly the locale-aware weekday/month
-//! formatting the original leans on, and re-deriving that from scratch in
-//! `chrono` (no ICU here) would be a second, worse implementation of the
-//! same thing.
+//! S13a-01b: this used to be one `js_sys::Date`-only implementation and, per
+//! its own doc, "only meaningfully runs in a browser". It is now a seam like
+//! `transport/`'s - `web.rs` (`#[cfg(target_arch = "wasm32")]`) is that
+//! original implementation, untouched; `native.rs`
+//! (`#[cfg(not(target_arch = "wasm32"))]`) is a fresh `chrono` one for the
+//! desktop build, which has no browser to ask.
 //!
-//! 🔴 Deviation: the TS calls these with `locale: undefined`, meaning "the
-//! browser's own default". `js_sys::Date`'s stable (non-`js_sys_unstable_apis`)
-//! bindings type that argument as a plain `&str`, which cannot express
-//! `undefined` - so this pins `"en-US"` rather than reading the browser's
-//! locale. Fine for Josh; wrong for a non-US reader, and worth fixing if
-//! this ever ships to one.
+//! 🔴 **Desktop time formatting is not locale-driven.** `web.rs` leans on
+//! `toLocaleTimeString`/`toLocaleDateString` for the browser's own locale
+//! (pinned to `"en-US"` there already - see that module's own doc on why).
+//! `native.rs` has no such thing to call - `chrono` alone carries no ICU/CLDR
+//! locale data, so re-deriving real locale-aware formatting from scratch
+//! would be a second, worse implementation of the same thing. The desktop
+//! build therefore always renders a fixed `en-US`-shaped format (`format_time`:
+//! "7:05 PM"; `format_day`: "Today" / "Yesterday" / "Monday" / "Mon January
+//! 5" / "Mon January 5, 2025") regardless of Josh's OS locale. This is a
+//! visible behaviour change from the web build, not an oversight - worth
+//! revisiting if bullpen-rs ever ships desktop to a non-US reader.
 //!
-//! Only meaningfully runs in a browser (like the rest of `client`, e.g.
-//! `app.rs`'s `gloo-net` calls) - `js_sys::Date` compiles on any target but
-//! is not something `cargo test` can drive, which is why the bite check for
-//! this ticket lives in `api::feed` instead, where it can.
+//! Both halves resolve a stored UTC ISO string into the READER's wall clock
+//! by going through the platform's own notion of the local timezone
+//! (`Date`'s local getters on web; `chrono::Local` on native, which uses the
+//! OS timezone database) - never a hardcoded offset.
 
-use js_sys::{Date, Object, Reflect};
-use wasm_bindgen::JsValue;
+use chrono::{DateTime, Utc};
 
-const LOCALE: &str = "en-US";
-const DAY_MS: f64 = 86_400_000.0;
+#[cfg(not(target_arch = "wasm32"))]
+mod native;
+#[cfg(target_arch = "wasm32")]
+mod web;
 
-fn parse(iso: &str) -> Option<Date> {
-    let date = Date::new(&JsValue::from_str(iso));
-    if date.get_time().is_nan() {
-        None
-    } else {
-        Some(date)
-    }
-}
+#[cfg(not(target_arch = "wasm32"))]
+pub use native::{day_key, format_day, format_full, format_time};
+#[cfg(target_arch = "wasm32")]
+pub use web::{day_key, format_day, format_full, format_time};
 
-/// The clock time on a message row, e.g. "11:25 PM".
-pub fn format_time(iso: &str) -> String {
-    let Some(date) = parse(iso) else {
-        return String::new();
-    };
-    let opts = Object::new();
-    let _ = Reflect::set(&opts, &"hour".into(), &"numeric".into());
-    let _ = Reflect::set(&opts, &"minute".into(), &"2-digit".into());
-    date.to_locale_time_string_with_options(LOCALE, &opts)
-        .into()
-}
-
-/// A stable key for the LOCAL calendar day, built from the local
-/// year/month/date getters rather than `iso[..10]` - see the module doc.
-pub fn day_key(iso: &str) -> String {
-    let Some(date) = parse(iso) else {
-        return String::new();
-    };
-    format!(
-        "{:04}-{:02}-{:02}",
-        date.get_full_year(),
-        date.get_month() + 1,
-        date.get_date()
-    )
-}
-
-/// The divider label: "Today", "Yesterday", or a written date. `now` is a
-/// parameter rather than read from the clock so the boundary stays testable
-/// in principle, matching the TS signature - though see the module doc on
-/// why `cargo test` cannot exercise this one either.
-pub fn format_day(iso: &str, now: &Date) -> String {
-    let Some(date) = parse(iso) else {
-        return String::new();
-    };
-    let now_iso: String = now.to_iso_string().as_string().unwrap_or_default();
-    let key = day_key(iso);
-    if key == day_key(&now_iso) {
-        return "Today".to_string();
-    }
-
-    let yesterday = Date::new(&JsValue::from_f64(now.get_time() - DAY_MS));
-    let yesterday_iso: String = yesterday.to_iso_string().as_string().unwrap_or_default();
-    if key == day_key(&yesterday_iso) {
-        return "Yesterday".to_string();
-    }
-
-    // Inside the last week, the weekday is what someone actually remembers.
-    let days = ((start_of_day(now).get_time() - start_of_day(&date).get_time()) / DAY_MS).round();
-    if days > 0.0 && days < 7.0 {
-        let opts = Object::new();
-        let _ = Reflect::set(&opts, &"weekday".into(), &"long".into());
-        return date.to_locale_date_string(LOCALE, &opts).into();
-    }
-
-    // The year only when it is not this one.
-    let opts = Object::new();
-    let _ = Reflect::set(&opts, &"weekday".into(), &"short".into());
-    let _ = Reflect::set(&opts, &"month".into(), &"long".into());
-    let _ = Reflect::set(&opts, &"day".into(), &"numeric".into());
-    if date.get_full_year() != now.get_full_year() {
-        let _ = Reflect::set(&opts, &"year".into(), &"numeric".into());
-    }
-    date.to_locale_date_string(LOCALE, &opts).into()
-}
-
-fn start_of_day(date: &Date) -> Date {
-    let copy = Date::new(&JsValue::from_f64(date.get_time()));
-    copy.set_hours(0);
-    copy.set_minutes(0);
-    copy.set_seconds(0);
-    copy.set_milliseconds(0);
-    copy
-}
-
-/// The full thing, for a tooltip on the short time.
-pub fn format_full(iso: &str) -> String {
-    let Some(date) = parse(iso) else {
-        return String::new();
-    };
-    let opts = Object::new();
-    let _ = Reflect::set(&opts, &"weekday".into(), &"long".into());
-    let _ = Reflect::set(&opts, &"year".into(), &"numeric".into());
-    let _ = Reflect::set(&opts, &"month".into(), &"long".into());
-    let _ = Reflect::set(&opts, &"day".into(), &"numeric".into());
-    let _ = Reflect::set(&opts, &"hour".into(), &"numeric".into());
-    let _ = Reflect::set(&opts, &"minute".into(), &"2-digit".into());
-    date.to_locale_string(LOCALE, &opts).into()
-}
-
-/// Now, as an ISO string - used for the live streaming row's timestamp
-/// (there is no `createdAt` from the server yet; the row is local until the
-/// run finishes).
+/// Now, as a UTC ISO string with millisecond precision - used for the live
+/// streaming row's timestamp (there is no `createdAt` from the server yet;
+/// the row is local until the run finishes) and as `format_day`'s `now`
+/// argument (`thread.rs`). Millisecond precision, `Z` suffix: the same shape
+/// `crates/server/src/routes/mod.rs::now_iso` and
+/// `web.rs`'s `Date::to_iso_string` both already produce, so every
+/// `created_at` this client ever sees or makes parses the same way
+/// regardless of which one wrote it.
 pub fn now_iso() -> String {
-    Date::new_0()
-        .to_iso_string()
-        .as_string()
-        .unwrap_or_default()
+    Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+/// Milliseconds since the Unix epoch, or `None` for a string that does not
+/// parse - `thread.rs::paused`'s "15+ minutes since the last message" check,
+/// which only ever compares two of these against each other and so has no
+/// locale dependency to split on. `chrono::DateTime::parse_from_rfc3339` on
+/// both platforms (unlike the formatting functions above, this needs no
+/// browser/OS timezone lookup either - a millisecond-since-epoch diff is the
+/// same number in every timezone).
+pub fn parse_epoch_ms(iso: &str) -> Option<f64> {
+    DateTime::parse_from_rfc3339(iso)
+        .ok()
+        .map(|d| d.timestamp_millis() as f64)
 }

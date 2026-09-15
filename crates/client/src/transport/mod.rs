@@ -30,6 +30,7 @@
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use std::future::Future;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
@@ -238,6 +239,77 @@ pub fn encode_uri_component(input: &str) -> String {
         }
     }
     out
+}
+
+/* -------------------------------------------------------------- S13a-01b */
+
+/// Fire-and-forget task spawning, portable across the wasm32/native seam -
+/// S13a-01b's "pattern 1": every `wasm_bindgen_futures::spawn_local` call
+/// outside a live Dioxus component scope (`events.rs::spawn_stream`, and
+/// every `subscribe_events` callback in `memory_editor.rs`, `working_bar.rs`,
+/// `approvals.rs`, `questions.rs`, `app.rs` - each fires from inside
+/// `events.rs::notify`, which is not a scope any of those files' own
+/// `use_effect`/event handlers own).
+///
+/// wasm32: `wasm_bindgen_futures::spawn_local`, unchanged - the browser's
+/// own microtask queue, entirely outside Dioxus's scheduler, which is
+/// exactly why it tolerates being called with no scope on the call stack
+/// (`working_bar.rs::reload`'s doc has the full story on what breaks
+/// without it: `dioxus::prelude::spawn` `.unwrap()`s an empty scope stack
+/// there and silently aborts the whole wasm instance).
+///
+/// native: [`dioxus::core::spawn_forever`], not `tokio::spawn` and not
+/// `dioxus::prelude::spawn` - neither of those two more obvious choices
+/// actually works here:
+/// - `tokio::spawn` requires `F: Send`. Proven by hand for this ticket:
+///   wiring one real call site (`working_bar.rs::reload`) through a
+///   `tokio::spawn`-backed probe and running `cargo check -p client` on
+///   native fails with "future cannot be sent between threads safely...
+///   has type `dioxus::prelude::Signal<String>` which is not `Send`" -
+///   every caller here captures at least one `Signal<T>`, and this crate's
+///   signals are all the default `UnsyncStorage` (thread-local
+///   `RefCell`-backed, see `generational_box::unsync`), never `SyncStorage`.
+///   Even a `Send`-coerced future would be wrong to actually move to a
+///   different OS thread - `UnsyncStorage`'s data lives in that specific
+///   thread's `thread_local!`, so reading a `Signal` from any other thread
+///   reads nothing there.
+/// - `dioxus::prelude::spawn` (what `events.rs::run()`'s native branch used
+///   before this ticket, for lack of an alternative) needs a live "current
+///   scope" the same way wasm's `spawn_local` callers avoid needing one -
+///   see this module's doc above. `spawn_forever` sidesteps that by
+///   targeting `ScopeId::ROOT` explicitly rather than whatever scope
+///   happens to be current, so every caller behaves the same regardless of
+///   which component's effect first called `subscribe_events`.
+#[cfg(target_arch = "wasm32")]
+pub fn spawn_task<F>(future: F)
+where
+    F: Future<Output = ()> + 'static,
+{
+    wasm_bindgen_futures::spawn_local(future);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn spawn_task<F>(future: F)
+where
+    F: Future<Output = ()> + 'static,
+{
+    dioxus::core::spawn_forever(future);
+}
+
+/// A portable debounce delay - S13a-01b's "pattern 3" twin of `spawn_task`
+/// above, for `routines_editor.rs`'s and `settings.rs`'s
+/// `gloo_timers::future::TimeoutFuture` debounces (`events.rs::run`'s own
+/// native reconnect backoff already went straight to `tokio::time::sleep`
+/// directly, before this ticket, since that call site never had a wasm
+/// counterpart to share a helper with).
+#[cfg(target_arch = "wasm32")]
+pub async fn sleep(ms: u32) {
+    gloo_timers::future::TimeoutFuture::new(ms).await;
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn sleep(ms: u32) {
+    tokio::time::sleep(std::time::Duration::from_millis(ms as u64)).await;
 }
 
 #[cfg(test)]

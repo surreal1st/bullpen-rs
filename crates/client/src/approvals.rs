@@ -130,18 +130,19 @@ pub fn Approvals() -> Element {
     let items = use_signal(Vec::<PendingApproval>::new);
 
     use_effect(move || {
-        wasm_bindgen_futures::spawn_local(reload(items));
+        crate::transport::spawn_task(reload(items));
     });
 
-    // 🔴 `wasm_bindgen_futures::spawn_local`, not `dioxus::prelude::spawn`:
-    // this runs from `events.rs`'s bare `spawn_local(run())` loop, which
-    // Dioxus never considers a "current scope" - see `working_bar.rs`'s
-    // `reload` for the exact failure this avoids (a silent wasm abort on
-    // the first "approvals" change).
+    // 🔴 `crate::transport::spawn_task`, not `dioxus::prelude::spawn`: this
+    // runs from `events.rs`'s bare `spawn_task(run())` loop, which Dioxus
+    // never considers a "current scope" - see `working_bar.rs`'s `reload`
+    // for the exact failure this avoids (a silent wasm abort on the first
+    // "approvals" change), and `transport/mod.rs`'s doc on `spawn_task` for
+    // why native needs a different escape hatch than wasm's `spawn_local`.
     let _events = use_signal(move || {
         subscribe_events(move |kind| {
             if kind == ChangeKind::Approvals {
-                wasm_bindgen_futures::spawn_local(reload(items));
+                crate::transport::spawn_task(reload(items));
             }
         })
     });

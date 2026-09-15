@@ -8,18 +8,11 @@ shared = { workspace = true }
 dioxus = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-# 🔴 S13a-01: still unconditional, NOT wasm32-gated as the ticket asked -
-# `api.rs` and `events.rs` no longer call either directly (both now go
-# through `transport::Request`/`Response`, see that module's doc), but
-# `app.rs:31`, `routines_editor.rs:40`, `settings.rs:16` and
-# `slack_card.rs:27` still do, unconditionally, and none of those four
-# files are S13a-01's to touch (per the ticket's own "one owner per file"
-# rule and this ticket's explicit STOP-and-tell-the-orchestrator
-# instruction for exactly this case). Gating these to wasm32 here breaks
-# `cargo check -p client` on native for all four - confirmed by actually
-# doing it and reading the compiler's errors, then reverting. Flagged in
-# this ticket's `## Results` for whoever picks up the rest of the
-# dependency cleanup once those four are routed through `transport` too.
+# S13a-01b: `memory_editor.rs::format_ttl`, `routines_editor.rs::format_when`
+# (no locale dependency, so one implementation on both platforms) and
+# `message_time.rs`'s native half (`message_time/native.rs`, which does
+# split on platform - see that module's doc).
+chrono = { workspace = true }
 # S1-07a: `StreamExt` for the eventsource stream in events.rs. Already a
 # workspace dependency (server-side); reused here rather than adding a
 # second futures-utility crate.
@@ -38,7 +31,14 @@ pulldown-cmark = "0.13"
 # S5b-07: `Window`/`Navigator`/`Clipboard` - the "Copy secret"/"Copy URL"
 # buttons on a freshly minted webhook secret (`routines_editor.rs::
 # copy_to_clipboard`) call `navigator.clipboard.writeText`, each type gated
-# behind its own web-sys feature.
+# behind its own web-sys feature. 🔴 S13a-01b: still unconditional, and
+# `copy_to_clipboard` itself is still unguarded by any `#[cfg]` - out of
+# this ticket's three named patterns (spawn/dates/gloo), found while
+# reading `routines_editor.rs` for its `Date` fix, not fixed here. On
+# native it compiles (`web-sys` builds off wasm32 the same way `js-sys`
+# does) but `web_sys::window()` returns `None` there at runtime, so the
+# button silently does nothing on desktop instead of copying - flagged in
+# this ticket's `## Results` for a follow-up.
 web-sys = { version = "0.3", features = [
     "ReadableStreamDefaultReader",
     "RequestCredentials",
@@ -48,13 +48,22 @@ web-sys = { version = "0.3", features = [
 ] }
 js-sys = "0.3"
 wasm-bindgen = "0.2"
-wasm-bindgen-futures = "0.4"
-# S13a-01: kept here, unconditional, alongside the other browser-only
-# crates above - see the 🔴 note on `futures` for why these did not move to
-# a `[target.'cfg(target_arch = "wasm32")'.dependencies]` section the way
-# the ticket asked.
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# S13a-01 named these for wasm32-only gating and found (by hand) that
+# `app.rs`, `routines_editor.rs`, `settings.rs` and `slack_card.rs` still
+# called them unconditionally, so gating broke native `cargo check` with 4
+# errors - see that ticket's `## Results`. S13a-01b routed all four (plus
+# `events.rs`'s task-spawning, `memory_editor.rs`/`working_bar.rs`/
+# `approvals.rs`/`questions.rs`'s `spawn_local`, and every `js_sys::Date`
+# call) through `transport`/`message_time`'s wasm32-vs-native split, so
+# these finally move here clean. **Bite**: reintroducing an unconditional
+# `gloo_net`/`gloo_timers` import into any native code path now fails
+# `cargo check -p client` with "can't find crate" (see this ticket's
+# `## Results` for the literal error) - that failure IS the seam.
 gloo-net = { version = "0.6", default-features = false, features = ["http", "json", "eventsource"] }
 gloo-timers = { version = "0.3", features = ["futures"] }
+wasm-bindgen-futures = "0.4"
 
 [features]
 default = ["web"]

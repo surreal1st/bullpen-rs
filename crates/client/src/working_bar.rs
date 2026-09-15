@@ -33,22 +33,24 @@ pub fn WorkingBar(
     // change. All three captured signals are `Copy`, so this closure is
     // `Copy` too and can be handed to both call sites without cloning.
     //
-    // 🔴 `wasm_bindgen_futures::spawn_local`, not `dioxus::prelude::spawn`:
-    // the second call site is `subscribe_events`'s callback (below), fired
-    // from `events.rs`'s bare `wasm_bindgen_futures::spawn_local(run())`
-    // loop - nothing Dioxus ever considers a "current scope". `spawn()`
-    // reads that scope via `Runtime::current_scope_id()`, which `.unwrap()`s
-    // an empty stack there and aborts the whole wasm instance on the very
-    // first "working" event, silently - no panic message reaches the
-    // console (this is what the bug that failed acceptance 3 turned out to
-    // be: found by instrumenting this exact call with `console::log_1` and
-    // watching the "before spawn" line never get an "inside" line after
-    // it). `spawn_local` has no such requirement; the tradeoff is that a
-    // fetch in flight is not auto-cancelled if this component unmounts
-    // first, same as `events.rs`'s own `run()` loop already accepts.
+    // 🔴 `crate::transport::spawn_task`, not `dioxus::prelude::spawn`: the
+    // second call site is `subscribe_events`'s callback (below), fired from
+    // `events.rs`'s bare `spawn_task(run())` loop - nothing Dioxus ever
+    // considers a "current scope". `spawn()` reads that scope via
+    // `Runtime::current_scope_id()`, which `.unwrap()`s an empty stack there
+    // and aborts the whole wasm instance on the very first "working" event,
+    // silently - no panic message reaches the console (this is what the bug
+    // that failed acceptance 3 turned out to be: found by instrumenting this
+    // exact call with `console::log_1` and watching the "before spawn" line
+    // never get an "inside" line after it). `spawn_task` has no such
+    // requirement on either platform - see its doc in `transport/mod.rs` for
+    // why native needs a different escape hatch than wasm's `spawn_local`.
+    // The tradeoff is that a fetch in flight is not auto-cancelled if this
+    // component unmounts first, same as `events.rs`'s own `run()` loop
+    // already accepts.
     let reload = move || {
         let id = conversation_id.peek().clone();
-        wasm_bindgen_futures::spawn_local(async move {
+        crate::transport::spawn_task(async move {
             let Some(id) = id else {
                 if *last.peek() != "[]" {
                     last.set("[]".to_string());

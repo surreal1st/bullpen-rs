@@ -35,13 +35,12 @@
 //! persisted).
 
 use crate::api;
+use crate::transport::sleep;
 use crate::types::{Routine, RoutineRun};
+use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
-use gloo_timers::future::TimeoutFuture;
-use js_sys::Date;
 use std::cell::Cell;
 use std::rc::Rc;
-use wasm_bindgen::JsValue;
 
 /// The hook kinds a routine's webhook can verify against - same four named
 /// services plus "raw" (bearer-token) that `routes/hooks.rs::post_webhook`
@@ -178,7 +177,7 @@ pub fn RoutinesEditor(bot_id: String) -> Element {
         new_gen.set(my_gen);
         let new_gen = new_gen.clone();
         spawn(async move {
-            TimeoutFuture::new(300).await;
+            sleep(300).await;
             if new_gen.get() != my_gen {
                 return;
             }
@@ -209,7 +208,7 @@ pub fn RoutinesEditor(bot_id: String) -> Element {
         edit_gen.set(my_gen);
         let edit_gen = edit_gen.clone();
         spawn(async move {
-            TimeoutFuture::new(300).await;
+            sleep(300).await;
             if edit_gen.get() != my_gen {
                 return;
             }
@@ -968,19 +967,17 @@ async fn run_now(id: String, mut run_status: Signal<Option<(String, String)>>) {
 }
 
 /// "in 5m" / "3h ago" / "never" - port of `RoutinesEditor.tsx`'s own
-/// `formatWhen`. Built on `js_sys::Date` rather than `chrono` (the client
-/// crate has no `chrono` dependency - see its `Cargo.toml`), same choice
-/// `message_time.rs` already made for message timestamps; like that
-/// module, this only meaningfully runs in a browser.
+/// `formatWhen`. S13a-01b: was `js_sys::Date` - like `memory_editor.rs`'s
+/// `format_ttl`, this has no locale dependency (plain English, "5m"/"3h"),
+/// so it is `chrono` unconditionally rather than a wasm/native split.
 fn format_when(iso: Option<&str>) -> String {
     let Some(iso) = iso else {
         return "never".to_string();
     };
-    let then = Date::new(&JsValue::from_str(iso));
-    if then.get_time().is_nan() {
+    let Ok(then) = DateTime::parse_from_rfc3339(iso) else {
         return "never".to_string();
-    }
-    let diff_ms = then.get_time() - Date::now();
+    };
+    let diff_ms = (then.timestamp_millis() - Utc::now().timestamp_millis()) as f64;
     let mins = (diff_ms.abs() / 60_000.0).round() as i64;
     let phrase = if mins < 1 {
         "now".to_string()

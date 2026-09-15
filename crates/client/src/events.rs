@@ -31,11 +31,18 @@
 //! `data: ...` line to the same `parse_change` both platforms share. 🔴
 //! Unverified at runtime - `subscribe_events` still has no caller (see
 //! above), so the native half has only been proven by `cargo check`, not by
-//! a real desktop build; whichever ticket wires the first native subscriber
-//! should give it a real look, in particular whether `dioxus::prelude::spawn`
-//! (used here in place of wasm's `wasm_bindgen_futures::spawn_local`, which
-//! does not exist off wasm32) is being called from a live component scope
-//! every time `subscribe_events` is.
+//! a real desktop build.
+//!
+//! S13a-01b: `spawn_stream` (below) used to pick between
+//! `wasm_bindgen_futures::spawn_local(run())` and `dioxus::prelude::spawn(run())`
+//! by hand behind its own `#[cfg]`. The native half of that was exactly the
+//! open question this doc used to end on - whether `dioxus::prelude::spawn`
+//! sees a live scope every time `subscribe_events` does - and the answer
+//! turned out to be "sometimes, and even when it does it is the wrong
+//! scope" (`transport/mod.rs::spawn_task`'s doc has the full reasoning).
+//! `spawn_stream` now just calls `crate::transport::spawn_task(run())`,
+//! which resolves that question for every platform at once by not depending
+//! on scope at all.
 
 #![allow(dead_code)]
 
@@ -138,14 +145,13 @@ pub fn subscribe_events(on_change: impl Fn(ChangeKind) + 'static) -> EventsHandl
     EventsHandle { id }
 }
 
-#[cfg(target_arch = "wasm32")]
+/// S13a-01b: portable across both platforms via `spawn_task` - see this
+/// module's top doc and `transport/mod.rs::spawn_task`'s own doc for why
+/// neither `wasm_bindgen_futures::spawn_local` directly nor
+/// `dioxus::prelude::spawn` directly is the right call here on every
+/// target.
 fn spawn_stream() {
-    wasm_bindgen_futures::spawn_local(run());
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn spawn_stream() {
-    dioxus::prelude::spawn(run());
+    crate::transport::spawn_task(run());
 }
 
 #[cfg(target_arch = "wasm32")]
