@@ -280,3 +280,97 @@ async fn accept_and_route_leaves_a_plain_get_to_a_viewer_path_alone() {
         "a non-upgrade request to a viewer path must still pass through"
     );
 }
+
+/// S6-R **F1**: an accept error must not end the serve loop.
+///
+/// The first version of `serve` wrote `listener.accept().await?`, and
+/// `main.rs` wraps the call in `.expect("serve")` - so one `ECONNABORTED`
+/// from a client that vanished between the SYN and the accept killed the
+/// whole server, and the systemd unit's `Restart=on-failure` with no
+/// `StartLimit` override would park it in `failed` after five of those in
+/// ten seconds.
+///
+/// Two worlds, and the observable that separates them: with the guard, a
+/// connection made AFTER an accept error is still served; without it,
+/// `serve` has already returned and nothing is listening. Forcing a real
+/// `ECONNABORTED` out of the OS is not portable, which is why `serve` takes
+/// an `Accepter` - this fake yields two errors of each class first, then
+/// delegates to a real listener.
+struct FlakyAccepter {
+    errors: Vec<std::io::ErrorKind>,
+    inner: tokio::net::TcpListener,
+}
+
+impl server::vm_proxy::Accepter for FlakyAccepter {
+    async fn accept(&mut self) -> std::io::Result<(tokio::net::TcpStream, std::net::SocketAddr)> {
+        if !self.errors.is_empty() {
+            let kind = self.errors.remove(0);
+            return Err(std::io::Error::new(kind, "injected by FlakyAccepter"));
+        }
+        self.inner.accept().await
+    }
+}
+
+#[tokio::test]
+async fn an_accept_error_does_not_end_the_serve_loop() {
+    use tokio::io::AsyncWriteExt;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+
+    let flaky = FlakyAccepter {
+        // One the loop retries immediately, one it logs and sleeps on.
+        errors: vec![
+            std::io::ErrorKind::ConnectionAborted,
+            std::io::ErrorKind::PermissionDenied,
+        ],
+        inner: listener,
+    };
+
+    let app = axum::Router::new().route("/", axum::routing::get(|| async { "ok" }));
+    let db = std::sync::Arc::new(std::sync::Mutex::new(
+        store::Db::open(":memory:").expect("open :memory:"),
+    ));
+
+    let server =
+        tokio::spawn(
+            async move { server::vm_proxy::serve_with_accepter(flaky, app, db, false).await },
+        );
+
+    // The loop sleeps 1s on the non-connection error, so give it room.
+    let mut stream = None;
+    for _ in 0..40 {
+        if let Ok(s) = tokio::net::TcpStream::connect(addr).await {
+            stream = Some(s);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let mut stream = stream.expect(
+        "after two injected accept errors the loop must still be accepting - \
+         with `accept().await?` it has already returned and nothing is listening",
+    );
+
+    stream
+        .write_all(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .await
+        .expect("write request");
+    let mut response = Vec::new();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut response),
+    )
+    .await
+    .expect("timed out reading the response")
+    .expect("read response");
+
+    let text = String::from_utf8_lossy(&response);
+    assert!(
+        text.starts_with("HTTP/1.1 200"),
+        "the connection after the injected accept errors must be served normally, got: {text:?}"
+    );
+
+    server.abort();
+}

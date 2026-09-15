@@ -609,20 +609,81 @@ where
 /// (identical routing/refusal logic, minus the lock-scoping this function
 /// exists to get right) is green against both bites. The meridian smoke
 /// test is still the only proof a real socket makes it through.
+/// 🔴 An accept error NEVER ends this loop (S6-R F1). The first version
+/// wrote `listener.accept().await?`, and `main.rs` wraps this in
+/// `.expect("serve")` - so one `ECONNABORTED` from a client that vanished
+/// between the SYN and the accept took the whole server down. `axum::serve`
+/// does not do that (`axum/src/serve/listener.rs`, `handle_accept_error`):
+/// a per-connection error is retried immediately, and anything else is
+/// logged and slept on so a persistent failure (out of file descriptors)
+/// cannot spin the CPU. This mirrors that, and `egress_proxy.rs`'s own
+/// accept loop already did the same thing.
+///
+/// It matters more here than it looks: the systemd unit is
+/// `Restart=on-failure` with `RestartSec=2` and no `StartLimit` override,
+/// so five panics inside ten seconds leave the service `failed` until
+/// somebody runs `systemctl reset-failed` by hand.
 pub async fn serve(
     listener: tokio::net::TcpListener,
     app: axum::Router,
     db: Arc<Mutex<Db>>,
     require_auth: bool,
 ) -> std::io::Result<()> {
+    serve_with_accepter(listener, app, db, require_auth).await
+}
+
+/// What `serve` accepts from. Exists so a test can hand the loop a stream
+/// of accept ERRORS before a real connection: forcing a genuine
+/// `ECONNABORTED` out of the OS is not portable, and F1 was a bug about
+/// what the loop does with one.
+pub trait Accepter: Send + 'static {
+    fn accept(
+        &mut self,
+    ) -> impl std::future::Future<
+        Output = std::io::Result<(tokio::net::TcpStream, std::net::SocketAddr)>,
+    > + Send;
+}
+
+impl Accepter for tokio::net::TcpListener {
+    async fn accept(&mut self) -> std::io::Result<(tokio::net::TcpStream, std::net::SocketAddr)> {
+        tokio::net::TcpListener::accept(self).await
+    }
+}
+
+pub async fn serve_with_accepter<A: Accepter>(
+    mut listener: A,
+    app: axum::Router,
+    db: Arc<Mutex<Db>>,
+    require_auth: bool,
+) -> std::io::Result<()> {
     loop {
-        let (stream, _addr) = listener.accept().await?;
+        let (stream, _addr) = match listener.accept().await {
+            Ok(accepted) => accepted,
+            Err(err) if is_connection_error(&err) => continue,
+            Err(err) => {
+                tracing::warn!(%err, "accept failed; retrying");
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                continue;
+            }
+        };
         let app = app.clone();
         let db = Arc::clone(&db);
         tokio::spawn(async move {
             route_one_connection(stream, app, db, require_auth).await;
         });
     }
+}
+
+/// The errors that belong to the connection that just died, not to the
+/// listener - retry these immediately rather than sleeping. Same set
+/// `axum::serve` treats this way.
+fn is_connection_error(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::ConnectionRefused
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::ConnectionReset
+    )
 }
 
 async fn route_one_connection(
