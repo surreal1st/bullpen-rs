@@ -35,12 +35,25 @@ use store::{
     create_routine, delete_routine, list_routines, routine_runs, set_routine_active, update_routine,
 };
 
-/// Validates tool_args: must be a JSON OBJECT, never array or primitive.
-/// Empty or missing input becomes `{}`. Returns normalized JSON string or error.
+/// Validates `tool` against the toolbox and `tool_args` as a JSON OBJECT,
+/// never array or primitive. Empty or missing args becomes `{}`. Returns
+/// normalized JSON string or error. Runs on both POST and PATCH, so this
+/// one function is F1's save-time gate for both.
 fn validate_tool_kind(tool: Option<&str>, tool_args: Option<&str>) -> Result<String, String> {
     let name = tool.unwrap_or("").trim();
     if name.is_empty() {
         return Err("Give the routine a tool to run.".to_string());
+    }
+
+    // F1: refuse a name the toolbox does not have AT SAVE TIME, not merely
+    // at fire time hours later - `crate::tools::known_tool_names` is
+    // `tools::build`'s own spec list, so a tool added there becomes valid
+    // here automatically, with no second list to keep in sync.
+    if !crate::tools::known_tool_names()
+        .iter()
+        .any(|known| known == name)
+    {
+        return Err(format!("Bullpen has no tool called {name}."));
     }
 
     let text = tool_args.unwrap_or("").trim();

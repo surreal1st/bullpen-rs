@@ -29,7 +29,7 @@ use model::ladder::Trigger;
 use model::{ModelPort, ModelUsage, ToolSpec};
 use store::Db;
 
-use crate::permissions::{Decision, Permissions};
+use crate::permissions::{Decision, Permissions, always_on_set};
 use crate::sandbox::Sandbox;
 
 /// S6L-02: wraps a `shell`/`sandbox_read` result the same way `rules.rs`
@@ -133,6 +133,56 @@ pub struct BuildParams {
     pub perms: Permissions,
     /// S6L-02: what `shell`/`sandbox_read` actually run against.
     pub sandbox: Arc<dyn Sandbox>,
+    /// F3 (`reviews/S5b-R.md`): narrows the offered specs to `always_on_set()
+    /// ∪ only` when `Some` - port of the TS `app.ts:5783` narrowing a
+    /// routine's phrasing turn passes `tools: []` into (ALWAYS_ON only,
+    /// TS `runs.ts:908-910`'s own comment: *"the model can say something,
+    /// not run anything"*). `None` (an ordinary chat/room/goal turn, or a
+    /// tool-kind routine's own direct tool call) offers the full box,
+    /// same as before this field existed.
+    pub only: Option<Vec<String>>,
+}
+
+/// F1: the full spec list this crate's toolbox can offer, before either
+/// the `deny` filter or the `only` narrowing `build` applies - the ONE
+/// source both `build` and `known_tool_names` read from, so a tool added
+/// here becomes valid (and offerable) everywhere at once instead of
+/// requiring a second list kept in sync by hand.
+fn all_specs() -> Vec<ToolSpec> {
+    vec![
+        say::spec(),
+        ask_josh::spec(),
+        remember::spec(),
+        note::spec(),
+        remember_shared::spec(),
+        project_remember::spec(),
+        search_memory::spec(),
+        message_bot::spec(),
+        create_room::spec(),
+        add_to_room::spec(),
+        shell::spec(),
+        read_file::spec(),
+        escalate::spec(),
+    ]
+}
+
+/// F1: the toolbox's known tool names - what `validate_tool_kind`
+/// (`routes/routines.rs`, save time) and `fire_routine_tool`
+/// (`routines.rs`, fire time) both refuse anything outside of. Before this
+/// existed, an unknown name (`fetch_url`: on the TS tool catalog, never
+/// ported) had no gate anywhere: it sailed through the permission map
+/// (which carries the full ~60-name TS list, not just this toolbox's 13),
+/// fell off `build`'s dispatch `match` to the `Unknown tool: {name}"`
+/// fallback below, and THAT string read back as a successful find.
+///
+/// `Vec<String>`, not `&'static str`: `ToolSpec::name` (`model::ToolSpec`)
+/// is an owned `String` built fresh by each `xxx::spec()` call, so there is
+/// no `'static` slice this could hand back without leaking one per call. A
+/// caller only ever needs `.contains`/`.iter().any` against the result,
+/// which costs nothing extra as owned strings - noted here as a deviation
+/// from the ticket's literal `Vec<&'static str>` signature.
+pub fn known_tool_names() -> Vec<String> {
+    all_specs().into_iter().map(|spec| spec.name).collect()
 }
 
 /// Builds the S1 toolbox for one bot's run. F2: `trigger`/`room` are the
@@ -153,30 +203,28 @@ pub fn build(params: BuildParams) -> ToolBox {
     let changes = params.changes;
     let perms = params.perms;
     let sandbox = params.sandbox;
+    let only = params.only;
+    // F3: `always_on_set()` rides through any `only` narrowing whatever it
+    // says (TS `app.ts:5783`) - a routine's phrasing turn narrowed to `[]`
+    // must still be able to say something or ask Josh a question, not lose
+    // its voice along with the tools it was never meant to call unattended.
+    let always_on = always_on_set();
     // A-F6: a `deny`d tool is dropped from the offered list rather than
     // offered and refused after the fact - a name absent from `perms`
     // entirely (no row at all) is kept here, same as TS's `!== "deny"`
     // filter; `runs.rs`'s tool loop is what fails a truly unrecognised
     // name closed, by checking THIS list rather than the permission map
     // alone.
-    let specs: Vec<ToolSpec> = vec![
-        say::spec(),
-        ask_josh::spec(),
-        remember::spec(),
-        note::spec(),
-        remember_shared::spec(),
-        project_remember::spec(),
-        search_memory::spec(),
-        message_bot::spec(),
-        create_room::spec(),
-        add_to_room::spec(),
-        shell::spec(),
-        read_file::spec(),
-        escalate::spec(),
-    ]
-    .into_iter()
-    .filter(|spec| perms.get(spec.name.as_str()).copied() != Some(Decision::Deny))
-    .collect();
+    let specs: Vec<ToolSpec> = all_specs()
+        .into_iter()
+        .filter(|spec| perms.get(spec.name.as_str()).copied() != Some(Decision::Deny))
+        .filter(|spec| match &only {
+            None => true,
+            Some(allowed) => {
+                always_on.contains(&spec.name.as_str()) || allowed.iter().any(|n| n == &spec.name)
+            }
+        })
+        .collect();
 
     let current_model = Arc::new(Mutex::new(initial_model.to_string()));
     let escalated: Arc<Mutex<Option<escalate::Climb>>> = Arc::new(Mutex::new(None));

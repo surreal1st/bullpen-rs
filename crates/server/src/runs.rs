@@ -97,8 +97,11 @@ pub enum RunEvent {
 }
 
 /// What starts a run. Port of the TS `StartOptions`, narrowed to S1: no
-/// `notice`, `routineId`, `goalId` or tool-narrowing - those belong to
-/// routines/goals, which are out of scope here.
+/// `notice`, `routineId`, `goalId` or tool-narrowing field here - a
+/// routine's `routineId` is stamped by `start_routine`/
+/// `start_routine_narrowed` instead of a field on this struct (see
+/// `start_routine`'s doc for why: 13 struct-literal call sites), and F3's
+/// tool-narrowing is the same shape, via `start_routine_narrowed`.
 pub struct StartOptions {
     pub bot_id: String,
     pub conversation_id: String,
@@ -113,6 +116,24 @@ pub struct StartOptions {
     /// (see `model::ladder::model_for_run`'s doc) without changing the
     /// trigger - a room round is still `Trigger::Chat`.
     pub room: bool,
+}
+
+/// F2: what `RunManager::record_tool_run` writes - port of the TS
+/// `recordToolRun` params (`runs.ts:411-450`). One of these is written on
+/// EVERY branch of `fire_routine_tool` (`routines.rs`), refused/unknown/
+/// bad-args/quiet/found alike, so "Recent runs" (`routines_editor.rs:550`)
+/// is never empty for a tool routine that has actually fired and the
+/// 3-strikes auto-pause has failures to count on a path that used to
+/// record nothing at all.
+pub struct RecordToolRun {
+    pub bot_id: String,
+    pub conversation_id: String,
+    pub routine_id: String,
+    pub tool: String,
+    pub args: String,
+    pub result: String,
+    pub ok: bool,
+    pub error: Option<String>,
 }
 
 #[derive(Clone, Default, PartialEq)]
@@ -314,7 +335,7 @@ impl RunManager {
     /// `start`, minus the `notice`/routing/snapshot legwork out of scope for
     /// S1.
     pub fn start(self: &Arc<Self>, options: StartOptions) -> String {
-        self.start_inner(options, None, None)
+        self.start_inner(options, None, None, None)
     }
 
     /// S5-03: same as `start`, but stamps the run row's `routine_id` column
@@ -336,7 +357,26 @@ impl RunManager {
     ///    `INSERT` that creates the row is the only way to make that race
     ///    impossible rather than merely unlikely.
     pub fn start_routine(self: &Arc<Self>, options: StartOptions, routine_id: String) -> String {
-        self.start_inner(options, None, Some(routine_id))
+        self.start_inner(options, None, Some(routine_id), None)
+    }
+
+    /// F3: same as `start_routine`, but narrows the run's toolbox to
+    /// `always_on_set() ∪ only` - port of the TS `tools: []` a tool-kind
+    /// routine's phrasing turn passes into `runs.start` (`routines.
+    /// ts:908-910`, `[] narrows to ALWAYS_ON: the model can say something,
+    /// not run anything`). A second entry point rather than a
+    /// `StartOptions` field for the same reason `start_routine` itself is
+    /// one (see its doc): `only` is persisted on the run row's `tools`
+    /// column here, inside the same INSERT `start_inner` already does for
+    /// `routine_id`, so the race that doc explains cannot reopen for this
+    /// field either.
+    pub fn start_routine_narrowed(
+        self: &Arc<Self>,
+        options: StartOptions,
+        routine_id: String,
+        only: Vec<String>,
+    ) -> String {
+        self.start_inner(options, None, Some(routine_id), Some(only))
     }
 
     /// S2-F-04: same as `start`, but with a notice emitted BEFORE the
@@ -354,7 +394,7 @@ impl RunManager {
         options: StartOptions,
         starting_notice: Option<String>,
     ) -> String {
-        self.start_inner(options, starting_notice, None)
+        self.start_inner(options, starting_notice, None, None)
     }
 
     fn start_inner(
@@ -362,6 +402,13 @@ impl RunManager {
         options: StartOptions,
         starting_notice: Option<String>,
         routine_id: Option<String>,
+        // F3: `Some(vec![])` (or any narrower-than-full list) persisted onto
+        // the run row's `tools` column below, in the same INSERT - see
+        // `start_routine_narrowed`'s doc for why this is an added
+        // `start_inner` param and not a `StartOptions` field. Read back by
+        // `decide_approval`'s two `toolbox_for` call sites so a resumed run
+        // keeps whatever narrowing it started with.
+        only: Option<Vec<String>>,
     ) -> String {
         let id = Uuid::new_v4().to_string();
         let now = now_iso();
@@ -377,11 +424,18 @@ impl RunManager {
             "[]".to_string()
         });
 
+        let tools_json = only.as_ref().map(|names| {
+            serde_json::to_string(names).unwrap_or_else(|err| {
+                tracing::error!("run {id}: failed to serialize tool narrowing: {err}");
+                "[]".to_string()
+            })
+        });
+
         let inserted = {
             let db = self.db();
             db.conn().execute(
-                "INSERT INTO runs (id, bot_id, conversation_id, trigger, status, model, messages, text, created_at, updated_at, routine_id)
-                 VALUES (?1, ?2, ?3, ?4, 'running', ?5, ?6, '', ?7, ?8, ?9)",
+                "INSERT INTO runs (id, bot_id, conversation_id, trigger, status, model, messages, text, created_at, updated_at, routine_id, tools)
+                 VALUES (?1, ?2, ?3, ?4, 'running', ?5, ?6, '', ?7, ?8, ?9, ?10)",
                 rusqlite::params![
                     id,
                     options.bot_id,
@@ -392,6 +446,7 @@ impl RunManager {
                     now,
                     now,
                     routine_id,
+                    tools_json,
                 ],
             )
         };
@@ -435,7 +490,15 @@ impl RunManager {
         let messages = options.messages;
         tokio::spawn(async move {
             manager
-                .drive(run_id, bot_id, conversation_id, model, messages, floor)
+                .drive(
+                    run_id,
+                    bot_id,
+                    conversation_id,
+                    model,
+                    messages,
+                    floor,
+                    only,
+                )
                 .await;
         });
 
@@ -616,12 +679,16 @@ impl RunManager {
     /// pin. S2-04: `model` seeds the toolbox's own idea of "what model is
     /// this run on right now", which only the `escalate` tool ever reads or
     /// writes - see `tools::build`'s doc. S5b: public for tool-kind routines.
+    /// F3: `only` narrows the offered specs to `always_on_set() ∪ only`
+    /// when `Some` (`tools::build`'s own doc has the detail) - `None` for
+    /// every ordinary caller, same as before this param existed.
     pub fn toolbox_for(
         self: &Arc<Self>,
         bot_id: &str,
         trigger: Trigger,
         room: bool,
         model: &str,
+        only: Option<Vec<String>>,
     ) -> ToolBox {
         // A-F6: the same `permissions_for_run` resolution `run_turn` does
         // for its own decision loop, so the spec list offered and the
@@ -641,9 +708,56 @@ impl RunManager {
             changes: self.changes.clone(),
             perms,
             sandbox: Arc::clone(&self.sandbox),
+            only,
         })
     }
 
+    /// F2: writes a real `runs` row for a tool-kind routine's firing - port
+    /// of the TS `recordToolRun` (`runs.ts:411-450`). `trigger` is always
+    /// `'routine'`, `model` the same cheap floor an ordinary routine fires
+    /// on (`model::ladder::safe_fallback`, computed here rather than taken
+    /// as a param - every caller in `fire_routine_tool` would otherwise
+    /// have to carry it through four near-identical call sites for no
+    /// reason), `messages` is `'[]'` (there is no model turn on this row -
+    /// the tool ran directly), `text` is the tool's own result, and `tools`
+    /// is `["<tool>"]` - what actually RAN, not an ALWAYS_ON narrowing
+    /// (contrast `start_inner`'s `tools` column, which is a MODEL run's
+    /// permitted list). Returns the new run id, same as `start`/
+    /// `start_routine` - `fire_routine_tool` returns it on every branch.
+    pub fn record_tool_run(&self, params: RecordToolRun) -> String {
+        let id = Uuid::new_v4().to_string();
+        let now = now_iso();
+        let model = {
+            let db = self.db();
+            model::ladder::safe_fallback(&db)
+        };
+        let status = if params.ok { "done" } else { "failed" };
+        let tools_json = serde_json::to_string(&[params.tool]).unwrap_or_else(|_| "[]".to_string());
+
+        let db = self.db();
+        if let Err(err) = db.conn().execute(
+            "INSERT INTO runs (id, bot_id, conversation_id, trigger, status, model, messages, text, error, created_at, updated_at, routine_id, tools)
+             VALUES (?1, ?2, ?3, 'routine', ?4, ?5, '[]', ?6, ?7, ?8, ?9, ?10, ?11)",
+            rusqlite::params![
+                id,
+                params.bot_id,
+                params.conversation_id,
+                status,
+                model,
+                params.result,
+                params.error,
+                now.clone(),
+                now,
+                params.routine_id,
+                tools_json,
+            ],
+        ) {
+            tracing::error!("record_tool_run {id}: failed to insert run row: {err}");
+        }
+        id
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn drive(
         self: Arc<Self>,
         run_id: String,
@@ -655,6 +769,14 @@ impl RunManager {
         // this stays under clippy's `too_many_arguments` - both are only
         // ever used together, threaded straight into the toolbox below.
         floor: (Trigger, bool),
+        // F3: this run's tool narrowing, read back from `start_inner`'s
+        // `only` param - `None` for everything but a narrowed routine
+        // phrasing run. Pushes this function to 8 args (self excluded, 7);
+        // `#[allow]` above rather than bundling into `floor` since `only`
+        // is not always used together with `(trigger, room)` the way those
+        // two are (`decide_approval`'s resume path reads `only` from a row,
+        // independent of the floor tuple).
+        only: Option<Vec<String>>,
     ) {
         let (trigger, room) = floor;
 
@@ -747,7 +869,7 @@ impl RunManager {
             }
         }
 
-        let toolbox = self.toolbox_for(&bot_id, trigger, room, &model);
+        let toolbox = self.toolbox_for(&bot_id, trigger, room, &model, only);
         let outcome = self
             .run_turn(
                 &run_id,
@@ -1834,13 +1956,14 @@ is looking at."
             i64,
             i64,
             String,
+            Option<String>,
         );
         let run: Option<RunRow> = {
             let db = self.db();
             db.conn()
                 .query_row(
                     "SELECT status, conversation_id, model, messages, text, steps,
-                            cost_usd, input_tokens, output_tokens, cached_tokens, trigger
+                            cost_usd, input_tokens, output_tokens, cached_tokens, trigger, tools
                        FROM runs WHERE id = ?1",
                     rusqlite::params![pending.run_id],
                     |row| {
@@ -1856,6 +1979,7 @@ is looking at."
                             row.get(8)?,
                             row.get(9)?,
                             row.get(10)?,
+                            row.get(11)?,
                         ))
                     },
                 )
@@ -1877,10 +2001,18 @@ is looking at."
             output_tokens,
             cached_tokens,
             trigger_str,
+            tools_json,
         )) = run
         else {
             return true;
         };
+        // F3: a resumed run keeps whatever narrowing it started with -
+        // read back from the SAME `tools` column `start_inner` wrote,
+        // rather than re-deriving it (there is nothing on `pending` to
+        // re-derive it FROM: an approval row has no `routine_id`).
+        let only: Option<Vec<String>> = tools_json
+            .as_deref()
+            .and_then(|text| serde_json::from_str(text).ok());
         // Approved or not, the decision is recorded above - a run that is
         // no longer `waiting` (raced, or its own row failed to save when it
         // parked) has nothing left here to resume.
@@ -1908,7 +2040,7 @@ is looking at."
         // resume is out of scope, and every case this ticket's tests
         // exercise is an ordinary chat turn, which `room: false` floors
         // exactly the same as `start` would have.
-        let toolbox = self.toolbox_for(&pending.bot_id, trigger, false, &model);
+        let toolbox = self.toolbox_for(&pending.bot_id, trigger, false, &model, only.clone());
 
         let resolved_usage = if approved {
             self.note(&pending.run_id, Some(call.name.clone()), false);
@@ -1989,7 +2121,7 @@ is looking at."
         let run_id = pending.run_id.clone();
         let bot_id = pending.bot_id.clone();
         tokio::spawn(async move {
-            let toolbox = manager.toolbox_for(&bot_id, trigger, false, &model);
+            let toolbox = manager.toolbox_for(&bot_id, trigger, false, &model, only);
             let outcome = manager
                 .run_turn(
                     &run_id,

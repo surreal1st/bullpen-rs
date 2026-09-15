@@ -38,9 +38,10 @@ use store::routines::RoutineRow;
 use crate::AppState;
 use crate::permissions;
 use crate::prompt::{self, HistoryTurn};
-use crate::runs::StartOptions;
+use crate::runs::{RecordToolRun, StartOptions};
 use crate::schedule::{self, Schedule};
 use crate::spend;
+use crate::tools;
 
 /// Why an absence pause says what it says, exact and public so a caller (a
 /// test, or the login route once it wires `resume_absence_paused` in) can
@@ -107,48 +108,151 @@ fn routine_row_by_id(db: &Db, id: &str) -> Option<RoutineRow> {
 
 /// S5b: Runs a "tool"-kind routine: executes the tool, then starts a model
 /// run ONLY if the tool found something worth reporting. Port of the TS
-/// `fireRoutine`'s tool branch (`routines.ts:809-878` scheduled,
-/// `:990-1030` run-now, merged here).
+/// `fireRoutine`'s tool branch (`routines.ts:809-916` scheduled, merged
+/// with the run-now caller in the same function per the TS source).
 ///
-/// Returns the run_id if a model run was started, None if the tool found nothing.
+/// F1/F2 (`reviews/S5b-R.md`): every exit below records a REAL `runs` row
+/// via `RunManager::record_tool_run` - permission-refused, unknown-name,
+/// bad-args, quiet, and found-something alike - where this used to be a
+/// bare `return None` on the first two and nothing at all tracking the
+/// third. That is what makes the 3-strikes auto-pause
+/// (`store::routines::record_routine_run`, unchanged, already worked)
+/// reachable from a tool routine at all, and what makes "Recent runs"
+/// show anything for one.
+///
+/// Returns `Some(run_id)` on EVERY branch - refused, unknown/bad-args,
+/// quiet, and found - `None` only when the bot row itself is gone
+/// underneath this call (a race with a delete; `run_routine_now`'s only
+/// caller already confirmed the bot exists moments before, so this is
+/// unreachable from there and purely defensive for `fire_due`'s scheduled
+/// sweep).
 async fn fire_routine_tool(state: &AppState, row: &RoutineRow) -> Option<String> {
-    let (bot_id, conversation_id, model, tool_name, tool_args) = {
+    let (bot_id, conversation_id, model, tool_name, tool_args_raw) = {
         let db = state.db();
         let bot = store::get_bot(&db, &row.bot_id).ok().flatten()?;
         let conversation_id = store::get_or_create_conversation(&db, &bot.id).ok()?;
         let model = model::ladder::safe_fallback(&db);
         let tool_name = row.tool.as_ref().cloned().unwrap_or_default();
-        let tool_args = row
+        let tool_args_raw = row
             .tool_args
             .as_ref()
             .cloned()
             .unwrap_or_else(|| "{}".to_string());
-        (bot.id.clone(), conversation_id, model, tool_name, tool_args)
+        (
+            bot.id.clone(),
+            conversation_id,
+            model,
+            tool_name,
+            tool_args_raw,
+        )
     };
 
-    // Check permissions
+    // Records the FAILURE branch: a failed `runs` row plus the routine's
+    // own health update, shared by every "cannot run" exit below.
+    let record_failure = |message: &str| -> String {
+        let run_id = state.runs.record_tool_run(RecordToolRun {
+            bot_id: bot_id.clone(),
+            conversation_id: conversation_id.clone(),
+            routine_id: row.id.clone(),
+            tool: tool_name.clone(),
+            args: tool_args_raw.clone(),
+            result: String::new(),
+            ok: false,
+            error: Some(message.to_string()),
+        });
+        let db = state.db();
+        let _ = store::routines::record_routine_run(&db, &row.id, false, Some(message));
+        run_id
+    };
+
+    // (a) Permission not Allow - port of the TS `perms[tool] !== "allow"`
+    // (`routines.ts:824`). Checked with whatever decision the tool NAME
+    // resolves to, known or not - matches TS, which has no separate
+    // unknown-name gate because its permission map IS the tool catalog.
     let perms = {
         let db = state.db();
         permissions::permissions_for_run(&db, &bot_id, Trigger::Routine).unwrap_or_default()
     };
-
     if !matches!(perms.get(&tool_name), Some(&permissions::Decision::Allow)) {
-        // Tool is not allowed - skip this routine
-        return None;
+        let run_id =
+            record_failure("This routine's tool needs approval, so it cannot run unattended.");
+        return Some(run_id);
     }
 
-    // Get toolbox and run the tool
+    // (b) F1: an unknown tool name - a row written before the save-time
+    // gate existed (`validate_tool_kind`, `routes/routines.rs`), or
+    // hand-edited, must not reach `toolbox.run`'s `Unknown tool: {name}`
+    // fallback (`tools/mod.rs`), which used to read back as a FOUND
+    // result and bill a real model call to report failure. This is the
+    // bug F1 names: `fetch_url` carries a default `Allow` decision (the
+    // permission map is the full ~60-name TS catalog, not this toolbox's
+    // 13), so the check above alone does not catch it.
+    if !tools::known_tool_names()
+        .iter()
+        .any(|name| name == &tool_name)
+    {
+        let run_id = record_failure(&format!("Bullpen has no tool called {tool_name}."));
+        return Some(run_id);
+    }
+
+    // (b) F2: `tool_args` must parse as a JSON object before it reaches
+    // the toolbox - port of the TS `JSON.parse(argsText)` wrapped in
+    // `fireRoutine`'s own try/catch (`routines.ts:846-864`), which records
+    // a failure on a throw instead of running the tool on garbage input or
+    // treating the raw string as a find. Save-time validation
+    // (`validate_tool_kind`) already guarantees a freshly-saved row cannot
+    // reach here with bad args; this is defense for a legacy or
+    // hand-edited row, same reasoning as (b) above.
+    let args_ok = serde_json::from_str::<serde_json::Value>(&tool_args_raw)
+        .map(|v| v.is_object())
+        .unwrap_or(false);
+    if !args_ok {
+        let run_id = record_failure("tool arguments must be a JSON object");
+        return Some(run_id);
+    }
+
+    // The tool call itself gets the FULL toolbox (`only: None`) - F3's
+    // narrowing to ALWAYS_ON applies only to the PHRASING run below, which
+    // is a MODEL turn; this is the routine calling its own tool directly.
     let toolbox = state
         .runs
-        .toolbox_for(&bot_id, Trigger::Routine, false, &model);
-    let (result, _usage) = toolbox.run(&tool_name, &tool_args).await;
+        .toolbox_for(&bot_id, Trigger::Routine, false, &model, None);
+    let (result, _usage) = toolbox.run(&tool_name, &tool_args_raw).await;
 
-    // Check if the tool found nothing
+    // (c) Nothing worth reporting - record an OK tool run and an OK health
+    // update, but no model turn (TS `runFoundNothing`, `routines.ts:866`).
     if tool_found_nothing(&result) {
-        return None;
+        let run_id = state.runs.record_tool_run(RecordToolRun {
+            bot_id: bot_id.clone(),
+            conversation_id: conversation_id.clone(),
+            routine_id: row.id.clone(),
+            tool: tool_name.clone(),
+            args: tool_args_raw.clone(),
+            result,
+            ok: true,
+            error: None,
+        });
+        let db = state.db();
+        let _ = store::routines::record_routine_run(&db, &row.id, true, None);
+        return Some(run_id);
     }
 
-    // Tool found something - start a model run to phrase it
+    // (d) Found something - record the tool run for history FIRST (TS does
+    // the same: `recordToolRun` before `appendMessage`/`runs.start`,
+    // `routines.ts:882-897`), then start the phrasing run. That run's OWN
+    // health update happens when IT settles (`RunManager::settle`, already
+    // wired to a run's `routine_id`) - not duplicated here.
+    let _ = state.runs.record_tool_run(RecordToolRun {
+        bot_id: bot_id.clone(),
+        conversation_id: conversation_id.clone(),
+        routine_id: row.id.clone(),
+        tool: tool_name.clone(),
+        args: tool_args_raw.clone(),
+        result: result.clone(),
+        ok: true,
+        error: None,
+    });
+
     let (new_bot_id, new_conversation_id, new_model, new_messages) = {
         let db = state.db();
         let bot = store::get_bot(&db, &bot_id).ok().flatten()?;
@@ -174,7 +278,10 @@ async fn fire_routine_tool(state: &AppState, row: &RoutineRow) -> Option<String>
         )
     };
 
-    Some(state.runs.start_routine(
+    // F3: `vec![]` narrows the phrasing run to ALWAYS_ON only - port of
+    // the TS `tools: []` (`routines.ts:908-910`), whose own comment says
+    // why: "the model can say something, not run anything."
+    Some(state.runs.start_routine_narrowed(
         StartOptions {
             bot_id: new_bot_id,
             conversation_id: new_conversation_id,
@@ -184,6 +291,7 @@ async fn fire_routine_tool(state: &AppState, row: &RoutineRow) -> Option<String>
             room: false,
         },
         row.id.clone(),
+        vec![],
     ))
 }
 
@@ -282,10 +390,17 @@ pub async fn run_routine_now(state: &AppState, id: &str) -> Result<String, Strin
         return Err("no such bot".to_string());
     }
     if row.kind == "tool" {
-        // S5b: run the tool and start a model run if it found something
+        // F9: `fire_routine_tool` now records a real run and returns
+        // `Some(run_id)` on every branch - refused, unknown/bad-args,
+        // quiet, and found alike (F1/F2) - so a check that correctly
+        // found nothing (or was correctly refused) no longer maps to the
+        // generic "could not start" 400 `routes/routines.rs` paints red
+        // under the row. `None` here means the bot row vanished out from
+        // under a call this function already confirmed had one - see
+        // `fire_routine_tool`'s own doc.
         fire_routine_tool(state, &row)
             .await
-            .ok_or_else(|| "could not start".to_string())
+            .ok_or_else(|| "no such bot".to_string())
     } else {
         fire_routine(state, &row, "").ok_or_else(|| "could not start".to_string())
     }
