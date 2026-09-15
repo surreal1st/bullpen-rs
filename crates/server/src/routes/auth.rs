@@ -77,6 +77,12 @@ async fn login(
         store::create_session(&db)?
     };
 
+    // Resume routines that were paused for absence when Josh signs in.
+    let resumed = crate::routines::resume_absence_paused(&state, chrono::Utc::now());
+    if resumed > 0 {
+        tracing::info!("resumed {resumed} routines paused for absence");
+    }
+
     let mut response = (StatusCode::OK, Json(json!({"ok": true, "token": token}))).into_response();
     set_session_cookie(&mut response, &headers, &token);
     Ok(response)
