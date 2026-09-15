@@ -51,6 +51,7 @@ enum Table {
     Conversations,
     Messages,
     Bots,
+    Runs,
 }
 
 impl Table {
@@ -59,6 +60,7 @@ impl Table {
             Table::Conversations => "conversations",
             Table::Messages => "messages",
             Table::Bots => "bots",
+            Table::Runs => "runs",
         }
     }
 }
@@ -138,6 +140,15 @@ impl Db {
 
         questions::ensure_table(&db)?;
         routines::ensure_routine_columns(&db)?;
+        // S5b-F: TS `ensureRunToolsColumn` (`runs.ts:148-153`) - the
+        // per-run tool narrowing (`[]` = ALWAYS_ON only) and the tool a
+        // tool-kind routine ran, written by `recordToolRun`. Same
+        // self-creating shape as `goal_id` in `goals::ensure_goal_tables`.
+        db.ensure_column(
+            Table::Runs,
+            "tools",
+            "ALTER TABLE runs ADD COLUMN tools TEXT",
+        )?;
         goals::ensure_goal_tables(&db)?;
 
         Ok(db)
