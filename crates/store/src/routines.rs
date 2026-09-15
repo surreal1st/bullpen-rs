@@ -326,9 +326,28 @@ pub fn create_routine(
     let hook_kind_normalized = hook_kind.unwrap_or("raw");
     let now = Utc::now().to_rfc3339();
 
-    let tools_json = tools.map(|t| serde_json::to_string(&t).unwrap_or_default());
-    let hook_events_json = hook_events.map(|e| serde_json::to_string(&e).unwrap_or_default());
-    let conditions_json = conditions.map(|c| serde_json::to_string(&c).unwrap_or_default());
+    // F7: Convert empty lists to NULL (None)
+    let tools_json = tools.and_then(|t| {
+        if t.is_empty() {
+            None
+        } else {
+            serde_json::to_string(&t).ok()
+        }
+    });
+    let hook_events_json = hook_events.and_then(|e| {
+        if e.is_empty() {
+            None
+        } else {
+            serde_json::to_string(&e).ok()
+        }
+    });
+    let conditions_json = conditions.and_then(|c| {
+        if c.is_empty() {
+            None
+        } else {
+            serde_json::to_string(&c).ok()
+        }
+    });
 
     db.conn()
         .execute(
@@ -389,9 +408,14 @@ pub fn update_routine(db: &Db, id: &str, updates: &UpdateRoutineFields) -> rusql
         params.push(Box::new(nra.clone()));
     }
     if let Some(t) = &updates.tools {
-        let json = t
-            .as_ref()
-            .map(|tv| serde_json::to_string(tv).unwrap_or_default());
+        // F7: Convert empty lists to NULL
+        let json = t.as_ref().and_then(|tv| {
+            if tv.is_empty() {
+                None
+            } else {
+                serde_json::to_string(tv).ok()
+            }
+        });
         set_clauses.push("tools = ?");
         params.push(Box::new(json));
     }
@@ -412,9 +436,14 @@ pub fn update_routine(db: &Db, id: &str, updates: &UpdateRoutineFields) -> rusql
         params.push(Box::new(hk.clone()));
     }
     if let Some(he) = &updates.hook_events {
-        let json = he
-            .as_ref()
-            .map(|ev| serde_json::to_string(ev).unwrap_or_default());
+        // F7: Convert empty lists to NULL
+        let json = he.as_ref().and_then(|ev| {
+            if ev.is_empty() {
+                None
+            } else {
+                serde_json::to_string(ev).ok()
+            }
+        });
         set_clauses.push("hook_events = ?");
         params.push(Box::new(json));
     }
@@ -423,9 +452,14 @@ pub fn update_routine(db: &Db, id: &str, updates: &UpdateRoutineFields) -> rusql
         params.push(Box::new(hm.clone()));
     }
     if let Some(c) = &updates.conditions {
-        let json = c
-            .as_ref()
-            .map(|cv| serde_json::to_string(cv).unwrap_or_default());
+        // F7: Convert empty lists to NULL
+        let json = c.as_ref().and_then(|cv| {
+            if cv.is_empty() {
+                None
+            } else {
+                serde_json::to_string(cv).ok()
+            }
+        });
         set_clauses.push("conditions = ?");
         params.push(Box::new(json));
     }

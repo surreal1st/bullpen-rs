@@ -563,3 +563,40 @@ async fn list_routines_never_exposes_the_webhook_secret() {
         .expect("routine present in list");
     assert_eq!(routine["hasHook"], true);
 }
+
+/// F12: 204 responses have no body (not even empty JSON)
+#[tokio::test]
+async fn github_ping_returns_204_no_body() {
+    let db = open_db();
+    let session = seed_session(&db);
+    seed_bot(&db, "arthur", "Arthur");
+    let routine_id = seed_routine(&db, "arthur", "watch", "github", None, None, None);
+
+    let router = server::build_app(server::AppState::new(db));
+    let secret = mint_secret(&router, &session, &routine_id).await;
+
+    // Send a GitHub ping (which returns 204 with no body)
+    let payload = json!({"zen": "test"}).to_string();
+    let sig = github_signature(&secret, &payload);
+
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/api/hooks/{routine_id}"))
+        .header("x-github-event", "ping")
+        .header("x-hub-signature-256", sig)
+        .header("Content-Type", "application/json")
+        .body(Body::from(payload))
+        .expect("build request");
+
+    let resp = router.oneshot(req).await.expect("send request");
+    let status = resp.status();
+    let body_bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+
+    assert_eq!(status, StatusCode::NO_CONTENT, "ping should return 204");
+    assert_eq!(body_bytes.len(), 0, "204 response should have no body");
+}

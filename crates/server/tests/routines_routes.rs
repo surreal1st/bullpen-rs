@@ -832,3 +832,134 @@ async fn delete_missing_routine_returns_404() {
         "should return not found error"
     );
 }
+
+/// F6: POST with invalid hookMatch pattern returns 400
+#[tokio::test]
+async fn post_with_invalid_hook_match_returns_400() {
+    let db = open_db();
+    let session = seed_session(&db);
+    let bot_id = create_test_bot(&db);
+    let app = app_for(db);
+
+    let (status, body) = post_with_auth(
+        &app,
+        "/api/routines",
+        &session,
+        json!({
+            "botId": bot_id,
+            "name": "Test",
+            "prompt": "Do something",
+            "schedule": "every 15 minutes",
+            "hookMatch": "[unclosed",  // Invalid regex
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body.get("error").and_then(|v| v.as_str()),
+        Some("hook match must be a valid regular expression")
+    );
+}
+
+/// F7: POST with empty tools array stores NULL in database
+#[tokio::test]
+async fn post_with_empty_tools_stores_null() {
+    let db = open_db();
+    let session = seed_session(&db);
+    let bot_id = create_test_bot(&db);
+    let app = app_for(db);
+
+    let (status, body) = post_with_auth(
+        &app,
+        "/api/routines",
+        &session,
+        json!({
+            "botId": bot_id,
+            "name": "Test",
+            "prompt": "Do something",
+            "schedule": "every 15 minutes",
+            "tools": [],  // Empty list should become NULL
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CREATED);
+
+    // Verify tools is NULL in the response (not an empty array)
+    assert_eq!(
+        body.get("routine").and_then(|r| r.get("tools")),
+        Some(&Value::Null),
+        "tools should be NULL, not []"
+    );
+}
+
+/// F8: PATCH kind to "prompt" on a tool routine NULLs tool and tool_args
+#[tokio::test]
+async fn patch_to_prompt_nulls_tool_and_tool_args() {
+    let db = open_db();
+    let session = seed_session(&db);
+    let bot_id = create_test_bot(&db);
+    let app = app_for(db);
+
+    // First create a tool routine
+    let (status, create_body) = post_with_auth(
+        &app,
+        "/api/routines",
+        &session,
+        json!({
+            "botId": bot_id,
+            "name": "Tool Test",
+            "prompt": "Do something",
+            "schedule": "every 15 minutes",
+            "kind": "tool",
+            "tool": "shell",
+            "toolArgs": "{}",
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CREATED);
+    let routine_id = create_body
+        .get("routine")
+        .and_then(|r| r.get("id"))
+        .and_then(|id| id.as_str())
+        .expect("routine id");
+
+    // Verify tool is stored
+    assert_eq!(
+        create_body
+            .get("routine")
+            .and_then(|r| r.get("tool"))
+            .and_then(|t| t.as_str()),
+        Some("shell"),
+        "tool should be set"
+    );
+
+    // Now PATCH to kind=prompt
+    let (status, patch_body) = patch_with_auth(
+        &app,
+        &format!("/api/routines/{}", routine_id),
+        &session,
+        json!({
+            "kind": "prompt",
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+
+    // Verify tool is now NULL in the response
+    assert_eq!(
+        patch_body.get("routine").and_then(|r| r.get("tool")),
+        Some(&Value::Null),
+        "tool should be NULL after switching to prompt"
+    );
+
+    // Verify tool_args is also NULL
+    assert_eq!(
+        patch_body.get("routine").and_then(|r| r.get("toolArgs")),
+        Some(&Value::Null),
+        "toolArgs should be NULL after switching to prompt"
+    );
+}

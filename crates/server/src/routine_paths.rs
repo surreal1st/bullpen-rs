@@ -120,7 +120,10 @@ fn extract_windows_paths(text: &str) -> Vec<String> {
                     }
                 }
 
-                if let Ok(path) = std::str::from_utf8(&bytes[i..end]) {
+                // F13: Require at least one tail character after C:\
+                if end > i + 3
+                    && let Ok(path) = std::str::from_utf8(&bytes[i..end])
+                {
                     paths.push(path.to_string());
                 }
             }
@@ -249,7 +252,15 @@ pub fn check_routine_paths(prompt: &str) -> Vec<PathProblem> {
             .iter()
             .any(|prefix| trimmed.starts_with(prefix))
         {
-            let suggestion = trimmed.replace("/workspace", WORKDIR);
+            // F13: Anchor replacement to string start (TS uses path.replace(/^\/workspace/, ...))
+            let suggestion = if trimmed.starts_with("/workspace/") {
+                trimmed.replacen("/workspace/", WORKDIR, 1)
+            } else if trimmed == "/workspace" {
+                WORKDIR.to_string()
+            } else {
+                // Fallback for other /workspace patterns
+                trimmed.replacen("/workspace", WORKDIR, 1)
+            };
             add(
                 &mut problems,
                 trimmed,
@@ -289,8 +300,8 @@ pub fn check_routine_paths(prompt: &str) -> Vec<PathProblem> {
         );
     }
 
-    // Return as Vec sorted for deterministic order
-    problems.sort_by(|a, b| a.path.cmp(&b.path));
+    // F13: Keep discovery order (Windows first, then Unix in prompt order)
+    // Don't sort; let Windows paths come first, then Unix paths as they appear
     problems
 }
 

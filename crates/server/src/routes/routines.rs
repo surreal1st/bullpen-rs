@@ -74,6 +74,123 @@ fn validate_tool_kind(tool: Option<&str>, tool_args: Option<&str>) -> Result<Str
     serde_json::to_string(&parsed).map_err(|_| "tool arguments must be a JSON object".to_string())
 }
 
+// F6: Validate hookMatch as a valid case-insensitive regex pattern
+fn validate_hook_match(pattern: Option<&str>) -> Result<(), String> {
+    if pattern.is_none_or(|p| p.trim().is_empty()) {
+        return Ok(());
+    }
+
+    let p = pattern.unwrap();
+    if p.len() > 200 {
+        return Err("hook match must be under 200 characters".to_string());
+    }
+
+    match regex::RegexBuilder::new(p).case_insensitive(true).build() {
+        Ok(_) => Ok(()),
+        Err(_) => Err("hook match must be a valid regular expression".to_string()),
+    }
+}
+
+// F7: Validate hookKind is one of the allowed values
+fn validate_hook_kind(kind: Option<&str>) -> Result<String, String> {
+    if kind.is_none() {
+        return Ok("raw".to_string());
+    }
+
+    let k = kind.unwrap();
+    match k {
+        "raw" | "github" | "sentry" | "linear" | "pagerduty" | "slack" => Ok(k.to_string()),
+        _ => Err("hook kind must be raw, github, sentry, linear, pagerduty or slack".to_string()),
+    }
+}
+
+// F7: Validate hookEvents is a list of non-empty strings, max 20 items
+fn validate_hook_events(events: Option<&Vec<String>>) -> Result<(), String> {
+    if events.is_none() {
+        return Ok(());
+    }
+
+    let e = events.unwrap();
+    if e.is_empty() {
+        return Ok(());
+    }
+
+    if e.len() > 20 {
+        return Err("hook events must be a list of event names".to_string());
+    }
+
+    for event in e {
+        if event.trim().is_empty() {
+            return Err("hook events must be a list of event names".to_string());
+        }
+    }
+
+    Ok(())
+}
+
+// F7: Validate conditions is a list of up to 3 condition objects with valid match patterns
+fn validate_conditions(conditions: Option<&Vec<store::Condition>>) -> Result<(), String> {
+    if conditions.is_none() {
+        return Ok(());
+    }
+
+    let c = conditions.unwrap();
+    if c.is_empty() {
+        return Ok(());
+    }
+
+    if c.len() > 3 {
+        return Err("conditions must be a list of up to 3 condition objects".to_string());
+    }
+
+    for cond in c {
+        let valid_kind = matches!(
+            cond.kind.as_str(),
+            "github" | "sentry" | "linear" | "pagerduty" | "raw"
+        );
+        if !valid_kind {
+            return Err("conditions must be a list of up to 3 condition objects".to_string());
+        }
+
+        if let Some(ref m) = cond.match_ {
+            if m.len() > 200 {
+                return Err("hook match must be under 200 characters".to_string());
+            }
+            // Validate the condition's match pattern as a regex
+            match regex::RegexBuilder::new(m).case_insensitive(true).build() {
+                Ok(_) => {}
+                Err(_) => return Err("hook match must be a valid regular expression".to_string()),
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// F7: Validate tools is a list of non-empty strings, max 40 items
+fn validate_tools(tools: Option<&Vec<String>>) -> Result<(), String> {
+    if tools.is_none() {
+        return Ok(());
+    }
+
+    let t = tools.unwrap();
+    if t.is_empty() {
+        return Ok(());
+    }
+
+    if t.len() > 40 {
+        return Err("tools must be a list of tool names".to_string());
+    }
+
+    for tool in t {
+        if tool.trim().is_empty() {
+            return Err("tools must be a list of tool names".to_string());
+        }
+    }
+
+    Ok(())
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/routines", get(get_routines).post(post_routines))
@@ -176,6 +293,22 @@ async fn post_routines(
         return Err(AppError::bad_request("Give the routine something to do."));
     }
 
+    // F6: Validate hookMatch as a valid regex pattern
+    validate_hook_match(body_data.hook_match.as_deref()).map_err(AppError::bad_request)?;
+
+    // F7: Validate hook_kind
+    let validated_hook_kind =
+        validate_hook_kind(body_data.hook_kind.as_deref()).map_err(AppError::bad_request)?;
+
+    // F7: Validate hook_events
+    validate_hook_events(body_data.hook_events.as_ref()).map_err(AppError::bad_request)?;
+
+    // F7: Validate conditions and their match patterns
+    validate_conditions(body_data.conditions.as_ref()).map_err(AppError::bad_request)?;
+
+    // F7: Validate tools
+    validate_tools(body_data.tools.as_ref()).map_err(AppError::bad_request)?;
+
     // S5b: Validate tool and tool_args (only for "tool" kind), capture normalized args
     let normalized_tool_args = if kind == "tool" {
         Some(
@@ -214,6 +347,35 @@ async fn post_routines(
         ));
     }
 
+    // F7: Convert empty lists to None (they will become NULL in the database)
+    let tools_for_store = if body_data.tools.as_ref().is_some_and(|t| t.is_empty()) {
+        None
+    } else {
+        body_data.tools
+    };
+
+    let hook_events_for_store = if body_data.hook_events.as_ref().is_some_and(|e| e.is_empty()) {
+        None
+    } else {
+        body_data.hook_events
+    };
+
+    let conditions_for_store = if body_data.conditions.as_ref().is_some_and(|c| c.is_empty()) {
+        None
+    } else {
+        body_data.conditions
+    };
+
+    // F7: Trim hook_match and convert empty to None
+    let hook_match_for_store = body_data.hook_match.as_deref().and_then(|h| {
+        let trimmed = h.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    });
+
     // Call the store to create the routine - it will check the 50-cap
     let result = create_routine(
         &db,
@@ -222,14 +384,14 @@ async fn post_routines(
         &body_data.prompt,
         schedule_json,
         Some(next_run_at),
-        body_data.tools,
+        tools_for_store,
         body_data.kind.as_deref(),
         body_data.tool.as_deref(),
         normalized_tool_args.as_deref(),
-        body_data.hook_kind.as_deref(),
-        body_data.hook_events,
-        body_data.hook_match.as_deref(),
-        body_data.conditions,
+        Some(&validated_hook_kind),
+        hook_events_for_store,
+        hook_match_for_store,
+        conditions_for_store,
     );
 
     match result {
@@ -272,16 +434,93 @@ async fn patch_routine(
     let db = state.db();
     let body_data: UpdateRoutineBody = super::parse_body(&body)?;
 
-    // S5b: if kind is being changed to "tool" or if kind is "tool" and tool/tool_args are provided,
-    // validate tool and tool_args, capture normalized args
-    let mut normalized_tool_args = None;
-    if let Some(ref k) = body_data.kind
-        && k == "tool"
-    {
+    // Get the existing routine to compute effective values
+    let existing =
+        store::routine_by_id(&db, &id)?.ok_or_else(|| AppError::not_found("no such routine"))?;
+
+    // F8: Compute effective values from body ?? existing row
+    let effective_name = body_data
+        .name
+        .as_ref()
+        .map(|n| n.trim())
+        .unwrap_or(&existing.name);
+    let effective_prompt = body_data
+        .prompt
+        .as_ref()
+        .map(|p| p.trim())
+        .unwrap_or(&existing.prompt);
+    let effective_kind = match &body_data.kind {
+        Some(k) => k.as_str(),
+        None => &existing.kind,
+    };
+
+    // F8: Re-check name/prompt emptiness against effective values
+    if effective_name.is_empty() {
+        return Err(AppError::bad_request("Give the routine a name."));
+    }
+    if effective_kind == "prompt" && effective_prompt.is_empty() {
+        return Err(AppError::bad_request("Give the routine something to do."));
+    }
+
+    // F6: Validate hookMatch as a valid regex pattern
+    if let Some(hm) = &body_data.hook_match {
+        validate_hook_match(hm.as_deref()).map_err(AppError::bad_request)?;
+    }
+
+    // F7: Validate hook_kind
+    if let Some(ref hk) = body_data.hook_kind {
+        validate_hook_kind(Some(hk)).map_err(AppError::bad_request)?;
+    }
+
+    // F7: Validate hook_events (extract from Option<Option<Vec>>)
+    if let Some(ref he) = body_data.hook_events {
+        validate_hook_events(he.as_ref()).map_err(AppError::bad_request)?;
+    }
+
+    // F7: Validate conditions (extract from Option<Option<Vec>>)
+    if let Some(ref c) = body_data.conditions {
+        validate_conditions(c.as_ref()).map_err(AppError::bad_request)?;
+    }
+
+    // F7: Validate tools (extract from Option<Option<Vec>>)
+    if let Some(ref t) = body_data.tools {
+        validate_tools(t.as_ref()).map_err(AppError::bad_request)?;
+    }
+
+    // F8: Validate tool and tool_args when effective kind is "tool"
+    let mut normalized_tool_args: Option<String> = None;
+    let mut tool_value: Option<Option<String>> = None;
+
+    if effective_kind == "tool" {
+        // Compute effective tool and tool_args
+        let effective_tool = body_data.tool.as_deref().or(existing.tool.as_deref());
+        let effective_tool_args = body_data
+            .tool_args
+            .as_deref()
+            .or(existing.tool_args.as_deref());
+
+        // Validate and normalize
         normalized_tool_args = Some(
-            validate_tool_kind(body_data.tool.as_deref(), body_data.tool_args.as_deref())
+            validate_tool_kind(effective_tool, effective_tool_args)
                 .map_err(AppError::bad_request)?,
         );
+
+        // F8: Store the trimmed tool name
+        tool_value = Some(effective_tool.map(|t| t.trim().to_string()));
+    } else if body_data.kind.as_ref().is_some_and(|k| k == "prompt") {
+        // F8: Switching back to prompt NULLs tool and tool_args
+        tool_value = Some(None);
+        normalized_tool_args = Some(String::new()); // Empty string signals NULL for tool_args
+    }
+
+    // F8: Run path guard on effective prompt (whether it's new or existing)
+    let blocking = crate::routine_paths::blocking_problems(
+        &crate::routine_paths::check_routine_paths(effective_prompt),
+    );
+    if !blocking.is_empty() {
+        return Err(AppError::bad_request(
+            crate::routine_paths::describe_path_problems(&blocking),
+        ));
     }
 
     // If schedule is being updated, validate and compute new next_run_at
@@ -299,24 +538,9 @@ async fn patch_routine(
         );
     }
 
-    // The same guard as creation: a prompt edited into a broken state is exactly
-    // as unreachable as one created that way.
-    // Only a path NOTHING can reach refuses a save. A Windows path or a meridian
-    // path is a dependency on a tool, not a broken routine - Josh: "code happens
-    // here on Windows, storage/hosting happens on Meridian."
-    if let Some(ref prompt) = body_data.prompt {
-        let blocking = crate::routine_paths::blocking_problems(
-            &crate::routine_paths::check_routine_paths(prompt),
-        );
-        if !blocking.is_empty() {
-            return Err(AppError::bad_request(
-                crate::routine_paths::describe_path_problems(&blocking),
-            ));
-        }
-    }
-
     // Build the update fields
     let mut updates = store::UpdateRoutineFields::default();
+
     if let Some(name) = body_data.name {
         updates.name = Some(name);
     }
@@ -329,36 +553,76 @@ async fn patch_routine(
     if let Some(nra) = next_run_at {
         updates.next_run_at = Some(Some(nra));
     }
+
+    // F7: Handle tools - convert empty lists to None
     if let Some(tools) = body_data.tools {
-        updates.tools = Some(tools);
+        let tools_for_store = if tools.as_ref().is_some_and(|t| t.is_empty()) {
+            None
+        } else {
+            tools
+        };
+        updates.tools = Some(tools_for_store);
     }
+
     if let Some(kind) = body_data.kind {
         updates.kind = Some(kind);
     }
-    if let Some(tool) = body_data.tool {
-        updates.tool = Some(Some(tool));
+
+    // F8: Handle tool value (might be None if switching to prompt)
+    if let Some(tool) = tool_value {
+        updates.tool = Some(tool);
     }
-    if let Some(tool_args) = normalized_tool_args {
-        updates.tool_args = Some(Some(tool_args));
-    } else if body_data.tool_args.is_some() {
-        // If tool_args was provided but we didn't normalize it (kind != "tool"),
-        // still use the raw value
-        if let Some(tool_args) = body_data.tool_args {
-            updates.tool_args = Some(Some(tool_args));
+
+    // F8: Handle tool_args
+    if let Some(ta) = normalized_tool_args {
+        if ta.is_empty() {
+            // Empty string means NULL for tool_args (switching to prompt)
+            updates.tool_args = Some(None);
+        } else {
+            updates.tool_args = Some(Some(ta));
         }
     }
-    if let Some(hook_kind) = body_data.hook_kind {
-        updates.hook_kind = Some(hook_kind);
+
+    // F7: Set hook_kind (already validated above)
+    if let Some(hk) = &body_data.hook_kind {
+        updates.hook_kind = Some(hk.clone());
     }
+
+    // F7: Handle hook_events - convert empty lists to None
     if let Some(hook_events) = body_data.hook_events {
-        updates.hook_events = Some(hook_events);
+        let he_for_store = if hook_events.as_ref().is_some_and(|e| e.is_empty()) {
+            None
+        } else {
+            hook_events
+        };
+        updates.hook_events = Some(he_for_store);
     }
+
+    // F7: Handle hook_match - trim and convert empty to None
     if let Some(hook_match) = body_data.hook_match {
-        updates.hook_match = Some(hook_match);
+        let hm_for_store = if let Some(hm) = hook_match {
+            let trimmed = hm.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        } else {
+            None
+        };
+        updates.hook_match = Some(hm_for_store);
     }
+
+    // F7: Handle conditions - convert empty lists to None
     if let Some(conditions) = body_data.conditions {
-        updates.conditions = Some(conditions);
+        let c_for_store = if conditions.as_ref().is_some_and(|c| c.is_empty()) {
+            None
+        } else {
+            conditions
+        };
+        updates.conditions = Some(c_for_store);
     }
+
     if let Some(second_opinion) = body_data.second_opinion {
         updates.second_opinion = Some(second_opinion);
     }

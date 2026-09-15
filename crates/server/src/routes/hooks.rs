@@ -286,25 +286,25 @@ async fn post_webhook(
             // GitHub's own connectivity check when a webhook is first saved -
             // not worth a run, and firing one every re-save would be noise.
             if event == "ping" {
-                return (StatusCode::NO_CONTENT, Json(json!({}))).into_response();
+                return StatusCode::NO_CONTENT.into_response();
             }
             let events = store::routines::parse_hook_events(row.hook_events.as_deref());
             if let Some(events) = &events
                 && !events.iter().any(|e| e == &event)
             {
-                return (StatusCode::NO_CONTENT, Json(json!({}))).into_response();
+                return StatusCode::NO_CONTENT.into_response();
             }
             let payload: Value = serde_json::from_str(&raw_body).unwrap_or_else(|_| json!({}));
             match hooks::reduce_github(&event, &payload) {
                 Some(t) => t,
-                None => return (StatusCode::NO_CONTENT, Json(json!({}))).into_response(),
+                None => return StatusCode::NO_CONTENT.into_response(),
             }
         }
         "sentry" => {
             let payload: Value = serde_json::from_str(&raw_body).unwrap_or_else(|_| json!({}));
             match hooks::reduce_sentry(&payload) {
                 Some(t) => t,
-                None => return (StatusCode::NO_CONTENT, Json(json!({}))).into_response(),
+                None => return StatusCode::NO_CONTENT.into_response(),
             }
         }
         "linear" => {
@@ -315,7 +315,7 @@ async fn post_webhook(
             let payload: Value = serde_json::from_str(&raw_body).unwrap_or_else(|_| json!({}));
             match hooks::reduce_linear(event, &payload) {
                 Some(t) => t,
-                None => return (StatusCode::NO_CONTENT, Json(json!({}))).into_response(),
+                None => return StatusCode::NO_CONTENT.into_response(),
             }
         }
         "pagerduty" => {
@@ -326,7 +326,7 @@ async fn post_webhook(
             let payload: Value = serde_json::from_str(&raw_body).unwrap_or_else(|_| json!({}));
             match hooks::reduce_pager_duty(event, &payload) {
                 Some(t) => t,
-                None => return (StatusCode::NO_CONTENT, Json(json!({}))).into_response(),
+                None => return StatusCode::NO_CONTENT.into_response(),
             }
         }
         _ => {
@@ -355,7 +355,7 @@ async fn post_webhook(
         && !pattern.is_empty()
         && !regex_matches_or_fails_open(pattern, &text)
     {
-        return (StatusCode::NO_CONTENT, Json(json!({}))).into_response();
+        return StatusCode::NO_CONTENT.into_response();
     }
 
     // S6b: a routine may hold up to three trigger conditions that must ALL
@@ -401,7 +401,7 @@ async fn post_webhook(
         }
 
         if !all_conditions_met {
-            return (StatusCode::NO_CONTENT, Json(json!({}))).into_response();
+            return StatusCode::NO_CONTENT.into_response();
         }
 
         {
