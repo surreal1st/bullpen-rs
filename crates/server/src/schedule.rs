@@ -340,7 +340,7 @@ pub fn next_run(schedule: &Schedule, from: DateTime<Utc>) -> DateTime<Utc> {
         }
         Schedule::Clock { days, times } => {
             for ahead in 0..=8 {
-                let mut day = from_local + chrono::Duration::days(ahead as i64);
+                let day = from_local + chrono::Duration::days(ahead as i64);
                 let day_of_week = day.weekday().num_days_from_sunday();
                 if !days.contains(&day_of_week) {
                     continue;
@@ -485,7 +485,7 @@ mod tests {
     #[test]
     fn test_next_run_is_always_in_future() {
         let from = DateTime::<Utc>::from_naive_utc_and_offset(
-            chrono::NaiveDateTime::from_timestamp_opt(1725955800, 0).unwrap(),
+            DateTime::from_timestamp(1725955800, 0).unwrap().naive_utc(),
             Utc,
         );
 
@@ -505,7 +505,7 @@ mod tests {
     fn test_weekdays_skip_weekend() {
         // Friday 2026-09-11 at 09:00 UTC
         let friday_utc = DateTime::<Utc>::from_naive_utc_and_offset(
-            chrono::NaiveDateTime::from_timestamp_opt(1726067400, 0).unwrap(),
+            DateTime::from_timestamp(1726067400, 0).unwrap().naive_utc(),
             Utc,
         );
         let s = parse_schedule("weekdays at 08:43").expect("parse");
