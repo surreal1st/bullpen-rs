@@ -87,9 +87,8 @@ pub struct AppState {
     /// `chat.delete`) - a real `slack::ReqwestSlackApi` in production,
     /// swapped for a scripted fake in tests via `with_slack_api`/
     /// `with_port_and_slack_api`. `+ Send + Sync` spelled out (not just
-    /// `dyn SlackApi`) because `routes/slack.rs`'s connect route moves this
-    /// into a `spawn_blocking` closure - see that route's own doc for why
-    /// `connect_slack` cannot be `.await`ed directly from an axum handler.
+    /// `dyn SlackApi`) because the reply-posting `on_run_done` hook below
+    /// moves a clone of this into a `tokio::spawn` task.
     pub slack_api: Arc<dyn slack::SlackApi + Send + Sync>,
     /// S5c-03: run id -> what to post back to Slack once that run settles.
     /// Registered by `routes/slack.rs`'s DM/mention branch immediately
@@ -267,21 +266,13 @@ impl AppState {
         ));
         let room_engine = rooms::RoomEngine::install(Arc::clone(&db), Arc::clone(&runs));
 
-        // S5c-03: self-creating, same discipline `store::slack::
-        // ensure_slack_tables`'s own doc explains ("to avoid concurrent
-        // builder conflicts on the MIGRATIONS array"). S5c-02 left the
-        // central `store::Db::open` wiring for the orchestrator
-        // (`store/src/lib.rs:141`, not yet landed as of this ticket); called
-        // here instead so `routes/slack.rs` never hits "no such table:
-        // slack_threads" on a fresh db in the meantime - idempotent
-        // (`CREATE TABLE IF NOT EXISTS`), so it costs nothing once the
-        // central wiring lands too.
-        {
-            let guard = db.lock().unwrap_or_else(PoisonError::into_inner);
-            if let Err(err) = store::slack::ensure_slack_tables(&guard) {
-                tracing::error!("failed to ensure slack_threads table exists: {err}");
-            }
-        }
+        // S5c-F-02 (F5): `store::Db::open` now calls `slack::
+        // ensure_slack_tables` itself (`store/src/lib.rs`, beside
+        // `goals::ensure_goal_tables`) - every `Db` reaches this constructor
+        // only via `Db::open` (its field is private to the `store` crate),
+        // so `slack_threads` already exists by the time any `AppState`
+        // constructor runs. The redundant call that used to live here
+        // (S5c-03's stopgap, landed before the central wiring did) is gone.
 
         let state = AppState {
             db,
@@ -416,24 +407,6 @@ impl AppState {
     /// `unwrap_or_else(PoisonError::into_inner)` recovers the guard instead.
     pub(crate) fn db(&self) -> MutexGuard<'_, Db> {
         self.db.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    /// S5c-03: a clone of the raw `Arc<Mutex<Db>>` handle, for
-    /// `routes/slack.rs`'s connect route only - `slack::connect_slack` holds
-    /// its `&Db` argument live across an internal `.await` (the `auth.test`
-    /// call, before its `put_setting`s), which makes ITS OWN generated
-    /// future `!Send` (`Db` wraps a `rusqlite::Connection`, `Send` but not
-    /// `Sync`, so `&Db` is never `Send`) - axum requires a handler's future
-    /// to be `Send`, so `.await`ing `connect_slack` directly inside an async
-    /// handler does not compile. The route instead moves this `Arc` into a
-    /// `tokio::task::spawn_blocking` closure, locks it there, and drives
-    /// `connect_slack` to completion with `futures::executor::block_on` -
-    /// entirely on one blocking-pool thread, so the `!Send` future itself
-    /// never needs to cross a thread boundary as a value. Proven against a
-    /// standalone probe before this ticket wrote the real route (see this
-    /// ticket's Results).
-    pub(crate) fn db_arc(&self) -> Arc<Mutex<Db>> {
-        Arc::clone(&self.db)
     }
 
     /// S5c-03: registers what `routes/slack.rs`'s DM/mention branch should

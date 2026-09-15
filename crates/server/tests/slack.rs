@@ -149,6 +149,121 @@ fn test_disconnect_slack() {
     assert_eq!(count, 0, "all slack settings should be deleted");
 }
 
+/// S5c-F-02 bite (F1): TS is `if appToken !== "" put else delete`
+/// (`slack.ts:138-140`) - a reconnect with a blank app token must delete the
+/// previously stored one, not leave it in place. Before the fix, the `else`
+/// hung off `if let Some(..)` so a present-but-blank token took neither
+/// branch and the old token survived.
+#[tokio::test]
+async fn reconnect_with_blank_app_token_deletes_the_stored_one() {
+    use server::slack::connect_slack;
+
+    let db = Db::open(":memory:").expect("open db");
+    let api = FakeSlackApi {
+        auth_test_result: None,
+    };
+
+    let status = connect_slack(
+        &db,
+        SlackConnectInput {
+            bot_token: "xoxb-1".to_string(),
+            signing_secret: "s1".to_string(),
+            app_token: Some("xapp-1".to_string()),
+        },
+        &api,
+    )
+    .await
+    .expect("connect with app token");
+    assert!(status.has_app_token, "app token should be stored");
+
+    let status = connect_slack(
+        &db,
+        SlackConnectInput {
+            bot_token: "xoxb-1".to_string(),
+            signing_secret: "s1".to_string(),
+            app_token: Some("   ".to_string()),
+        },
+        &api,
+    )
+    .await
+    .expect("reconnect with blank app token");
+    assert!(
+        !status.has_app_token,
+        "F1: a blank app token on reconnect must delete the stored one, not leave the old one in place"
+    );
+}
+
+/// S5c-F-02 bite (F2): TS writes `test.teamId ?? ""` for all three fields
+/// unconditionally (`slack.ts:142-144`) - a reconnect whose `auth.test`
+/// omits a field must blank the stored value, not keep the previous
+/// workspace's. Before the fix, `if let Some(..) { put }` skipped the write
+/// entirely on `None`, so a malformed-but-`ok:true` response left the first
+/// workspace's team name behind.
+#[tokio::test]
+async fn reconnect_with_missing_team_name_blanks_it_instead_of_keeping_the_old_one() {
+    use server::slack::connect_slack;
+
+    let db = Db::open(":memory:").expect("open db");
+    let first_api = FakeSlackApi {
+        auth_test_result: None,
+    };
+    let status = connect_slack(
+        &db,
+        SlackConnectInput {
+            bot_token: "xoxb-1".to_string(),
+            signing_secret: "s1".to_string(),
+            app_token: None,
+        },
+        &first_api,
+    )
+    .await
+    .expect("first connect");
+    assert_eq!(status.team_name, Some("test-team".to_string()));
+
+    let second_api = FakeSlackApi {
+        auth_test_result: Some(Ok(AuthTestResult {
+            team_id: None,
+            team_name: None,
+            user_id: None,
+        })),
+    };
+    let status = connect_slack(
+        &db,
+        SlackConnectInput {
+            bot_token: "xoxb-2".to_string(),
+            signing_secret: "s2".to_string(),
+            app_token: None,
+        },
+        &second_api,
+    )
+    .await
+    .expect("second connect");
+    assert_eq!(
+        status.team_name,
+        Some(String::new()),
+        "F2: a reconnect whose auth.test omits team_name must blank slack.team_name, not keep the first workspace's name"
+    );
+}
+
+/// S5c-F-02 bite (F5): `store::Db::open` must wire `slack::
+/// ensure_slack_tables` itself - a bare open, with nothing else touching
+/// Slack, has to be able to insert into `slack_threads`. Before the fix this
+/// table was only created by `AppState::build` (S5c-03's stopgap), so a
+/// plain `store::Db::open` gave a database with no `slack_threads` at all.
+#[test]
+fn fresh_db_open_alone_can_insert_into_slack_threads() {
+    let db = Db::open(":memory:").expect("open db");
+    let now = chrono::Utc::now().to_rfc3339();
+    db.conn()
+        .execute(
+            "INSERT INTO slack_threads (channel, thread_ts, bot_id, conversation_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params!["C1", "1.1", "arthur", "conv-1", now],
+        )
+        .expect(
+            "F5: a bare Db::open must already have created slack_threads, with no separate ensure_slack_tables call",
+        );
+}
+
 #[test]
 fn test_get_slack_answer_bot_id_none_when_not_set() {
     let db = Db::open(":memory:").expect("open db");

@@ -151,6 +151,12 @@ impl Db {
             "ALTER TABLE runs ADD COLUMN tools TEXT",
         )?;
         goals::ensure_goal_tables(&db)?;
+        // S5c-F-02 (F5): was only wired into `server::AppState::build`
+        // (S5c-03's stopgap), so a bare `store::Db::open` got a database
+        // with no `slack_threads` - the same self-creating discipline as
+        // `ensure_goal_tables` above, moved to the central choke point every
+        // `Db` passes through.
+        slack::ensure_slack_tables(&db)?;
 
         Ok(db)
     }

@@ -100,6 +100,11 @@ pub struct SlackStatus {
     pub has_app_token: bool,
     pub answer_bot_id: Option<String>,
     pub answer_bot_name: Option<String>,
+    /// S5c-F-02 (F10, server half): the real Events API URL for the Slack
+    /// card to display, `None` when `PUBLIC_URL` is unset (this app on
+    /// :4380 is tailnet-only, not reachable from the internet, so the card
+    /// still needs to say so rather than print a placeholder or a guess).
+    pub events_url: Option<String>,
 }
 
 /// Get the current Slack status for a client.
@@ -114,6 +119,17 @@ pub fn slack_status(db: &Db) -> SlackStatus {
             .map(|bot| bot.name.clone())
     });
 
+    // S5c-F-02 (F10, server half): same `PUBLIC_URL` lookup
+    // `routes/hooks.rs:73` uses to build a minted webhook URL - duplicated
+    // here rather than factored into a shared fn, since that file is not
+    // owned by this ticket (see that route's own comment for the twin).
+    // Unlike that lookup, no `localhost` fallback: a client-visible "here is
+    // the URL to paste into Slack" needs to say plainly when there isn't one
+    // yet, not guess.
+    let events_url = std::env::var("PUBLIC_URL")
+        .ok()
+        .map(|base| format!("{}/api/slack/events", base));
+
     SlackStatus {
         configured: config.is_some(),
         team_name: config.as_ref().and_then(|c| c.team_name.clone()),
@@ -125,6 +141,7 @@ pub fn slack_status(db: &Db) -> SlackStatus {
             .unwrap_or(false),
         answer_bot_id: answer_id,
         answer_bot_name: answer_name,
+        events_url,
     }
 }
 
@@ -293,11 +310,41 @@ impl SlackApi for ReqwestSlackApi {
     }
 }
 
-/// Connect Slack by testing the tokens and storing them encrypted
-pub async fn connect_slack<A: SlackApi + ?Sized>(
-    db: &Db,
-    input: SlackConnectInput,
+/// S5c-F-02 (F4): the async half of connecting Slack - validates the two
+/// required fields and proves the bot token by calling `auth.test`. No
+/// `&Db` anywhere in this function or its call graph (`SlackApi::auth_test`
+/// takes `&str`), so its generated future is `Send` regardless of `Db`'s own
+/// `Sync`-ness. `routes/slack.rs::put_slack` awaits this with no db lock
+/// held, then locks only for the synchronous [`store_slack_connection`]
+/// below - the split that removes the need for `AppState::db_arc`, a
+/// `spawn_blocking` closure, and `futures::executor::block_on`.
+pub async fn verify_slack_tokens<A: SlackApi + ?Sized>(
+    bot_token: &str,
+    signing_secret: &str,
     api: &A,
+) -> Result<AuthTestResult, String> {
+    let bot_token = bot_token.trim();
+    let signing_secret = signing_secret.trim();
+
+    if bot_token.is_empty() {
+        return Err("give a bot token".to_string());
+    }
+    if signing_secret.is_empty() {
+        return Err("give a signing secret".to_string());
+    }
+
+    api.auth_test(bot_token).await
+}
+
+/// S5c-F-02 (F4): the synchronous half of connecting Slack - validates,
+/// encrypts and stores the tokens plus the already-fetched `auth.test`
+/// result. No `.await` anywhere in this function, so a caller can hold the
+/// db lock across the whole call (as `routes/slack.rs::put_slack` does)
+/// without ever needing that lock guard to cross an await point.
+pub fn store_slack_connection(
+    db: &Db,
+    input: &SlackConnectInput,
+    test: AuthTestResult,
 ) -> Result<SlackStatus, String> {
     let bot_token = input.bot_token.trim();
     let signing_secret = input.signing_secret.trim();
@@ -308,9 +355,6 @@ pub async fn connect_slack<A: SlackApi + ?Sized>(
     if signing_secret.is_empty() {
         return Err("give a signing secret".to_string());
     }
-
-    // Test the token first
-    let test = api.auth_test(bot_token).await?;
 
     // Store tokens encrypted
     let encrypted_token = encrypt_for_storage(db, bot_token)
@@ -323,32 +367,36 @@ pub async fn connect_slack<A: SlackApi + ?Sized>(
     put_setting(db, KEY_SIGNING_SECRET, &encrypted_secret)
         .map_err(|e| format!("failed to store signing secret: {}", e))?;
 
-    // Store app token if provided
-    if let Some(app_token) = input.app_token.as_ref() {
-        let app_token_trimmed = app_token.trim();
-        if !app_token_trimmed.is_empty() {
-            let encrypted_app = encrypt_for_storage(db, app_token_trimmed)
-                .map_err(|e| format!("failed to encrypt app token: {}", e))?;
-            put_setting(db, KEY_APP_TOKEN, &encrypted_app)
-                .map_err(|e| format!("failed to store app token: {}", e))?;
-        }
+    // S5c-F-02 (F1): TS is `if appToken !== "" put else delete`
+    // (`slack.ts:138-140`) - an empty/blank incoming app token must DELETE
+    // any previously stored one, not leave it untouched. The prior `if let
+    // Some(..) { if !empty { put } }` shape had no `else` reachable from a
+    // present-but-blank token, so a reconnect meaning to drop Socket Mode
+    // left the old app-level token encrypted in `settings` forever.
+    let app_token_trimmed = input.app_token.as_deref().unwrap_or("").trim();
+    if !app_token_trimmed.is_empty() {
+        let encrypted_app = encrypt_for_storage(db, app_token_trimmed)
+            .map_err(|e| format!("failed to encrypt app token: {}", e))?;
+        put_setting(db, KEY_APP_TOKEN, &encrypted_app)
+            .map_err(|e| format!("failed to store app token: {}", e))?;
     } else {
         let _ = delete_setting(db, KEY_APP_TOKEN);
     }
 
-    // Store team info from auth.test response
-    if let Some(team_id) = test.team_id {
-        put_setting(db, KEY_TEAM_ID, &team_id)
-            .map_err(|e| format!("failed to store team id: {}", e))?;
-    }
-    if let Some(team_name) = test.team_name {
-        put_setting(db, KEY_TEAM_NAME, &team_name)
-            .map_err(|e| format!("failed to store team name: {}", e))?;
-    }
-    if let Some(user_id) = test.user_id {
-        put_setting(db, KEY_BOT_USER_ID, &user_id)
-            .map_err(|e| format!("failed to store bot user id: {}", e))?;
-    }
+    // S5c-F-02 (F2): TS writes `test.teamId ?? ""` for all three fields
+    // unconditionally (`slack.ts:142-144`) - a response missing one of
+    // `team`/`team_id`/`user_id` must BLANK the stored value, not leave the
+    // previous workspace's value in place. The prior `if let Some(..) { put
+    // }` shape skipped the write entirely on `None`, so reconnecting to a
+    // different workspace whose `auth.test` omitted a field left stale data
+    // behind (`bot_user_id` matters most: `mentions_slack_user` matches on
+    // it, so a stale value silences @mentions in the new workspace).
+    put_setting(db, KEY_TEAM_ID, &test.team_id.unwrap_or_default())
+        .map_err(|e| format!("failed to store team id: {}", e))?;
+    put_setting(db, KEY_TEAM_NAME, &test.team_name.unwrap_or_default())
+        .map_err(|e| format!("failed to store team name: {}", e))?;
+    put_setting(db, KEY_BOT_USER_ID, &test.user_id.unwrap_or_default())
+        .map_err(|e| format!("failed to store bot user id: {}", e))?;
 
     // Store connection time
     let now = chrono::Utc::now().to_rfc3339();
@@ -356,6 +404,25 @@ pub async fn connect_slack<A: SlackApi + ?Sized>(
         .map_err(|e| format!("failed to store connected_at: {}", e))?;
 
     Ok(slack_status(db))
+}
+
+/// Connect Slack by testing the tokens and storing them encrypted.
+///
+/// Composes [`verify_slack_tokens`] and [`store_slack_connection`] for
+/// callers that are not themselves bound to `Send` (test setup - see
+/// `tests/slack.rs` and `tests/slack_routes.rs::configure_slack`'s own
+/// comment on why a plain `.await` is fine there). An axum handler must NOT
+/// call this directly: awaiting it holds `&Db` live across the internal
+/// `auth.test` call, which is exactly the `!Send`-future problem F4 filed -
+/// `routes/slack.rs::put_slack` instead calls the two halves separately,
+/// locking the db only for the second.
+pub async fn connect_slack<A: SlackApi + ?Sized>(
+    db: &Db,
+    input: SlackConnectInput,
+    api: &A,
+) -> Result<SlackStatus, String> {
+    let test = verify_slack_tokens(&input.bot_token, &input.signing_secret, api).await?;
+    store_slack_connection(db, &input, test)
 }
 
 #[derive(Debug)]

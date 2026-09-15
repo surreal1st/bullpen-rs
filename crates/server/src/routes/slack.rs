@@ -23,7 +23,7 @@ use chrono::Utc;
 use regex::RegexBuilder;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::sync::{Arc, PoisonError};
+use std::sync::Arc;
 use store::Db;
 
 use super::parse_body;
@@ -31,7 +31,7 @@ use crate::hooks;
 use crate::prompt::{self, HistoryTurn};
 use crate::runs::StartOptions;
 use crate::slack::{self, SlackConnectInput};
-use crate::{ApiResult, AppError, AppState, PendingSlackReply};
+use crate::{ApiResult, AppState, PendingSlackReply};
 use model::ladder::{Trigger, default_model};
 
 pub fn router() -> Router<AppState> {
@@ -61,41 +61,47 @@ struct ConnectBody {
 }
 
 /// Settings > Computer's Slack card. Proves the bot token by calling
-/// `auth.test` before anything is stored - see `slack::connect_slack` - so a
-/// typo'd token never sits in Settings looking connected.
+/// `auth.test` before anything is stored - see `slack::verify_slack_tokens`
+/// - so a typo'd token never sits in Settings looking connected.
 ///
-/// `connect_slack` holds its `&Db` argument live across its own internal
-/// `.await` (the `auth.test` call happens before its `put_setting`s), which
-/// makes its generated future `!Send` - `Db` wraps a `rusqlite::Connection`
-/// (`Send` but not `Sync`), so a reference to it is never `Send` either, and
-/// axum requires a handler's future to BE `Send`. `.await`ing it directly
-/// here does not compile (proved against a standalone probe before this
-/// route was written - see this ticket's Results). Instead: move the raw
-/// `Arc<Mutex<Db>>` handle (`AppState::db_arc`, itself `Send + Sync`
-/// regardless of `Db`'s own `Sync`-ness) into a `tokio::task::
-/// spawn_blocking` closure, lock it THERE, and drive `connect_slack` to
-/// completion with `futures::executor::block_on` - entirely on one
-/// blocking-pool thread, so the `!Send` future never has to cross a thread
-/// boundary as a value the way an `.await` on it directly would require.
+/// S5c-F-02 (F4): `slack::connect_slack` used to hold its `&Db` argument
+/// live across its own internal `.await` (the `auth.test` call happened
+/// before its `put_setting`s), which made its generated future `!Send` -
+/// `Db` wraps a `rusqlite::Connection` (`Send` but not `Sync`), so a
+/// reference to it is never `Send` either, and axum requires a handler's
+/// future to BE `Send`. That forced routing the whole call through a
+/// `spawn_blocking` closure driven by `futures::executor::block_on`, which
+/// held the single global db `Mutex` for the entire `auth.test` round trip
+/// (up to Slack's own 15s timeout) - every other request, and the run
+/// manager's own settle path, blocked behind it. `slack::connect_slack` is
+/// now split: [`slack::verify_slack_tokens`] is awaited here with NO db lock
+/// held (it takes no `&Db` at all, so nothing about it is `!Send`), and only
+/// once that returns does this handler lock the db for the synchronous
+/// [`slack::store_slack_connection`] - which never awaits, so the lock guard
+/// never needs to cross a thread or an await point.
 async fn put_slack(State(state): State<AppState>, body: axum::body::Bytes) -> ApiResult<Response> {
     let parsed: ConnectBody = parse_body(&body)?;
-    let db_arc = state.db_arc();
     let api = Arc::clone(&state.slack_api);
 
-    let result = tokio::task::spawn_blocking(move || {
-        let guard = db_arc.lock().unwrap_or_else(PoisonError::into_inner);
-        futures::executor::block_on(slack::connect_slack(
-            &guard,
-            SlackConnectInput {
-                bot_token: parsed.bot_token,
-                signing_secret: parsed.signing_secret,
-                app_token: parsed.app_token,
-            },
-            api.as_ref(),
-        ))
-    })
-    .await
-    .map_err(|_| AppError::from("slack connect task panicked".to_string()))?;
+    let test =
+        match slack::verify_slack_tokens(&parsed.bot_token, &parsed.signing_secret, api.as_ref())
+            .await
+        {
+            Ok(test) => test,
+            Err(error) => {
+                return Ok((StatusCode::BAD_REQUEST, Json(json!({"error": error}))).into_response());
+            }
+        };
+
+    let input = SlackConnectInput {
+        bot_token: parsed.bot_token,
+        signing_secret: parsed.signing_secret,
+        app_token: parsed.app_token,
+    };
+    let result = {
+        let db = state.db();
+        slack::store_slack_connection(&db, &input, test)
+    };
 
     Ok(match result {
         Ok(status) => Json(status).into_response(),
