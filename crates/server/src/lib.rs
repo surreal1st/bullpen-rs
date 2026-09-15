@@ -190,7 +190,7 @@ impl AppState {
             Arc::clone(&sandbox),
         ));
         let room_engine = rooms::RoomEngine::install(Arc::clone(&db), Arc::clone(&runs));
-        AppState {
+        let state = AppState {
             db,
             client_root: Arc::new(client_root),
             runs,
@@ -199,7 +199,26 @@ impl AppState {
             catalog,
             credits,
             sandbox,
-        }
+        };
+
+        // S5b-04b: chains `settle_goal_run` onto `on_run_done` ADDITIVELY,
+        // via `RunManager::add_on_run_done` - `RoomEngine::install` above
+        // already claimed the hook via `set_on_run_done` to chain a room
+        // round, and this must not displace that. Without this, a goal's
+        // work session finished and nothing ever folded its spend, advanced
+        // its no-progress streak, or paused it - see `goals::settle_goal_run`'s
+        // own doc. Fired for every run regardless of what started it, same
+        // as TS's `onRunDone`; `settle_goal_run` itself no-ops for a run
+        // whose `goal_id` is null, so an ordinary chat/routine/room run
+        // costs one no-op lookup here.
+        let goal_state = state.clone();
+        state
+            .runs
+            .add_on_run_done(move |run_id, _bot_id, _conversation_id| {
+                goals::settle_goal_run(&goal_state, run_id, chrono::Utc::now());
+            });
+
+        state
     }
 
     /// B2: the one guard every route takes the db lock through. A poisoned

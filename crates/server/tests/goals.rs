@@ -898,6 +898,87 @@ async fn goals_tick_route_fires_the_same_thing_the_scheduler_would() {
     }
 }
 
+// ---------------------------------------------------------------------
+// on_run_done wiring (S5b-04b)
+// ---------------------------------------------------------------------
+
+/// The BITE target for S5b-04b: `settle_goal_run` is fully ported and
+/// directly tested above (`settle_goal_run_pauses_after_three_no_tool_
+/// sessions_in_a_row`), but that test calls it explicitly - it would stay
+/// green even if nothing in production ever called `settle_goal_run` at
+/// all, which is exactly the bug S5b-04 shipped. This test never calls
+/// `settle_goal_run` itself: it drives THREE real goal sessions all the way
+/// through `RunManager` (`run_goal_now` -> a real spawned run -> `wait_for_
+/// goal_run` watching it leave "running") with a scripted model that never
+/// calls a tool, and only then checks the goal's own state. If
+/// `on_run_done` is not wired to `settle_goal_run`, no session ever folds
+/// into `no_tool_streak`, the goal never reaches NO_TOOL_LIMIT (3), and it
+/// stays "active" with an empty log forever - this must go red without the
+/// wiring in `AppState::build`.
+#[tokio::test]
+async fn a_completed_goal_run_settles_through_on_run_done_and_pauses_after_three() {
+    let db = open_db();
+    let session = seed_session(&db);
+    seed_bot(&db, "arthur", None);
+    let now = Utc::now();
+    let goal = store::goals::create_goal(
+        &db,
+        CreateGoalInput {
+            bot_id: "arthur".to_string(),
+            objective: "Ship the thing".to_string(),
+            done_when: "It ships".to_string(),
+            budget_tokens: None,
+            budget_until: None,
+        },
+        now,
+    )
+    .expect("create goal");
+
+    // No tool calls in any of the three scripted replies - `settle_goal_run`
+    // must see `did_work == false` every time for the streak to reach
+    // NO_TOOL_LIMIT on the third.
+    let port: Arc<dyn model::ModelPort> = Arc::new(ScriptedPort::new(vec![
+        text_script("session one, no tool use"),
+        text_script("session two, no tool use"),
+        text_script("session three, no tool use"),
+    ]));
+    let state = AppState::with_port(db, port);
+    let app = build_app(state.clone());
+
+    for _ in 0..3 {
+        let result = scheduler::run_goal_now(&state, &goal.id, Utc::now());
+        assert!(result.is_ok(), "run_goal_now must start a session");
+        let run = wait_for_goal_run(&app, &session, &goal.id).await;
+        assert_eq!(
+            run.get("status").and_then(|s| s.as_str()),
+            Some("done"),
+            "each scripted session must complete cleanly"
+        );
+    }
+
+    let row = goal_row(&app, &session, "arthur", &goal.id).await;
+    assert_eq!(
+        row.get("status").and_then(|v| v.as_str()),
+        Some("paused"),
+        "three real, tool-free sessions must pause the goal via on_run_done \
+         settling - it never will if settle_goal_run is not wired in"
+    );
+    assert_eq!(
+        row.get("reason").and_then(|v| v.as_str()),
+        Some(NO_TOOL_PAUSE_REASON)
+    );
+    let log = row
+        .get("log")
+        .and_then(|v| v.as_array())
+        .expect("log array");
+    assert!(
+        log.iter()
+            .any(|entry| entry.get("text").and_then(|t| t.as_str()) == Some(NO_TOOL_PAUSE_REASON)),
+        "the pause must leave its own reflect-shaped log entry behind, not \
+         just flip status: {log:?}"
+    );
+}
+
 #[tokio::test]
 async fn goal_run_route_404s_for_an_unknown_goal() {
     let db = open_db();

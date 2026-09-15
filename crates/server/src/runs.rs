@@ -269,6 +269,29 @@ impl RunManager {
         *self.on_run_done.lock().expect("on_run_done mutex poisoned") = Some(Box::new(f));
     }
 
+    /// S5b-04b: ADDS a listener rather than replacing whatever `on_run_done`
+    /// already holds, so `AppState::build` can wire `goals::settle_goal_run`
+    /// in without displacing `RoomEngine::install`'s own `set_on_run_done`
+    /// call (a room round chaining on the same hook). `on_run_done` stays a
+    /// single stored closure underneath - this captures whatever was there
+    /// before, calls it first, then calls `f` - so call order matches
+    /// registration order and a caller that only ever wants ONE listener
+    /// (a test) can still reach for `set_on_run_done` unchanged.
+    pub fn add_on_run_done(&self, f: impl Fn(&str, &str, &str) + Send + Sync + 'static) {
+        let previous = self
+            .on_run_done
+            .lock()
+            .expect("on_run_done mutex poisoned")
+            .take();
+        let combined: OnRunDone = Box::new(move |run_id, bot_id, conversation_id| {
+            if let Some(prev) = &previous {
+                prev(run_id, bot_id, conversation_id);
+            }
+            f(run_id, bot_id, conversation_id);
+        });
+        *self.on_run_done.lock().expect("on_run_done mutex poisoned") = Some(combined);
+    }
+
     /// S1-06 wires this so `message_bot` posting into a room can wake the
     /// round, the same way a person typing into it does.
     pub fn set_start_room_turn(&self, f: impl Fn(&str, bool) -> bool + Send + Sync + 'static) {
