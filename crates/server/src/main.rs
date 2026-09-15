@@ -74,6 +74,7 @@ async fn main() {
     // `RunManager`) every route in `app` shares. Cloning `state` before
     // `build_app` consumes it, not after: `build_app` takes it by value.
     let _scheduler = server::routines::start_scheduler(state.clone());
+    let _goal_scheduler = server::goals::start_goal_scheduler(state.clone());
 
     let app = server::build_app(state);
 
