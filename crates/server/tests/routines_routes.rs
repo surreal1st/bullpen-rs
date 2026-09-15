@@ -509,3 +509,159 @@ async fn get_routine_runs_limited() {
         .unwrap_or(&empty_vec);
     assert_eq!(runs.len(), 0, "new routine should have no runs");
 }
+
+/// S5-F-02 (F3/F5, `reviews/S5-R.md`): before this fix, `POST /api/
+/// routines` stored the raw phrase Josh typed ("every 15 minutes") in the
+/// `schedule` column and echoed it back as a bare string - a live TS
+/// Bullpen's `JSON.parse(row.schedule)` would throw on that row. This is
+/// the fix's own end-to-end proof, from what a client observes: the
+/// created routine's `schedule` field is the TS JSON object (not a typed
+/// phrase), and `scheduleText` carries the human description - on BOTH the
+/// create response and the list.
+#[tokio::test]
+async fn created_routine_holds_the_ts_json_schedule_shape() {
+    let db = open_db();
+    let session = seed_session(&db);
+    let bot_id = create_test_bot(&db);
+    let app = app_for(db);
+
+    let (status, body) = post_with_auth(
+        &app,
+        "/api/routines",
+        &session,
+        json!({
+            "botId": &bot_id,
+            "name": "Test",
+            "prompt": "Do something",
+            "schedule": "every 15 minutes",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    assert_eq!(
+        body.get("routine").and_then(|r| r.get("schedule")),
+        Some(&json!({"kind": "interval", "minutes": 15})),
+        "schedule should be the TS JSON object, not the typed phrase"
+    );
+    assert_eq!(
+        body.get("routine")
+            .and_then(|r| r.get("scheduleText"))
+            .and_then(|v| v.as_str()),
+        Some("every 15 minutes"),
+        "scheduleText should be the human description"
+    );
+
+    // The list carries the same shape, not just the create response.
+    let (status, body) = get_with_auth(&app, "/api/routines", &session).await;
+    assert_eq!(status, StatusCode::OK);
+    let routines = body.get("routines").and_then(|v| v.as_array()).unwrap();
+    assert_eq!(routines.len(), 1);
+    assert_eq!(
+        routines[0].get("schedule"),
+        Some(&json!({"kind": "interval", "minutes": 15}))
+    );
+    assert_eq!(
+        routines[0].get("scheduleText").and_then(|v| v.as_str()),
+        Some("every 15 minutes"),
+        "the list renders the description from scheduleText"
+    );
+}
+
+/// S5-F-02 (F3): a `PATCH` that changes the schedule must re-encode the new
+/// phrase as TS JSON too, not just recompute `nextRunAt`.
+#[tokio::test]
+async fn patched_schedule_holds_the_ts_json_schedule_shape() {
+    let db = open_db();
+    let session = seed_session(&db);
+    let bot_id = create_test_bot(&db);
+    let app = app_for(db);
+
+    let (_status, body) = post_with_auth(
+        &app,
+        "/api/routines",
+        &session,
+        json!({
+            "botId": &bot_id,
+            "name": "Test",
+            "prompt": "Do something",
+            "schedule": "hourly",
+        }),
+    )
+    .await;
+    let routine_id = body
+        .get("routine")
+        .and_then(|r| r.get("id"))
+        .and_then(|v| v.as_str())
+        .unwrap();
+
+    let (status, body) = patch_with_auth(
+        &app,
+        &format!("/api/routines/{}", routine_id),
+        &session,
+        json!({"schedule": "daily at 07:30"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body.get("routine").and_then(|r| r.get("schedule")),
+        Some(&json!({"kind": "daily", "hour": 7, "minute": 30}))
+    );
+    assert_eq!(
+        body.get("routine")
+            .and_then(|r| r.get("scheduleText"))
+            .and_then(|v| v.as_str()),
+        Some("daily at 07:30")
+    );
+}
+
+/// S5-F-02 (F3): a routine row written directly with the TS JSON shape in
+/// its `schedule` column (as a live TS Bullpen would leave it -
+/// `routines.ts:410`'s `JSON.stringify(parsed.schedule)`) must fire exactly
+/// like one this crate created itself. Before F3, `fire_due`'s
+/// `schedule::parse_schedule` only understood the human phrase grammar, so
+/// a TS-shaped row's JSON failed to parse and `fire_due` `continue`d past
+/// it forever - silently never firing, no health recorded
+/// (`reviews/S5-R.md` F3). Uses `AppState::with_port`/`ScriptedPort`
+/// (not `app_for`'s real `AppState::new`) because `fire_due` here really
+/// does start a run, same posture as `starting_a_routine_gives_it_a_non_
+/// null_next_run_at_that_fires` above and `tests/routines_fire.rs`.
+#[tokio::test]
+async fn a_ts_shaped_json_schedule_row_fires() {
+    let db = open_db();
+    model::routing::set_routing_settings(&db, Some(false), None)
+        .expect("disable routing classifier");
+    server::judge::set_judge_enabled(&db, false).expect("disable judge");
+    let bot_id = create_test_bot(&db);
+
+    let routine_id = Uuid::new_v4().to_string();
+    let now = chrono::Utc::now();
+    let past = (now - chrono::Duration::minutes(1)).to_rfc3339();
+    db.conn()
+        .execute(
+            "INSERT INTO routines (id, bot_id, name, prompt, schedule, active, next_run_at, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7)",
+            params![
+                &routine_id,
+                &bot_id,
+                "TS routine",
+                "Do the TS thing",
+                r#"{"kind":"interval","minutes":15}"#,
+                &past,
+                &now.to_rfc3339(),
+            ],
+        )
+        .expect("seed a TS-shaped routine row");
+
+    let scripted =
+        std::sync::Arc::new(common::ScriptedPort::new(vec![common::text_script("done")]));
+    let port: std::sync::Arc<dyn model::ModelPort> = scripted.clone();
+    let state = AppState::with_port(db, port);
+
+    let started = server::routines::fire_due(&state, now).await;
+    assert_eq!(
+        started.iter().filter(|(id, _)| id == &routine_id).count(),
+        1,
+        "a TS-shaped JSON schedule row must fire, not be skipped forever"
+    );
+}

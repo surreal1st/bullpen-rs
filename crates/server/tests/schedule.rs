@@ -1,5 +1,5 @@
 use chrono::{Datelike, Local, TimeZone, Timelike, Utc, Weekday};
-use server::schedule::{Schedule, describe_schedule, next_run, parse_schedule};
+use server::schedule::{ClockTime, Schedule, describe_schedule, next_run, parse_schedule};
 
 #[test]
 fn test_understands_the_four_shapes() {
@@ -424,7 +424,7 @@ fn test_clock_single_day_single_time() {
     match result {
         Schedule::Clock { days, times } => {
             assert_eq!(days, vec![1]);
-            assert_eq!(times, vec![(9, 0)]);
+            assert_eq!(times, vec![ClockTime { hour: 9, minute: 0 }]);
         }
         _ => panic!("Expected clock"),
     }
@@ -436,7 +436,13 @@ fn test_clock_multiple_days() {
     match result {
         Schedule::Clock { days, times } => {
             assert_eq!(days, vec![1, 4]);
-            assert_eq!(times, vec![(10, 30)]);
+            assert_eq!(
+                times,
+                vec![ClockTime {
+                    hour: 10,
+                    minute: 30
+                }]
+            );
         }
         _ => panic!("Expected clock - got: {:?}", result),
     }
@@ -448,7 +454,20 @@ fn test_clock_multiple_times() {
     match result {
         Schedule::Clock { days, times } => {
             assert_eq!(days, vec![1, 2, 3, 4, 5]);
-            assert_eq!(times, vec![(9, 0), (13, 0), (17, 0)]);
+            assert_eq!(
+                times,
+                vec![
+                    ClockTime { hour: 9, minute: 0 },
+                    ClockTime {
+                        hour: 13,
+                        minute: 0
+                    },
+                    ClockTime {
+                        hour: 17,
+                        minute: 0
+                    },
+                ]
+            );
         }
         _ => panic!("Expected clock - got: {:?}", result),
     }
@@ -460,7 +479,13 @@ fn test_clock_weekends() {
     match result {
         Schedule::Clock { days, times } => {
             assert_eq!(days, vec![0, 6]);
-            assert_eq!(times, vec![(10, 0)]);
+            assert_eq!(
+                times,
+                vec![ClockTime {
+                    hour: 10,
+                    minute: 0
+                }]
+            );
         }
         _ => panic!("Expected clock - got: {:?}", result),
     }
@@ -485,7 +510,13 @@ fn test_clock_with_commas() {
         Schedule::Clock { days, times } => {
             assert!(days.contains(&2));
             assert!(days.contains(&4));
-            assert_eq!(times, vec![(11, 0)]);
+            assert_eq!(
+                times,
+                vec![ClockTime {
+                    hour: 11,
+                    minute: 0
+                }]
+            );
         }
         _ => panic!("Expected clock"),
     }

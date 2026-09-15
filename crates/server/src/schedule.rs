@@ -12,16 +12,39 @@
 //! Times use the local time, because "08:43" means breakfast, not UTC.
 //! `next_run` takes and returns `DateTime<Utc>` but performs comparisons and
 //! increments using local time, the same way the TS code works.
+//!
+//! S5-F-02 (F3/F5/F12, `reviews/S5-R.md`): `Schedule` now derives
+//! `Serialize`/`Deserialize` with a wire shape byte-equal to TS's own
+//! `Schedule` union (`bullpen-night/src/server/schedule.ts:16-35`) -
+//! `{"kind":"interval","minutes":15}`, `{"kind":"clock","days":[1],
+//! "times":[{"hour":9,"minute":0}]}`, etc. - because `routines.schedule`
+//! now holds that JSON (F3), not the typed phrase. `parse_schedule` accepts
+//! EITHER shape: JSON first (a TS-written or bullpen-rs-written row), then
+//! the human phrase grammar below (a fresh `POST`/`PATCH` body) - one
+//! function, so `fire_due`/`resume_absence_paused`/`POST /:id/active`
+//! (all outside this ticket's owned files) keep working unmodified once the
+//! column's content changes underneath them.
 
 use chrono::{DateTime, Datelike, Local, Timelike, Utc, Weekday};
+use serde::{Deserialize, Serialize};
 
-/// Represents a schedule in human-readable form.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Represents a schedule in human-readable form. Wire shape matches TS's
+/// `Schedule` interface exactly (`schedule.ts:16-35`) via an internally
+/// tagged enum: `"kind"` first, then the variant's own fields in the same
+/// order TS's object literals list them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "lowercase",
+    rename_all_fields = "camelCase"
+)]
 pub enum Schedule {
     /// Every N minutes, where N >= 5.
     Interval {
         minutes: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         from_hour: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         to_hour: Option<u32>,
     },
     /// Every hour on a specific minute.
@@ -33,8 +56,19 @@ pub enum Schedule {
     /// On specific days at specific times.
     Clock {
         days: Vec<u32>,
-        times: Vec<(u32, u32)>,
+        times: Vec<ClockTime>,
     },
+}
+
+/// One fire time within a `Clock` schedule. A struct (not a tuple) because
+/// TS's own `times` entries are `{ hour, minute }` objects
+/// (`schedule.ts:31`) - a tuple would serialize as a bare `[9,0]` array and
+/// a TS `JSON.parse` reader doing `time.hour`/`time.minute` would see
+/// `undefined` for both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClockTime {
+    pub hour: u32,
+    pub minute: u32,
 }
 
 const EXAMPLES: &str = "every 15 minutes, hourly, daily at 07:30, weekdays at 08:43";
@@ -49,9 +83,21 @@ const DAY_NAMES: &[&str] = &[
     "saturday",
 ];
 
-/// Parses a human-readable schedule string into a Schedule.
+/// Parses a schedule string into a `Schedule`.
+///
+/// Tries the JSON wire shape first (F3: a TS-written or bullpen-rs-written
+/// `routines.schedule` column), falling back to the human phrase grammar
+/// below (a freshly typed `POST`/`PATCH` body). This double duty is
+/// deliberate - see the module doc for why.
 pub fn parse_schedule(input: &str) -> Result<Schedule, String> {
-    let text = input.trim().to_lowercase();
+    let trimmed = input.trim();
+    if trimmed.starts_with('{')
+        && let Ok(schedule) = serde_json::from_str::<Schedule>(trimmed)
+    {
+        return Ok(schedule);
+    }
+
+    let text = trimmed.to_lowercase();
     let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
 
     if text.is_empty() {
@@ -93,20 +139,38 @@ pub fn parse_schedule(input: &str) -> Result<Schedule, String> {
         let kind_part = &text[..at_idx];
         let time_part = &text[at_idx + 4..];
 
-        if let Some((hour, minute)) = parse_time(time_part) {
+        // F12: this used to time-check ANY `kind_part` before asking
+        // whether it was even "daily"/"weekday" - so "foobar at 99:99" hit
+        // the hour>23 check and returned "That is not a time of day."
+        // instead of falling to `parse_clock`, which is what decides
+        // "foobar" isn't a day name and produces the real "not a schedule
+        // I understand" message. TS's own `at` regex only matches those
+        // two literal kinds at all (`schedule.ts:77`) - anything else never
+        // reaches its hour/minute range check.
+        let is_daily_or_weekday =
+            matches!(kind_part, "daily" | "every day" | "weekdays" | "weekday");
+
+        // time_part not matching a strict "H:MM"/"HH:MM" (F12: "7:5",
+        // "007:30") falls through to `parse_clock` below, same as any
+        // other `kind_part` - TS's regex simply doesn't match here either.
+        if is_daily_or_weekday && let Some((hour, minute)) = parse_time(time_part) {
             if hour > 23 || minute > 59 {
                 return Err("That is not a time of day.".to_string());
             }
+            return Ok(if kind_part == "daily" || kind_part == "every day" {
+                Schedule::Daily { hour, minute }
+            } else {
+                Schedule::Weekdays { hour, minute }
+            });
+        }
 
-            if kind_part == "daily" || kind_part == "every day" {
-                return Ok(Schedule::Daily { hour, minute });
-            } else if kind_part == "weekdays" || kind_part == "weekday" {
-                return Ok(Schedule::Weekdays { hour, minute });
-            } else if let Ok(Some(sched)) = parse_clock(&text) {
-                return Ok(sched);
-            }
-        } else if let Ok(Some(sched)) = parse_clock(&text) {
-            return Ok(sched);
+        match parse_clock(&text) {
+            Ok(Some(sched)) => return Ok(sched),
+            Ok(None) => {}
+            // F12: a clock-shaped error (e.g. "`7:5` is not a time of
+            // day.") must reach the caller as-is, not get swallowed into
+            // the generic "not a schedule I understand" fallback below.
+            Err(msg) => return Err(msg),
         }
     }
 
@@ -116,14 +180,25 @@ pub fn parse_schedule(input: &str) -> Result<Schedule, String> {
     ))
 }
 
-/// Parse a single time "HH:MM"
+/// Parses a single "H:MM" or "HH:MM" time strictly - TS's own regex is
+/// `\d{1,2}:\d{2}` (`schedule.ts:77,107`): 1-2 digit hour, EXACTLY 2 digit
+/// minute, digits only.
+///
+/// F12: this used to parse leniently via `str::parse`, so "7:5" (a 1-digit
+/// minute) and "007:30" (a 3-digit hour) both parsed as valid times where
+/// TS's anchored regex rejects both - accepting them here meant a typo like
+/// "daily at 7:5" silently became "daily at 07:05" instead of falling
+/// through to the clock grammar's own (correct) error.
 fn parse_time(text: &str) -> Option<(u32, u32)> {
-    let parts: Vec<&str> = text.split(':').collect();
-    if parts.len() != 2 {
+    let (h, m) = text.split_once(':')?;
+    if h.is_empty() || h.len() > 2 || !h.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    let hour = parts[0].parse::<u32>().ok()?;
-    let minute = parts[1].parse::<u32>().ok()?;
+    if m.len() != 2 || !m.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let hour = h.parse::<u32>().ok()?;
+    let minute = m.parse::<u32>().ok()?;
     Some((hour, minute))
 }
 
@@ -151,7 +226,7 @@ fn parse_clock(text: &str) -> Result<Option<Schedule>, String> {
     };
 
     // Parse times from time_part, handling "09:00, 13:00 and 17:00" format
-    let mut times: Vec<(u32, u32)> = Vec::new();
+    let mut times: Vec<ClockTime> = Vec::new();
 
     // Replace " and " with commas for easier splitting
     let normalized = time_part.replace(" and ", ",");
@@ -166,21 +241,18 @@ fn parse_clock(text: &str) -> Result<Option<Schedule>, String> {
             if hour > 23 || minute > 59 {
                 return Err("That is not a time of day.".to_string());
             }
-            times.push((hour, minute));
+            times.push(ClockTime { hour, minute });
         } else {
             return Err(format!("`{}` is not a time of day.", trimmed));
         }
     }
 
-    // Sort and dedupe times
-    times.sort();
-    times.dedup();
-
     if times.is_empty() {
         return Ok(None);
     }
 
-    times.sort_by_key(|(h, m)| (*h, *m));
+    times.sort_by_key(|t| (t.hour, t.minute));
+    times.dedup();
     Ok(Some(Schedule::Clock { days, times }))
 }
 
@@ -199,7 +271,12 @@ fn parse_days(text: &str) -> Result<Option<Vec<u32>>, String> {
     let mut found: Vec<u32> = Vec::new();
 
     for word in text.split(|c: char| c == ',' || c.is_whitespace()) {
-        let w = word.trim().trim_end_matches('s');
+        let word = word.trim();
+        // F12: TS strips at most ONE trailing "s" (`text.replace(/s$/,
+        // "")`, not a global replace) - `trim_end_matches('s')` stripped
+        // EVERY trailing "s", so a typo like "mondayss" wrongly matched
+        // "monday" instead of failing to parse.
+        let w = word.strip_suffix('s').unwrap_or(word);
         if w.is_empty() || w == "and" {
             continue;
         }
@@ -284,10 +361,10 @@ fn list_days(days: &[u32]) -> String {
 }
 
 /// Lists times in human-readable form.
-fn list_times(times: &[(u32, u32)]) -> String {
+fn list_times(times: &[ClockTime]) -> String {
     let parts: Vec<String> = times
         .iter()
-        .map(|(h, m)| format!("{:02}:{:02}", h, m))
+        .map(|t| format!("{:02}:{:02}", t.hour, t.minute))
         .collect();
 
     if parts.is_empty() {
@@ -324,14 +401,21 @@ pub fn next_run(schedule: &Schedule, from: DateTime<Utc>) -> DateTime<Utc> {
             let mut next = from_local + chrono::Duration::minutes(*minutes as i64);
 
             if let (Some(from_h), Some(to_h)) = (from_hour, to_hour) {
+                // F12: this used to zero the minute and wrap the hour with
+                // `% 24` on every step - throwing away the minute TS
+                // preserves and never advancing the calendar date when the
+                // hour wrapped past midnight. Adding a real hour instead
+                // rolls the date automatically, same as TS's
+                // `setHours(h + 1, m, 0, 0)`. Unreachable today (nothing
+                // sets `from_hour`/`to_hour` yet) but wrong is wrong.
+                next = next
+                    .with_second(0)
+                    .unwrap_or(next)
+                    .with_nanosecond(0)
+                    .unwrap_or(next);
                 let mut guard = 0;
                 while !in_window(next.hour(), *from_h, *to_h) && guard < 48 {
-                    next = next.with_hour((next.hour() + 1) % 24).unwrap_or(next);
-                    next = next
-                        .with_minute(0)
-                        .unwrap_or(next)
-                        .with_second(0)
-                        .unwrap_or(next);
+                    next += chrono::Duration::hours(1);
                     guard += 1;
                 }
             }
@@ -345,12 +429,14 @@ pub fn next_run(schedule: &Schedule, from: DateTime<Utc>) -> DateTime<Utc> {
                     continue;
                 }
 
-                for &(hour, minute) in times {
-                    let mut test_time = day.with_hour(hour).unwrap_or(day);
+                for time in times {
+                    let mut test_time = day.with_hour(time.hour).unwrap_or(day);
                     test_time = test_time
-                        .with_minute(minute)
+                        .with_minute(time.minute)
                         .unwrap_or(test_time)
                         .with_second(0)
+                        .unwrap_or(test_time)
+                        .with_nanosecond(0)
                         .unwrap_or(test_time);
 
                     if test_time > from_local {
@@ -362,7 +448,11 @@ pub fn next_run(schedule: &Schedule, from: DateTime<Utc>) -> DateTime<Utc> {
         }
         Schedule::Hourly { minute } => {
             let mut next = from_local.with_minute(*minute).unwrap_or(from_local);
-            next = next.with_second(0).unwrap_or(next);
+            next = next
+                .with_second(0)
+                .unwrap_or(next)
+                .with_nanosecond(0)
+                .unwrap_or(next);
             if next <= from_local {
                 next += chrono::Duration::hours(1);
             }
@@ -374,6 +464,8 @@ pub fn next_run(schedule: &Schedule, from: DateTime<Utc>) -> DateTime<Utc> {
                 .with_minute(*minute)
                 .unwrap_or(next)
                 .with_second(0)
+                .unwrap_or(next)
+                .with_nanosecond(0)
                 .unwrap_or(next);
             if next <= from_local {
                 next += chrono::Duration::days(1);
@@ -386,6 +478,8 @@ pub fn next_run(schedule: &Schedule, from: DateTime<Utc>) -> DateTime<Utc> {
                 .with_minute(*minute)
                 .unwrap_or(next)
                 .with_second(0)
+                .unwrap_or(next)
+                .with_nanosecond(0)
                 .unwrap_or(next);
             if next <= from_local {
                 next += chrono::Duration::days(1);
@@ -516,5 +610,154 @@ mod tests {
         let next = next_run(&s, friday_utc);
         let next_local = next.with_timezone(&Local);
         assert_eq!(next_local.weekday(), Weekday::Mon, "should skip to Monday");
+    }
+
+    /// F3: `Schedule`'s wire shape must be byte-equal to TS's own JSON
+    /// (`schedule.ts:16-35`) - field names, which fields exist per kind,
+    /// and the "kind" tag - since `routines.schedule` now holds exactly
+    /// this text and a live TS Bullpen's `JSON.parse` reads it back.
+    #[test]
+    fn test_schedule_json_shape_matches_ts_byte_for_byte() {
+        let cases: &[(Schedule, &str)] = &[
+            (
+                Schedule::Interval {
+                    minutes: 15,
+                    from_hour: None,
+                    to_hour: None,
+                },
+                r#"{"kind":"interval","minutes":15}"#,
+            ),
+            (
+                Schedule::Hourly { minute: 0 },
+                r#"{"kind":"hourly","minute":0}"#,
+            ),
+            (
+                Schedule::Daily {
+                    hour: 7,
+                    minute: 30,
+                },
+                r#"{"kind":"daily","hour":7,"minute":30}"#,
+            ),
+            (
+                Schedule::Weekdays {
+                    hour: 8,
+                    minute: 43,
+                },
+                r#"{"kind":"weekdays","hour":8,"minute":43}"#,
+            ),
+            (
+                Schedule::Clock {
+                    days: vec![1, 4],
+                    times: vec![ClockTime { hour: 9, minute: 0 }],
+                },
+                r#"{"kind":"clock","days":[1,4],"times":[{"hour":9,"minute":0}]}"#,
+            ),
+        ];
+
+        for (schedule, expected) in cases {
+            let encoded = serde_json::to_string(schedule).expect("serialize");
+            assert_eq!(&encoded, expected, "mismatch for {:?}", schedule);
+        }
+    }
+
+    /// F3: a schedule written as TS-shaped JSON (a live TS Bullpen row, or
+    /// this crate's own column after F3) parses straight through
+    /// `parse_schedule` - the same function `fire_due`/
+    /// `resume_absence_paused`/`POST /:id/active` already call.
+    #[test]
+    fn test_parse_schedule_accepts_ts_json_shape() {
+        let parsed = parse_schedule(r#"{"kind":"interval","minutes":15}"#).expect("parse json");
+        assert_eq!(
+            parsed,
+            Schedule::Interval {
+                minutes: 15,
+                from_hour: None,
+                to_hour: None,
+            }
+        );
+
+        let parsed =
+            parse_schedule(r#"{"kind":"clock","days":[1,4],"times":[{"hour":9,"minute":0}]}"#)
+                .expect("parse json clock");
+        assert_eq!(
+            parsed,
+            Schedule::Clock {
+                days: vec![1, 4],
+                times: vec![ClockTime { hour: 9, minute: 0 }],
+            }
+        );
+    }
+
+    /// F12: "foobar" is not a day name at all, so this must fall all the
+    /// way to the generic "not a schedule I understand" message - not the
+    /// hour-range check, which only fires for a RECOGNISED "daily"/
+    /// "weekday" kind (`schedule.ts`'s own `at` regex never matches
+    /// "foobar" in the first place).
+    #[test]
+    fn test_unrecognised_kind_falls_to_the_generic_message_not_time_of_day() {
+        let result = parse_schedule("foobar at 99:99");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("not a schedule I understand"), "got: {}", err);
+    }
+
+    /// F12: "daily at 99:99" IS a recognised kind with well-formed digit
+    /// widths, so it must still hit the explicit hour/minute range check.
+    #[test]
+    fn test_recognised_kind_with_out_of_range_time_is_not_a_time_of_day() {
+        let result = parse_schedule("daily at 99:99");
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "That is not a time of day.");
+    }
+
+    /// F12: `\d{1,2}:\d{2}` - a 1-digit minute or a 3-digit hour is not a
+    /// valid time, and TS falls through to the clock grammar's own error
+    /// for it rather than silently rounding.
+    #[test]
+    fn test_loose_time_digit_widths_are_rejected() {
+        let result = parse_schedule("daily at 7:5");
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "`7:5` is not a time of day.");
+
+        let result = parse_schedule("daily at 007:30");
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "`007:30` is not a time of day.");
+    }
+
+    /// F12: TS strips at most ONE trailing "s" from a day word
+    /// (`text.replace(/s$/, "")`) - "mondayss" must NOT match "monday".
+    #[test]
+    fn test_double_trailing_s_on_a_day_name_does_not_parse() {
+        let result = parse_schedule("mondayss at 09:00");
+        assert!(result.is_err());
+    }
+
+    /// F12: every computed `next_run_at` should carry zero sub-second
+    /// nanoseconds, matching TS's `setHours`/`setMinutes` (which always
+    /// zero ms) - a stray nanosecond would make two "simultaneous" runs
+    /// compare unequal for no reason a person typed.
+    #[test]
+    fn test_next_run_has_no_sub_second_nanoseconds() {
+        let from = DateTime::<Utc>::from_naive_utc_and_offset(
+            DateTime::from_timestamp(1725955800, 123_456_789)
+                .unwrap()
+                .naive_utc(),
+            Utc,
+        );
+
+        for text in &["daily at 07:30", "hourly", "weekdays at 08:43"] {
+            let s = parse_schedule(text).expect("parse");
+            let next = next_run(&s, from);
+            assert_eq!(
+                next.timestamp_subsec_nanos(),
+                0,
+                "next_run_at should have zero nanoseconds for: {}",
+                text
+            );
+        }
+
+        let clock = parse_schedule("monday at 09:00").expect("parse clock");
+        let next = next_run(&clock, from);
+        assert_eq!(next.timestamp_subsec_nanos(), 0, "clock next_run_at");
     }
 }

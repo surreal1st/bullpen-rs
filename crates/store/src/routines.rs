@@ -47,8 +47,18 @@ pub struct Routine {
     pub bot_name: String,
     pub name: String,
     pub prompt: String,
+    /// S5-F-02 (F3): holds whatever the caller stored - after F3 lands in
+    /// `crates/server/src/routes/routines.rs`, that's the TS JSON shape
+    /// (`{"kind":"interval","minutes":15}`), not a typed phrase. Store
+    /// itself never parses or validates this text (it must not depend on
+    /// `server::schedule` - see `S5-tickets.md`'s Design section); the
+    /// route layer decodes it and injects a parsed `schedule` object plus a
+    /// computed `scheduleText` into the wire JSON on the way out (see
+    /// `routes/routines.rs::routine_wire_json`). There is deliberately no
+    /// `schedule_text` field here any more - the old stub always serialized
+    /// `""` (a TODO, never wired up); computing it needs `server::schedule`,
+    /// which this crate cannot reach.
     pub schedule: String,
-    pub schedule_text: String,
     pub active: bool,
     pub next_run_at: Option<String>,
     pub last_run_at: Option<String>,
@@ -615,7 +625,6 @@ fn routine_from_row(db: &Db, row: &rusqlite::Row) -> rusqlite::Result<Routine> {
         name,
         prompt,
         schedule,
-        schedule_text: String::new(), // TODO: compute from schedule using server::schedule when available
         active: active == 1,
         next_run_at,
         last_run_at,

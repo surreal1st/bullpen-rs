@@ -9,6 +9,19 @@
 //! GET /api/routines/:id/runs -> {"runs": [...]}
 //! POST /api/routines/tick -> {"started": [...]} (S5-03)
 //! POST /api/routines/:id/run -> {"runId": "..."} (201) (S5-03)
+//! POST /api/routines/preview -> {"schedule": {...}, "scheduleText": "..."} (S5-F-02, F5)
+//!
+//! S5-F-02 (F3/F5, `reviews/S5-R.md`): `create`/`patch` used to hand
+//! `store::create_routine`/`update_routine` the raw phrase Josh typed
+//! (`body_data.schedule`) - the column ended up holding "every 15 minutes"
+//! where a live TS Bullpen's `routines.ts:410` writes
+//! `JSON.stringify(parsed.schedule)`. Both now store
+//! `serde_json::to_string(&schedule_parsed)` instead (`routine_wire_json`'s
+//! doc has the read-side half). `fire_due`/`resume_absence_paused`
+//! (`crates/server/src/routines.rs`, owned by S5-F-01) and the `active`
+//! handler just above (also S5-F-01) needed NO changes for this: they all
+//! call `schedule::parse_schedule`, which now accepts the JSON shape first
+//! and only falls back to the phrase grammar (see that function's doc).
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -25,6 +38,7 @@ use store::{
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/routines", get(get_routines).post(post_routines))
+        .route("/api/routines/preview", post(post_routines_preview))
         .route(
             "/api/routines/{id}",
             patch(patch_routine).delete(delete_routine_handler),
@@ -33,6 +47,36 @@ pub fn router() -> Router<AppState> {
         .route("/api/routines/{id}/runs", get(get_routine_runs))
         .route("/api/routines/tick", post(post_routines_tick))
         .route("/api/routines/{id}/run", post(post_routine_run))
+}
+
+/// Turns a stored `store::Routine` into the wire shape: `schedule`
+/// overwritten with the PARSED JSON object (not the raw stored string) and
+/// `scheduleText` added as `schedule::describe_schedule` of it (F5). A row
+/// whose `schedule` column fails to parse (a hand-edited db, or the
+/// pre-F3 window where a route briefly wrote the raw phrase) falls back to
+/// leaving the raw stored text under `schedule` and an empty
+/// `scheduleText` rather than 500ing the whole list over one bad row -
+/// this is the "courtesy" F3 names for a legacy phrase-written row.
+fn routine_wire_json(routine: &store::Routine) -> serde_json::Value {
+    let mut value = serde_json::to_value(routine).unwrap_or_else(|_| json!({}));
+    if let Some(map) = value.as_object_mut() {
+        match crate::schedule::parse_schedule(&routine.schedule) {
+            Ok(parsed) => {
+                map.insert(
+                    "schedule".to_string(),
+                    serde_json::to_value(&parsed).unwrap_or(serde_json::Value::Null),
+                );
+                map.insert(
+                    "scheduleText".to_string(),
+                    json!(crate::schedule::describe_schedule(&parsed)),
+                );
+            }
+            Err(_) => {
+                map.insert("scheduleText".to_string(), json!(""));
+            }
+        }
+    }
+    value
 }
 
 #[derive(Deserialize, Default)]
@@ -47,6 +91,7 @@ async fn get_routines(
 ) -> ApiResult<Json<serde_json::Value>> {
     let db = state.db();
     let routines = list_routines(&db, query.bot.as_deref())?;
+    let routines: Vec<serde_json::Value> = routines.iter().map(routine_wire_json).collect();
     Ok(Json(json!({ "routines": routines })))
 }
 
@@ -82,6 +127,12 @@ async fn post_routines(
 
     let now = chrono::Utc::now();
     let next_run_at = crate::schedule::next_run(&schedule_parsed, now).to_rfc3339();
+    // F3: the column holds the TS JSON shape, not the phrase Josh typed -
+    // `routine_wire_json` (the read side) and `fire_due`/
+    // `resume_absence_paused`/`POST /:id/active` (via `parse_schedule`'s
+    // JSON-first branch) all expect this.
+    let schedule_json = serde_json::to_string(&schedule_parsed)
+        .map_err(|e| AppError::bad_request(format!("could not encode schedule: {e}")))?;
 
     // Call the store to create the routine - it will check the 50-cap
     let result = create_routine(
@@ -89,7 +140,7 @@ async fn post_routines(
         &body_data.bot_id,
         &body_data.name,
         &body_data.prompt,
-        body_data.schedule,
+        schedule_json,
         Some(next_run_at),
         body_data.tools,
         body_data.kind.as_deref(),
@@ -106,7 +157,10 @@ async fn post_routines(
             // Retrieve the created routine to return it
             let routine = store::routine_by_id(&db, &id)?
                 .ok_or_else(|| AppError::not_found("routine not found"))?;
-            Ok((StatusCode::CREATED, Json(json!({ "routine": routine }))))
+            Ok((
+                StatusCode::CREATED,
+                Json(json!({ "routine": routine_wire_json(&routine) })),
+            ))
         }
         Err(e) => Err(AppError::bad_request(e)),
     }
@@ -139,12 +193,18 @@ async fn patch_routine(
     let body_data: UpdateRoutineBody = super::parse_body(&body)?;
 
     // If schedule is being updated, validate and compute new next_run_at
+    // and re-encode as the TS JSON shape (F3 - see this module's doc).
     let mut next_run_at = None;
+    let mut schedule_json = None;
     if let Some(ref schedule_text) = body_data.schedule {
         let schedule_parsed =
             crate::schedule::parse_schedule(schedule_text).map_err(AppError::bad_request)?;
         let now = chrono::Utc::now();
         next_run_at = Some(crate::schedule::next_run(&schedule_parsed, now).to_rfc3339());
+        schedule_json = Some(
+            serde_json::to_string(&schedule_parsed)
+                .map_err(|e| AppError::bad_request(format!("could not encode schedule: {e}")))?,
+        );
     }
 
     // Build the update fields
@@ -155,7 +215,7 @@ async fn patch_routine(
     if let Some(prompt) = body_data.prompt {
         updates.prompt = Some(prompt);
     }
-    if let Some(schedule) = body_data.schedule {
+    if let Some(schedule) = schedule_json {
         updates.schedule = Some(schedule);
     }
     if let Some(nra) = next_run_at {
@@ -194,7 +254,7 @@ async fn patch_routine(
     let routine =
         store::routine_by_id(&db, &id)?.ok_or_else(|| AppError::not_found("no such routine"))?;
 
-    Ok(Json(json!({ "routine": routine })))
+    Ok(Json(json!({ "routine": routine_wire_json(&routine) })))
 }
 
 #[derive(Deserialize, Default)]
@@ -297,4 +357,29 @@ async fn post_routine_run(
         }
         Err(error) => Err(AppError::bad_request(error)),
     }
+}
+
+#[derive(Deserialize, Default)]
+struct PreviewBody {
+    schedule: String,
+}
+
+/// POST /api/routines/preview {"schedule": "<phrase>"} -> `{"schedule":
+/// {...}, "scheduleText": "..."}` on success or 400 `{"error": "..."}"` on
+/// a phrase that doesn't parse. S5-F-02 (F5): replaces the client's own
+/// `preview_schedule` grammar (deleted from `routines_editor.rs`) - the
+/// create/edit form's live "-> description" now debounces into this route,
+/// so it can never show a green preview over a save the server would
+/// actually reject (F5's own example: "every 200 hours" used to preview
+/// fine client-side and then 400 on submit).
+async fn post_routines_preview(body: axum::body::Bytes) -> ApiResult<Json<serde_json::Value>> {
+    let body_data: PreviewBody = super::parse_body(&body)?;
+    let parsed =
+        crate::schedule::parse_schedule(&body_data.schedule).map_err(AppError::bad_request)?;
+    let schedule_value = serde_json::to_value(&parsed)
+        .map_err(|e| AppError::bad_request(format!("could not encode schedule: {e}")))?;
+    let description = crate::schedule::describe_schedule(&parsed);
+    Ok(Json(
+        json!({ "schedule": schedule_value, "scheduleText": description }),
+    ))
 }
