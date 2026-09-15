@@ -461,6 +461,77 @@ async fn bite_b_private_address_in_request_is_refused_before_resolve() {
     assert_eq!(resolver.call_count(), 0);
 }
 
+// ============================================================================
+// S6-F-01: is_private_address is private, so decide_connect is the public
+// seam that proves the fix reached production behaviour, not just the
+// inline unit table in src/egress.rs. A literal address that IS private
+// stops before host_allowed/resolve ever run (see the bracket test above);
+// a literal that used to be treated as private (F3/F4) must now reach the
+// resolver and be judged like any other allowed host.
+// ============================================================================
+
+#[tokio::test]
+async fn s6_f_01_previously_missed_ipv6_forms_are_now_refused_as_private() {
+    let literals = [
+        "fe90::1",                  // F3: fe80::/10, quarter the old check missed
+        "fea9::1",                  // F3: fe80::/10
+        "febf::1",                  // F3: fe80::/10, top of the range
+        "0:0:0:0:0:ffff:127.0.0.1", // F3: IPv4-mapped loopback, expanded
+        "::127.0.0.1",              // F3: IPv4-compatible loopback, dotted
+        "::7f00:1",                 // F3: IPv4-compatible loopback, hex
+        "::ffff:0:127.0.0.1",       // F3: IPv4-translated loopback
+        "0::1",                     // F3: loopback, not literal "::1"
+        "0:0:0:0:0:0:0:1",          // F3: loopback, fully expanded
+    ];
+
+    for literal in literals {
+        let policy = EgressPolicy {
+            allow: vec![literal.to_string()],
+        };
+        let resolver = RecordingResolver::new(vec!["8.8.8.8".to_string()]);
+
+        let verdict = decide_connect(literal, 443, &policy, &resolver).await;
+
+        assert!(
+            !verdict.ok,
+            "{literal:?} must now be refused as a private address, verdict: {verdict:?}"
+        );
+        assert!(
+            verdict.reason.contains("private address"),
+            "{literal:?}: expected a private-address refusal, got: {}",
+            verdict.reason
+        );
+        assert_eq!(
+            resolver.call_count(),
+            0,
+            "{literal:?}: a literal private address must be refused before the resolver runs"
+        );
+    }
+}
+
+#[tokio::test]
+async fn s6_f_01_fcc_gov_is_no_longer_treated_as_a_private_address() {
+    // F4: a bare `starts_with("fc")`/`starts_with("fd")` on unvalidated text
+    // treated any "fc"/"fd"-prefixed hostname as a ULA literal. fcc.gov must
+    // reach the ordinary allow-list/resolve path like any other hostname.
+    let policy = EgressPolicy {
+        allow: vec!["fcc.gov".to_string()],
+    };
+    let resolver = RecordingResolver::new(vec!["23.1.2.3".to_string()]);
+
+    let verdict = decide_connect("fcc.gov", 443, &policy, &resolver).await;
+
+    assert!(
+        verdict.ok,
+        "fcc.gov must not be refused as a private address, verdict: {verdict:?}"
+    );
+    assert_eq!(
+        resolver.call_count(),
+        1,
+        "fcc.gov should have reached the resolver, not been refused as an address literal"
+    );
+}
+
 #[tokio::test]
 async fn bite_b_not_on_allow_list_is_refused_before_resolve() {
     // A hostname not on the allow list should be refused

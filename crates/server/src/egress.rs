@@ -11,6 +11,7 @@
 //! This module is the policy and validation only (not the proxy server itself).
 
 use std::collections::HashSet;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// Whether egress is switched on at all. Off unless explicitly set.
 pub fn egress_enabled(env: Option<&str>) -> bool {
@@ -76,77 +77,98 @@ pub struct Verdict {
     pub reason: String,
 }
 
-/// Whether an IP address is private, loopback, link-local, or otherwise internal.
-/// 🔴 `::ffff:127.0.0.1` is why this is not just a prefix check. An IPv4-mapped
-/// IPv6 address is loopback wearing a hat.
-fn is_private_address(ip: &str) -> bool {
-    let raw = ip.trim().to_lowercase();
-    let raw = raw.trim_start_matches('[').trim_end_matches(']');
+/// Whether an IPv4 address is private, loopback, link-local, unspecified, in
+/// the reserved `0.0.0.0/8` block, or CGNAT (`100.64.0.0/10`, RFC 6598 -
+/// carrier-grade NAT space, not covered by `Ipv4Addr::is_private`).
+fn is_private_ipv4(v4: Ipv4Addr) -> bool {
+    v4.is_loopback()
+        || v4.is_private()
+        || v4.is_link_local()
+        || v4.is_unspecified()
+        || v4.octets()[0] == 0
+        || is_cgnat(v4)
+}
 
-    // Unwrap IPv4-mapped and IPv4-compatible IPv6 before anything else, in both
-    // the dotted form (::ffff:127.0.0.1) and the hex form (::ffff:7f00:1).
-    if let Some(caps) = regex::Regex::new(r"^::ffff:(\d+\.\d+\.\d+\.\d+)$")
-        .ok()
-        .and_then(|re| re.captures(raw))
-        && let Some(m) = caps.get(1)
-    {
-        return is_private_address(m.as_str());
-    }
+/// `100.64.0.0/10` - carrier-grade NAT space. Not "private" in RFC 1918's
+/// sense, but not routable to a sandbox either.
+fn is_cgnat(v4: Ipv4Addr) -> bool {
+    let o = v4.octets();
+    o[0] == 100 && (64..=127).contains(&o[1])
+}
 
-    if let Some(caps) = regex::Regex::new(r"^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$")
-        .ok()
-        .and_then(|re| re.captures(raw))
-        && let (Some(m1), Some(m2)) = (caps.get(1), caps.get(2))
-        && let (Ok(high), Ok(low)) = (
-            u16::from_str_radix(m1.as_str(), 16),
-            u16::from_str_radix(m2.as_str(), 16),
-        )
-    {
-        let ipv4 = format!(
-            "{}.{}.{}.{}",
-            (high >> 8) & 255,
-            high & 255,
-            (low >> 8) & 255,
-            low & 255
-        );
-        return is_private_address(&ipv4);
-    }
+/// `fc00::/7` - unique local addresses. `std` has no stable check for this,
+/// so it is a direct mask on the first segment, same shape as the link-local
+/// check below.
+fn is_ipv6_unique_local(v6: Ipv6Addr) -> bool {
+    (v6.segments()[0] & 0xfe00) == 0xfc00
+}
 
-    if raw == "::1" || raw == "::" {
+/// `fe80::/10` - link-local. `std::net::Ipv6Addr::is_unicast_link_local` was
+/// unstable as of the toolchain this crate targets, so this is the same mask
+/// check, done explicitly instead of the old `starts_with("fe80:")`, which
+/// only matched `fe80::/16` - a quarter of the real range.
+fn is_ipv6_link_local(v6: Ipv6Addr) -> bool {
+    (v6.segments()[0] & 0xffc0) == 0xfe80
+}
+
+/// IPv4-compatible IPv6 (RFC 4291 2.5.5.1, deprecated but still parseable):
+/// `::a.b.c.d` - the high 96 bits are zero and the low 32 are an IPv4
+/// address. Distinct from IPv4-*mapped* (`::ffff:a.b.c.d`, handled by
+/// `to_ipv4_mapped` below): no `ffff` marker at all.
+fn ipv4_compatible(v6: Ipv6Addr) -> Option<Ipv4Addr> {
+    let s = v6.segments();
+    (s[0..6] == [0, 0, 0, 0, 0, 0])
+        .then(|| Ipv4Addr::new((s[6] >> 8) as u8, s[6] as u8, (s[7] >> 8) as u8, s[7] as u8))
+}
+
+/// IPv4-translated IPv6 (RFC 2765): `::ffff:0:a.b.c.d` - 64 zero bits, the
+/// `ffff` marker, 16 *more* zero bits, then the IPv4 address. The extra zero
+/// group is what makes this a different bit pattern from IPv4-mapped, and
+/// why `to_ipv4_mapped` alone does not catch it.
+fn ipv4_translated(v6: Ipv6Addr) -> Option<Ipv4Addr> {
+    let s = v6.segments();
+    (s[0..4] == [0, 0, 0, 0] && s[4] == 0xffff && s[5] == 0)
+        .then(|| Ipv4Addr::new((s[6] >> 8) as u8, s[6] as u8, (s[7] >> 8) as u8, s[7] as u8))
+}
+
+/// Whether an IPv6 address is loopback, unspecified, link-local, unique
+/// local, or wraps a private IPv4 address in any of the three textual forms
+/// (mapped, compatible, translated) a resolver or a raw CONNECT host can
+/// legally hand over.
+fn is_private_ipv6(v6: Ipv6Addr) -> bool {
+    if v6.is_loopback() || v6.is_unspecified() {
         return true;
     }
-    if raw.starts_with("fe80:") || raw.starts_with("fc") || raw.starts_with("fd") {
+    if is_ipv6_link_local(v6) || is_ipv6_unique_local(v6) {
         return true;
     }
-
-    let parts: Vec<&str> = raw.split('.').collect();
-    if parts.len() != 4 {
-        return false;
+    if let Some(v4) = v6.to_ipv4_mapped() {
+        return is_private_ipv4(v4);
     }
-
-    let nums: Result<Vec<u8>, _> = parts.iter().map(|p| p.parse::<u8>()).collect();
-    if let Ok(nums) = nums {
-        let a = nums[0];
-        let b = nums[1];
-
-        if a == 10 || a == 127 || a == 0 {
-            return true;
-        }
-        if a == 169 && b == 254 {
-            return true;
-        }
-        if a == 172 && (16..=31).contains(&b) {
-            return true;
-        }
-        if a == 192 && b == 168 {
-            return true;
-        }
-        if a == 100 && (64..=127).contains(&b) {
-            return true;
-        }
+    if let Some(v4) = ipv4_compatible(v6) {
+        return is_private_ipv4(v4);
     }
-
+    if let Some(v4) = ipv4_translated(v6) {
+        return is_private_ipv4(v4);
+    }
     false
+}
+
+/// Whether an IP address is private, loopback, link-local, or otherwise
+/// internal. 🔴 Only classifies strings that actually PARSE as an IP address:
+/// a bare hostname (`fcc.gov`, `fdns.example.com`) falls through to `false`
+/// and is judged by `host_allowed` instead, never by a prefix guess on
+/// unvalidated text.
+fn is_private_address(ip: &str) -> bool {
+    let raw = ip.trim();
+    let raw = raw.strip_prefix('[').unwrap_or(raw);
+    let raw = raw.strip_suffix(']').unwrap_or(raw);
+
+    match raw.parse::<IpAddr>() {
+        Ok(IpAddr::V4(v4)) => is_private_ipv4(v4),
+        Ok(IpAddr::V6(v6)) => is_private_ipv6(v6),
+        Err(_) => false,
+    }
 }
 
 /// The whole decision for one CONNECT request.
@@ -470,6 +492,131 @@ mod tests {
     fn test_is_private_address_with_brackets() {
         assert!(is_private_address("[127.0.0.1]"));
         assert!(is_private_address("[::1]"));
+    }
+
+    /// S6-F-01: this is the SSRF boundary for the sensitive-data tier, so it
+    /// gets a table, not three examples. Every literal the reviewer measured
+    /// against the old regex-based function (S6-R.md Q1/F3/F4), plus the
+    /// literals that were already correct and the boundary cases that prove
+    /// the fe80::/10 and fc00::/7 masks and the 100.64.0.0/10 CGNAT check
+    /// are not over- or under-inclusive.
+    #[test]
+    fn test_is_private_address_table() {
+        let cases: &[(&str, bool, &str)] = &[
+            // --- already refused before this rewrite; must stay refused ---
+            ("::1", true, "loopback"),
+            ("::", true, "unspecified"),
+            ("fc00::1", true, "ULA, low end of fc00::/7"),
+            ("fd12:3456::1", true, "ULA, fd half of fc00::/7"),
+            (
+                "fe80::1",
+                true,
+                "link-local, fe80::/16 (old code's only slice)",
+            ),
+            ("fe80:0:0:0:0:0:0:1", true, "link-local, expanded form"),
+            ("0.0.0.0", true, "unspecified v4"),
+            ("169.254.169.254", true, "link-local v4 (cloud metadata)"),
+            ("::ffff:127.0.0.1", true, "IPv4-mapped loopback, dotted"),
+            ("::ffff:7f00:1", true, "IPv4-mapped loopback, hex"),
+            ("::ffff:a9fe:a9fe", true, "IPv4-mapped metadata, hex"),
+            (
+                "::ffff:169.254.169.254",
+                true,
+                "IPv4-mapped metadata, dotted",
+            ),
+            ("::FFFF:127.0.0.1", true, "IPv4-mapped loopback, uppercase"),
+            ("::ffff:c0a8:1", true, "IPv4-mapped 192.168.0.1"),
+            ("[::1]", true, "bracketed loopback"),
+            (
+                "[::ffff:127.0.0.1]",
+                true,
+                "bracketed mapped loopback, dotted",
+            ),
+            ("[::ffff:7f00:1]", true, "bracketed mapped loopback, hex"),
+            ("100.64.0.1", true, "CGNAT, low end of 100.64.0.0/10"),
+            ("10.1.2.3", true, "RFC 1918 10/8"),
+            ("172.16.0.1", true, "RFC 1918 172.16/12, low end"),
+            ("172.31.255.255", true, "RFC 1918 172.16/12, high end"),
+            ("192.168.1.1", true, "RFC 1918 192.168/16"),
+            // --- F3: NOT refused before this rewrite; must now be refused ---
+            (
+                "fe90::1",
+                true,
+                "F3: fe80::/10, quarter the old check missed",
+            ),
+            (
+                "fea9::1",
+                true,
+                "F3: fe80::/10, quarter the old check missed",
+            ),
+            ("febf::1", true, "F3: fe80::/10, top of the range"),
+            (
+                "0:0:0:0:0:ffff:127.0.0.1",
+                true,
+                "F3: IPv4-mapped loopback, fully expanded",
+            ),
+            (
+                "0000:0000:0000:0000:0000:ffff:7f00:0001",
+                true,
+                "F3: IPv4-mapped loopback, fully expanded hex",
+            ),
+            ("::127.0.0.1", true, "F3: IPv4-compatible loopback, dotted"),
+            ("::7f00:1", true, "F3: IPv4-compatible loopback, hex"),
+            ("::a9fe:a9fe", true, "F3: IPv4-compatible metadata, hex"),
+            (
+                "::ffff:0:127.0.0.1",
+                true,
+                "F3: IPv4-translated loopback (extra zero group)",
+            ),
+            ("0::1", true, "F3: loopback, not the literal string \"::1\""),
+            (
+                "0:0:0:0:0:0:0:1",
+                true,
+                "F3: loopback, fully expanded, not \"::1\"",
+            ),
+            ("::0.0.0.0", true, "F3: IPv4-compatible unspecified"),
+            // --- F4: wrongly refused before this rewrite; must now be allowed ---
+            ("fcc.gov", false, "F4: hostname, not an address at all"),
+            ("fdns.example.com", false, "F4: hostname starting \"fd\""),
+            ("fcbook.com", false, "F4: hostname starting \"fc\""),
+            // --- boundary cases proving the masks are exact, not sloppy ---
+            ("fe7f::1", false, "just below fe80::/10"),
+            (
+                "fec0::1",
+                false,
+                "fec0::/10 (deprecated site-local), outside fe80::/10",
+            ),
+            ("fdff:ffff::1", true, "top of fc00::/7"),
+            ("fe00::1", false, "just above fc00::/7"),
+            ("100.63.255.255", false, "just below CGNAT 100.64.0.0/10"),
+            ("100.127.255.255", true, "top of CGNAT 100.64.0.0/10"),
+            ("100.128.0.0", false, "just above CGNAT 100.64.0.0/10"),
+            // --- ordinary public addresses that must be ALLOWED ---
+            ("8.8.8.8", false, "public v4"),
+            ("1.1.1.1", false, "public v4"),
+            ("93.184.215.14", false, "public v4 (example.com)"),
+            ("2001:4860:4860::8888", false, "public v6 (Google DNS)"),
+            ("2606:2800:220:1:248:1893:25c8:1946", false, "public v6"),
+            // --- not an address at all ---
+            ("example.com", false, "ordinary hostname"),
+            ("not-an-ip", false, "garbage"),
+            ("", false, "empty string"),
+        ];
+
+        let mut failures = Vec::new();
+        for (input, expected, why) in cases {
+            let actual = is_private_address(input);
+            if actual != *expected {
+                failures.push(format!(
+                    "{input:?} ({why}): expected {expected}, got {actual}"
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "is_private_address table mismatches:\n{}",
+            failures.join("\n")
+        );
     }
 
     #[test]
