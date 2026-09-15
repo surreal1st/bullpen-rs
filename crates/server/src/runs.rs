@@ -592,8 +592,8 @@ impl RunManager {
     /// run's own model choice was, rather than trusting the callee's raw
     /// pin. S2-04: `model` seeds the toolbox's own idea of "what model is
     /// this run on right now", which only the `escalate` tool ever reads or
-    /// writes - see `tools::build`'s doc.
-    fn toolbox_for(
+    /// writes - see `tools::build`'s doc. S5b: public for tool-kind routines.
+    pub fn toolbox_for(
         self: &Arc<Self>,
         bot_id: &str,
         trigger: Trigger,

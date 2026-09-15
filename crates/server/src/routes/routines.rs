@@ -35,6 +35,32 @@ use store::{
     create_routine, delete_routine, list_routines, routine_runs, set_routine_active, update_routine,
 };
 
+/// Validates tool_args: must be a JSON OBJECT, never array or primitive.
+/// Empty or missing input becomes `{}`. Returns normalized JSON string or error.
+fn validate_tool_kind(tool: Option<&str>, tool_args: Option<&str>) -> Result<String, String> {
+    let name = tool.unwrap_or("").trim();
+    if name.is_empty() {
+        return Err("Give the routine a tool to run.".to_string());
+    }
+
+    let text = tool_args.unwrap_or("").trim();
+    let parsed: serde_json::Value = if text.is_empty() {
+        json!({})
+    } else {
+        match serde_json::from_str(text) {
+            Ok(v) => v,
+            Err(_) => return Err("tool arguments must be a JSON object".to_string()),
+        }
+    };
+
+    // Check that parsed is an object, not array or primitive
+    if !parsed.is_object() {
+        return Err("tool arguments must be a JSON object".to_string());
+    }
+
+    serde_json::to_string(&parsed).map_err(|_| "tool arguments must be a JSON object".to_string())
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/routines", get(get_routines).post(post_routines))
@@ -137,6 +163,16 @@ async fn post_routines(
         return Err(AppError::bad_request("Give the routine something to do."));
     }
 
+    // S5b: Validate tool and tool_args (only for "tool" kind), capture normalized args
+    let normalized_tool_args = if kind == "tool" {
+        Some(
+            validate_tool_kind(body_data.tool.as_deref(), body_data.tool_args.as_deref())
+                .map_err(AppError::bad_request)?,
+        )
+    } else {
+        None
+    };
+
     // Parse the schedule to compute next_run_at and validate it
     let schedule_parsed =
         crate::schedule::parse_schedule(&body_data.schedule).map_err(AppError::bad_request)?;
@@ -176,7 +212,7 @@ async fn post_routines(
         body_data.tools,
         body_data.kind.as_deref(),
         body_data.tool.as_deref(),
-        body_data.tool_args.as_deref(),
+        normalized_tool_args.as_deref(),
         body_data.hook_kind.as_deref(),
         body_data.hook_events,
         body_data.hook_match.as_deref(),
@@ -222,6 +258,18 @@ async fn patch_routine(
 ) -> ApiResult<Json<serde_json::Value>> {
     let db = state.db();
     let body_data: UpdateRoutineBody = super::parse_body(&body)?;
+
+    // S5b: if kind is being changed to "tool" or if kind is "tool" and tool/tool_args are provided,
+    // validate tool and tool_args, capture normalized args
+    let mut normalized_tool_args = None;
+    if let Some(ref k) = body_data.kind
+        && k == "tool"
+    {
+        normalized_tool_args = Some(
+            validate_tool_kind(body_data.tool.as_deref(), body_data.tool_args.as_deref())
+                .map_err(AppError::bad_request)?,
+        );
+    }
 
     // If schedule is being updated, validate and compute new next_run_at
     // and re-encode as the TS JSON shape (F3 - see this module's doc).
@@ -277,8 +325,14 @@ async fn patch_routine(
     if let Some(tool) = body_data.tool {
         updates.tool = Some(Some(tool));
     }
-    if let Some(tool_args) = body_data.tool_args {
+    if let Some(tool_args) = normalized_tool_args {
         updates.tool_args = Some(Some(tool_args));
+    } else if body_data.tool_args.is_some() {
+        // If tool_args was provided but we didn't normalize it (kind != "tool"),
+        // still use the raw value
+        if let Some(tool_args) = body_data.tool_args {
+            updates.tool_args = Some(Some(tool_args));
+        }
     }
     if let Some(hook_kind) = body_data.hook_kind {
         updates.hook_kind = Some(hook_kind);
@@ -403,7 +457,7 @@ async fn post_routine_run(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
-    match crate::routines::run_routine_now(&state, &id) {
+    match crate::routines::run_routine_now(&state, &id).await {
         Ok(run_id) => Ok((StatusCode::CREATED, Json(json!({ "runId": run_id })))),
         Err(error) if error == "no such routine" || error == "no such bot" => {
             Err(AppError::not_found(error))

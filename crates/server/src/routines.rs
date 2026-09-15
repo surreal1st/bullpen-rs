@@ -36,6 +36,7 @@ use store::Db;
 use store::routines::RoutineRow;
 
 use crate::AppState;
+use crate::permissions;
 use crate::prompt::{self, HistoryTurn};
 use crate::runs::StartOptions;
 use crate::schedule::{self, Schedule};
@@ -50,6 +51,14 @@ pub const ABSENCE_PAUSE_REASON: &str = "Paused: no sign-in for 5 days";
 /// How long Josh can be gone before an unattended INTERVAL routine stops
 /// firing into silence. Matches the TS `ABSENCE_DAYS` (`auth.ts:152`).
 const ABSENCE_DAYS: i64 = 5;
+
+/// Marker that a tool found nothing worth reporting. Port of `nothingToReport.ts`.
+const NOTHING_NEW: &str = "[[bullpen:nothing-new]]";
+
+/// Check if a tool result declared nothing worth reporting.
+fn tool_found_nothing(result: &str) -> bool {
+    result.contains(NOTHING_NEW)
+}
 
 /// Raw row lookup by id. `store::routines::routine_by_id` returns the
 /// friendly camelCase `Routine` DTO (bot name resolved, JSON columns
@@ -94,6 +103,88 @@ fn routine_row_by_id(db: &Db, id: &str) -> Option<RoutineRow> {
             },
         )
         .ok()
+}
+
+/// S5b: Runs a "tool"-kind routine: executes the tool, then starts a model
+/// run ONLY if the tool found something worth reporting. Port of the TS
+/// `fireRoutine`'s tool branch (`routines.ts:809-878` scheduled,
+/// `:990-1030` run-now, merged here).
+///
+/// Returns the run_id if a model run was started, None if the tool found nothing.
+async fn fire_routine_tool(state: &AppState, row: &RoutineRow) -> Option<String> {
+    let (bot_id, conversation_id, model, tool_name, tool_args) = {
+        let db = state.db();
+        let bot = store::get_bot(&db, &row.bot_id).ok().flatten()?;
+        let conversation_id = store::get_or_create_conversation(&db, &bot.id).ok()?;
+        let model = model::ladder::safe_fallback(&db);
+        let tool_name = row.tool.as_ref().cloned().unwrap_or_default();
+        let tool_args = row
+            .tool_args
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|| "{}".to_string());
+        (bot.id.clone(), conversation_id, model, tool_name, tool_args)
+    };
+
+    // Check permissions
+    let perms = {
+        let db = state.db();
+        permissions::permissions_for_run(&db, &bot_id, Trigger::Routine).unwrap_or_default()
+    };
+
+    if !matches!(perms.get(&tool_name), Some(&permissions::Decision::Allow)) {
+        // Tool is not allowed - skip this routine
+        return None;
+    }
+
+    // Get toolbox and run the tool
+    let toolbox = state
+        .runs
+        .toolbox_for(&bot_id, Trigger::Routine, false, &model);
+    let (result, _usage) = toolbox.run(&tool_name, &tool_args).await;
+
+    // Check if the tool found nothing
+    if tool_found_nothing(&result) {
+        return None;
+    }
+
+    // Tool found something - start a model run to phrase it
+    let (new_bot_id, new_conversation_id, new_model, new_messages) = {
+        let db = state.db();
+        let bot = store::get_bot(&db, &bot_id).ok().flatten()?;
+        let _ = store::append_message(
+            &db,
+            &conversation_id,
+            "user",
+            &format!("[{}] ran", row.name),
+            store::NewMessage::default(),
+        );
+        let prompt_text = format!(
+            "{}\n\n## What the tool found\n\n{}{}",
+            row.prompt,
+            result,
+            prompt::STOP_RATHER_THAN_INVENT
+        );
+        let messages = prompt::build_prompt(&db, &bot, &[HistoryTurn::user(prompt_text)]);
+        (
+            bot_id.clone(),
+            conversation_id.clone(),
+            model.clone(),
+            messages,
+        )
+    };
+
+    Some(state.runs.start_routine(
+        StartOptions {
+            bot_id: new_bot_id,
+            conversation_id: new_conversation_id,
+            model: new_model,
+            messages: new_messages,
+            trigger: Trigger::Routine,
+            room: false,
+        },
+        row.id.clone(),
+    ))
 }
 
 /// Starts a "prompt"-kind routine's run. Port of the TS `fireRoutine`
@@ -173,8 +264,8 @@ fn fire_routine(state: &AppState, row: &RoutineRow, extra: &str) -> Option<Strin
 
 /// `POST /api/routines/:id/run` - "Run now": fires REGARDLESS of the
 /// routine's schedule or active state. Port of the TS `runRoutineNow`
-/// (`routines.ts:967-1069`), "tool"-kind branch out of scope (module doc).
-pub fn run_routine_now(state: &AppState, id: &str) -> Result<String, String> {
+/// (`routines.ts:967-1069`), including the tool-kind branch (S5b).
+pub async fn run_routine_now(state: &AppState, id: &str) -> Result<String, String> {
     let (row, bot_exists) = {
         let db = state.db();
         let row = routine_row_by_id(&db, id);
@@ -191,9 +282,13 @@ pub fn run_routine_now(state: &AppState, id: &str) -> Result<String, String> {
         return Err("no such bot".to_string());
     }
     if row.kind == "tool" {
-        return Err("tool routines are not yet supported (S5b)".to_string());
+        // S5b: run the tool and start a model run if it found something
+        fire_routine_tool(state, &row)
+            .await
+            .ok_or_else(|| "could not start".to_string())
+    } else {
+        fire_routine(state, &row, "").ok_or_else(|| "could not start".to_string())
     }
-    fire_routine(state, &row, "").ok_or_else(|| "could not start".to_string())
 }
 
 /// Fires every routine that is due. Port of the TS `fireDue` (`routines.
@@ -293,13 +388,15 @@ pub async fn fire_due(state: &AppState, now: DateTime<Utc>) -> Vec<(String, Stri
 
         // S5b: a "tool"-kind routine calls its tool directly with no model
         // turn unless the tool found something (`routines.ts:809-878`,
-        // E2). Skipped rather than fired wrong - see the module doc.
+        // E2). Fire the tool and only start a model run if it found something.
         if row.kind == "tool" {
-            continue;
-        }
-
-        if let Some(run_id) = fire_routine(state, &row, "") {
-            started.push((row.id.clone(), run_id));
+            if let Some(run_id) = fire_routine_tool(state, &row).await {
+                started.push((row.id.clone(), run_id));
+            }
+        } else {
+            if let Some(run_id) = fire_routine(state, &row, "") {
+                started.push((row.id.clone(), run_id));
+            }
         }
     }
 
