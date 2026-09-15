@@ -503,13 +503,18 @@ pub struct SharedLogField {
 /// left off entirely (serde ignores the extra JSON fields rather than
 /// erroring).
 ///
-/// 🔴 `schedule_text` is NOT a computed description today -
-/// `crates/store/src/routines.rs` hardcodes it to `""` (a TODO, not yet
-/// wired to `crates/server/src/schedule.rs::describe_schedule`) - so it is
-/// not carried here at all. `routines_editor.rs` shows `schedule` (the raw
-/// text Josh typed, e.g. "every 15 minutes") in the list instead; that text
-/// is already the human phrase the schedule grammar accepts, not cron, so
-/// showing it as-is loses nothing for the four canonical shapes.
+/// S5-F-02 (F5): `schedule_text` is now a REAL computed description
+/// (`crate::schedule::describe_schedule`, injected server-side by
+/// `routine_wire_json` on `list`/`create`/`patch`) - `routines_editor.rs`
+/// shows this instead of the raw `schedule` field, which as of F3 holds
+/// the TS JSON object (`{"kind":"interval","minutes":15}`), not a phrase,
+/// so this client has no use for it and does not carry it at all (serde
+/// ignores the extra JSON field). `#[serde(default)]` because
+/// `POST /:id/active`'s response (owned by S5-F-01, untouched here) does
+/// not send `scheduleText` yet - that response's `Routine` value is
+/// discarded by `routines_editor.rs::toggle_active` anyway (it always
+/// re-fetches the list right after), so an empty default there is
+/// harmless rather than a hard deserialize failure.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Routine {
@@ -518,7 +523,8 @@ pub struct Routine {
     pub bot_name: String,
     pub name: String,
     pub prompt: String,
-    pub schedule: String,
+    #[serde(default)]
+    pub schedule_text: String,
     pub active: bool,
     pub next_run_at: Option<String>,
     pub last_run_at: Option<String>,

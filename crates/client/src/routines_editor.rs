@@ -11,21 +11,25 @@
 //! accepts all three on `PATCH` (`UpdateRoutineBody`), so the edit form here
 //! covers all three - a deliberate widening past the TS UI, not a miss.
 //!
-//! Schedule "live description": there is no route that returns one -
-//! `Routine.schedule_text` is a hardcoded `""` stub server-side (see
-//! `types.rs`'s doc on `Routine`). `preview_schedule` below is a small,
+//! S5-F-02 (F5): schedule "live description" used to be a small,
 //! client-only, best-effort mirror of `crates/server/src/schedule.rs`'s
-//! four canonical shapes (interval/hourly/daily/weekdays) purely for instant
-//! feedback while typing; it is NOT the source of truth. The real answer is
-//! always the server's on submit - a 400's `{"error": "..."}"` (surfaced by
-//! `api::create_routine`/`api::update_routine`) is shown instead of the
-//! preview, so drift between the two can never show a green preview over a
-//! save the server actually rejected.
+//! grammar (`preview_schedule`, deleted) - it had no week cap, so "every
+//! 200 hours" previewed green right up to the 400 the server actually gave
+//! on submit (`reviews/S5-R.md` F5). The create/edit form's schedule field
+//! now debounces (~300ms) into `api::preview_schedule`
+//! (`POST /api/routines/preview`) - the SAME parser the create/patch
+//! routes use, so the preview can never show something the server would
+//! reject (`new_preview`/`edit_preview` below). `Routine.schedule_text`
+//! (see `types.rs`'s doc) is now a real server-computed description too,
+//! shown in the list in place of the old raw `schedule` text.
 
 use crate::api;
 use crate::types::{Routine, RoutineRun};
 use dioxus::prelude::*;
+use gloo_timers::future::TimeoutFuture;
 use js_sys::Date;
+use std::cell::Cell;
+use std::rc::Rc;
 use wasm_bindgen::JsValue;
 
 /// The modal shell, opened from `thread.rs`'s "Routines" button - reuses
@@ -93,6 +97,67 @@ pub fn RoutinesEditor(bot_id: String) -> Element {
     // id to check against).
     let run_status = use_signal(|| None::<(String, String)>);
 
+    // S5-F-02 (F5): live schedule previews, debounced into the server's own
+    // `POST /api/routines/preview` (`api::preview_schedule`) rather than a
+    // client-side grammar mirror. `Rc<Cell<u32>>` generation counters (not
+    // `Signal<u32>`) so bumping "which request is still wanted" does not
+    // itself re-trigger the effect that bumps it - same trap and same fix
+    // as `settings.rs`'s `ModelPickerField` (see its own doc, B-F10).
+    let mut new_preview = use_signal(|| None::<Result<String, String>>);
+    let new_gen = use_hook(|| Rc::new(Cell::new(0u32)));
+    use_effect(move || {
+        let text = new_schedule.read().trim().to_string();
+        if text.is_empty() {
+            new_preview.set(None);
+            return;
+        }
+        let my_gen = new_gen.get() + 1;
+        new_gen.set(my_gen);
+        let new_gen = new_gen.clone();
+        spawn(async move {
+            TimeoutFuture::new(300).await;
+            if new_gen.get() != my_gen {
+                return;
+            }
+            let result = api::preview_schedule(&text).await;
+            if new_gen.get() != my_gen {
+                return;
+            }
+            new_preview.set(Some(result));
+        });
+    });
+
+    let mut edit_preview = use_signal(|| None::<Result<String, String>>);
+    let edit_gen = use_hook(|| Rc::new(Cell::new(0u32)));
+    use_effect(move || {
+        // Only the routine currently being edited has a schedule field on
+        // screen at all - reset rather than debounce a request for text
+        // nobody can see.
+        if editing_id.read().is_none() {
+            edit_preview.set(None);
+            return;
+        }
+        let text = edit_schedule.read().trim().to_string();
+        if text.is_empty() {
+            edit_preview.set(None);
+            return;
+        }
+        let my_gen = edit_gen.get() + 1;
+        edit_gen.set(my_gen);
+        let edit_gen = edit_gen.clone();
+        spawn(async move {
+            TimeoutFuture::new(300).await;
+            if edit_gen.get() != my_gen {
+                return;
+            }
+            let result = api::preview_schedule(&text).await;
+            if edit_gen.get() != my_gen {
+                return;
+            }
+            edit_preview.set(Some(result));
+        });
+    });
+
     let load_bot_id = bot_id.clone();
     use_effect(move || {
         let bot_id = load_bot_id.clone();
@@ -103,7 +168,6 @@ pub fn RoutinesEditor(bot_id: String) -> Element {
         return rsx! { p { class: "muted", "Loading routines…" } };
     };
 
-    let new_preview = preview_schedule(&new_schedule.read());
     let create_disabled = new_name.read().trim().is_empty()
         || new_prompt.read().trim().is_empty()
         || new_schedule.read().trim().is_empty();
@@ -125,7 +189,7 @@ pub fn RoutinesEditor(bot_id: String) -> Element {
                             div { class: "routine-top",
                                 span { class: if routine.active { "routine-dot is-on" } else { "routine-dot" }, "aria-hidden": "true" }
                                 b { "{routine.name}" }
-                                span { class: "routine-when", "{routine.schedule}" }
+                                span { class: "routine-when", "{routine.schedule_text}" }
                             }
                             p { class: "routine-prompt",
                                 if routine.prompt.is_empty() {
@@ -163,7 +227,7 @@ pub fn RoutinesEditor(bot_id: String) -> Element {
 
                             if is_editing {
                                 {
-                                    let edit_preview = preview_schedule(&edit_schedule.read());
+                                    let edit_preview = edit_preview.read().clone();
                                     rsx! {
                                         div { class: "routine-edit",
                                             input {
@@ -252,7 +316,7 @@ pub fn RoutinesEditor(bot_id: String) -> Element {
                                         move |_| {
                                             edit_name.set(routine.name.clone());
                                             edit_prompt.set(routine.prompt.clone());
-                                            edit_schedule.set(routine.schedule.clone());
+                                            edit_schedule.set(routine.schedule_text.clone());
                                             edit_error.set(None);
                                             editing_id.set(Some(routine.id.clone()));
                                         }
@@ -337,7 +401,7 @@ pub fn RoutinesEditor(bot_id: String) -> Element {
                         ". It starts paused."
                     }
                 }
-                {schedule_hint(new_preview)}
+                {schedule_hint(new_preview.read().clone())}
                 if let Some(err) = create_error.read().clone() {
                     div { class: "refusal", role: "alert", p { "{err}" } }
                 }
@@ -478,8 +542,7 @@ async fn run_now(id: String, mut run_status: Signal<Option<(String, String)>>) {
 /// `formatWhen`. Built on `js_sys::Date` rather than `chrono` (the client
 /// crate has no `chrono` dependency - see its `Cargo.toml`), same choice
 /// `message_time.rs` already made for message timestamps; like that
-/// module, this only meaningfully runs in a browser, so `preview_schedule`
-/// below (not this) carries the ticket's pure-helper bite.
+/// module, this only meaningfully runs in a browser.
 fn format_when(iso: Option<&str>) -> String {
     let Some(iso) = iso else {
         return "never".to_string();
@@ -503,121 +566,5 @@ fn format_when(iso: Option<&str>) -> String {
         format!("in {phrase}")
     } else {
         format!("{phrase} ago")
-    }
-}
-
-/// A client-only, best-effort mirror of `crates/server/src/schedule.rs`'s
-/// `parse_schedule` - see this module's doc for why it exists and why it is
-/// not the source of truth. Recognises the same four canonical shapes; the
-/// interval floor message is copied verbatim from `schedule.rs:76` so a
-/// typo like "every 0 minutes" shows the SAME words inline before the
-/// round trip that the server would give after it.
-///
-/// Returns `None` when this mirror has no opinion (an unrecognised or
-/// empty phrase - the day-name clock forms, "weekdays and mondays at...",
-/// are NOT reproduced here) so the create/edit button stays enabled and the
-/// server's own parse decides on submit; `Some(Err(String::new()))` never
-/// happens - every `Err` carries a message worth showing.
-fn preview_schedule(input: &str) -> Option<Result<String, String>> {
-    let text = input.trim().to_lowercase();
-    if text.is_empty() {
-        return None;
-    }
-
-    if text == "hourly" || text == "every hour" {
-        return Some(Ok("every hour".to_string()));
-    }
-
-    if let Some(rest) = text.strip_prefix("every ") {
-        let parts: Vec<&str> = rest.split_whitespace().collect();
-        if parts.len() == 2
-            && let Ok(n) = parts[0].parse::<u32>()
-        {
-            let unit = parts[1];
-            if matches!(unit, "minute" | "minutes" | "min" | "hour" | "hours") {
-                let minutes = if unit.starts_with("hour") { n * 60 } else { n };
-                if minutes < 5 {
-                    return Some(Err("The shortest interval is 5 minutes.".to_string()));
-                }
-                let desc = if minutes % 60 == 0 {
-                    if minutes == 60 {
-                        "every hour".to_string()
-                    } else {
-                        format!("every {} hours", minutes / 60)
-                    }
-                } else {
-                    format!("every {minutes} minutes")
-                };
-                return Some(Ok(desc));
-            }
-        }
-    }
-
-    for (prefix, kind) in [("daily at ", "daily"), ("weekdays at ", "weekdays")] {
-        if let Some(rest) = text.strip_prefix(prefix) {
-            return Some(match parse_time(rest) {
-                Some((h, m)) => Ok(format!("{kind} at {h:02}:{m:02}")),
-                None => Err("That is not a time of day.".to_string()),
-            });
-        }
-    }
-
-    None
-}
-
-fn parse_time(text: &str) -> Option<(u32, u32)> {
-    let parts: Vec<&str> = text.split(':').collect();
-    if parts.len() != 2 {
-        return None;
-    }
-    let hour = parts[0].parse::<u32>().ok()?;
-    let minute = parts[1].parse::<u32>().ok()?;
-    if hour > 23 || minute > 59 {
-        return None;
-    }
-    Some((hour, minute))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The ticket's bite: "every 0 minutes" must render the interval floor
-    /// error inline, without a round trip. Comment out the `minutes < 5`
-    /// guard above and this goes red - see this ticket's `## Result` note
-    /// for the pasted failure.
-    #[test]
-    fn preview_schedule_flags_interval_floor() {
-        assert_eq!(
-            preview_schedule("every 0 minutes"),
-            Some(Err("The shortest interval is 5 minutes.".to_string()))
-        );
-    }
-
-    #[test]
-    fn preview_schedule_describes_canonical_shapes() {
-        assert_eq!(
-            preview_schedule("every 15 minutes"),
-            Some(Ok("every 15 minutes".to_string()))
-        );
-        assert_eq!(
-            preview_schedule("hourly"),
-            Some(Ok("every hour".to_string()))
-        );
-        assert_eq!(
-            preview_schedule("daily at 07:30"),
-            Some(Ok("daily at 07:30".to_string()))
-        );
-        assert_eq!(
-            preview_schedule("weekdays at 08:43"),
-            Some(Ok("weekdays at 08:43".to_string()))
-        );
-    }
-
-    #[test]
-    fn preview_schedule_has_no_opinion_on_empty_or_unrecognised_text() {
-        assert_eq!(preview_schedule(""), None);
-        assert_eq!(preview_schedule("   "), None);
-        assert_eq!(preview_schedule("mondays at 09:00"), None);
     }
 }

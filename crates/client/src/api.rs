@@ -1158,6 +1158,41 @@ pub async fn fetch_routine_runs(id: &str) -> Result<Vec<RoutineRun>, String> {
         .map_err(|e| e.to_string())
 }
 
+/// `POST /api/routines/preview {"schedule": "<phrase>"}` ->
+/// `{"schedule": {...}, "scheduleText": "..."}` (200) or `{"error": "..."}`
+/// (400). S5-F-02 (F5): the create/edit form's live "-> description" now
+/// debounces into this route instead of mirroring the schedule grammar
+/// client-side (`routines_editor.rs`'s deleted `preview_schedule`) - the
+/// server's own parser decides, so the preview can never show green over a
+/// save the server would actually reject.
+pub async fn preview_schedule(schedule: &str) -> Result<String, String> {
+    #[derive(Serialize)]
+    struct PreviewReq<'a> {
+        schedule: &'a str,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct PreviewOk {
+        schedule_text: String,
+    }
+    let resp = Request::post("/api/routines/preview")
+        .json(&PreviewReq { schedule })
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return match resp.json::<RoutineError>().await {
+            Ok(err) => Err(err.error),
+            Err(_) => Err(format!("/api/routines/preview -> {}", resp.status())),
+        };
+    }
+    resp.json::<PreviewOk>()
+        .await
+        .map(|b| b.schedule_text)
+        .map_err(|e| e.to_string())
+}
+
 /// `POST /api/routines/:id/run` - "Run now": fires regardless of schedule
 /// or active state, 201 with `{"runId": "..."}`. Not in the TS reference
 /// (`RoutinesEditor.tsx` has no such button) - this ticket adds it since
