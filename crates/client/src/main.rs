@@ -25,6 +25,10 @@ mod slack_card;
 mod thread;
 mod transport;
 mod types;
+// S13b-02: only compiled with `--features desktop` - the pure window-state
+// module `desktop.rs` wires in (restore-on-launch, geometry capture, tray).
+#[cfg(feature = "desktop")]
+mod window_state;
 mod working_bar;
 
 use app::App;
