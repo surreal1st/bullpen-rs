@@ -736,6 +736,15 @@
 
 .vm-sect {
   padding: 0.85rem 1.15rem 0;
+  /* 🔴 The TS original lived in `BotPanel`, a ~300px sidebar, where a 16/10
+     box is about 190px tall and reads as a thumbnail. This client has no
+     such panel, so the card mounts in `ChatPane` - roughly 950px wide - and
+     the SAME aspect ratio made it ~600px tall: a bot with no computer got a
+     giant empty rectangle where its conversation should be, pushing the
+     thread off the bottom of the window. Caught by opening the screenshot,
+     2026-09-16; no test would have seen it. Capping the width is what keeps
+     it a thumbnail instead of a screen. */
+  max-width: 21rem;
 }
 
 .vm-screen {
