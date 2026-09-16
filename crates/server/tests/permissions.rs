@@ -307,24 +307,37 @@ fn propose_tool_always_ask_even_if_allow() {
         server::permissions::Decision::Allow,
         "propose_tool",
         "{}",
+        false,
     );
     assert_eq!(decision, server::permissions::Decision::Ask);
 
     // But deny stays deny
-    let decision =
-        server::permissions::decide_call(server::permissions::Decision::Deny, "propose_tool", "{}");
+    let decision = server::permissions::decide_call(
+        server::permissions::Decision::Deny,
+        "propose_tool",
+        "{}",
+        false,
+    );
     assert_eq!(decision, server::permissions::Decision::Deny);
 }
 
 #[test]
 fn purchase_always_ask_even_if_allow() {
-    let decision =
-        server::permissions::decide_call(server::permissions::Decision::Allow, "purchase", "{}");
+    let decision = server::permissions::decide_call(
+        server::permissions::Decision::Allow,
+        "purchase",
+        "{}",
+        false,
+    );
     assert_eq!(decision, server::permissions::Decision::Ask);
 
     // But deny stays deny
-    let decision =
-        server::permissions::decide_call(server::permissions::Decision::Deny, "purchase", "{}");
+    let decision = server::permissions::decide_call(
+        server::permissions::Decision::Deny,
+        "purchase",
+        "{}",
+        false,
+    );
     assert_eq!(decision, server::permissions::Decision::Deny);
 }
 
@@ -338,13 +351,21 @@ fn purchase_always_ask_even_if_allow() {
 // would just hand back the stored `Allow` untouched.
 #[test]
 fn read_file_always_ask_even_if_allow() {
-    let decision =
-        server::permissions::decide_call(server::permissions::Decision::Allow, "read_file", "{}");
+    let decision = server::permissions::decide_call(
+        server::permissions::Decision::Allow,
+        "read_file",
+        "{}",
+        false,
+    );
     assert_eq!(decision, server::permissions::Decision::Ask);
 
     // But deny stays deny - "Never" still works.
-    let decision =
-        server::permissions::decide_call(server::permissions::Decision::Deny, "read_file", "{}");
+    let decision = server::permissions::decide_call(
+        server::permissions::Decision::Deny,
+        "read_file",
+        "{}",
+        false,
+    );
     assert_eq!(decision, server::permissions::Decision::Deny);
 }
 
@@ -386,12 +407,114 @@ fn cannot_be_remembered_as_allow_covers_read_file_purchase_and_propose_tool() {
     assert!(!server::permissions::cannot_be_remembered_as_allow("shell"));
 }
 
+// ---- S13b-03-03: a run's own taint tightens thirteen names to "ask"
+// (design §4.5). Pure unit-level companion to the bite-10 integration
+// tests in `tests/approvals.rs` (parts a/b/c) and `tests/rules.rs` (part
+// d) - this proves `decide_call`'s own half of the mechanism without
+// spinning up a run. ----
+
+const TAINT_TIGHTENED_TOOLS: &[&str] = &[
+    "browse",
+    "read_page",
+    "message_bot",
+    "remember",
+    "note",
+    "remember_shared",
+    "project_remember",
+    "set_goal",
+    "update_goal",
+    "reflect",
+    "say",
+    "shell",
+];
+
+#[test]
+fn taint_tightens_allow_to_ask_for_every_named_tool_except_ask_josh() {
+    // `ask_josh` gets its own test below - its OWN branch has a special
+    // case (non-wait -> allow, whatever `base` says) that only a taint
+    // check running BEFORE that branch can override, which is exactly
+    // what the next test isolates.
+    for tool in TAINT_TIGHTENED_TOOLS {
+        let decision = server::permissions::decide_call(
+            server::permissions::Decision::Allow,
+            tool,
+            "{}",
+            true,
+        );
+        assert_eq!(
+            decision,
+            server::permissions::Decision::Ask,
+            "{tool} must tighten to ask once the run is tainted"
+        );
+    }
+}
+
+#[test]
+fn taint_never_widens_a_stored_deny() {
+    for tool in TAINT_TIGHTENED_TOOLS {
+        let decision =
+            server::permissions::decide_call(server::permissions::Decision::Deny, tool, "{}", true);
+        assert_eq!(
+            decision,
+            server::permissions::Decision::Deny,
+            "{tool}'s stored deny must survive taint tightening - the taint only ever \
+             TIGHTENS, it must never widen a tool Josh turned off"
+        );
+    }
+}
+
+#[test]
+fn an_untainted_run_leaves_these_tools_alone() {
+    for tool in TAINT_TIGHTENED_TOOLS {
+        let decision = server::permissions::decide_call(
+            server::permissions::Decision::Allow,
+            tool,
+            "{}",
+            false,
+        );
+        assert_eq!(
+            decision,
+            server::permissions::Decision::Allow,
+            "{tool} must not tighten when `tainted` is false"
+        );
+    }
+}
+
+// THE bite that matters for `decide_call` itself (design §4.5's own 🔴): a
+// NON-wait `ask_josh` must tighten to "ask" under taint, proving the taint
+// check runs BEFORE the `ask_josh`-specific branch - that branch otherwise
+// returns `Allow` for a non-wait `ask_josh` WHATEVER `base` says, so a
+// taint check placed after it would do nothing at all. Mutation: move the
+// taint check below `if tool_name != "ask_josh" { return base; }`, and
+// this goes red while `taint_tightens_allow_to_ask_for_every_named_tool_
+// except_ask_josh` (which never exercises ask_josh's early-return branch)
+// stays green.
+#[test]
+fn taint_tightens_a_non_wait_ask_josh_even_though_its_own_branch_says_allow() {
+    let decision = server::permissions::decide_call(
+        server::permissions::Decision::Allow,
+        "ask_josh",
+        r#"{"wait": false}"#,
+        true,
+    );
+    assert_eq!(decision, server::permissions::Decision::Ask);
+
+    let decision = server::permissions::decide_call(
+        server::permissions::Decision::Allow,
+        "ask_josh",
+        "{}",
+        true,
+    );
+    assert_eq!(decision, server::permissions::Decision::Ask);
+}
+
 #[test]
 fn ask_josh_with_wait_true_returns_ask() {
     let decision = server::permissions::decide_call(
         server::permissions::Decision::Allow,
         "ask_josh",
         r#"{"wait": true}"#,
+        false,
     );
     assert_eq!(decision, server::permissions::Decision::Ask);
 }
@@ -402,15 +525,24 @@ fn ask_josh_without_wait_returns_allow() {
         server::permissions::Decision::Allow,
         "ask_josh",
         r#"{"wait": false}"#,
+        false,
     );
     assert_eq!(decision, server::permissions::Decision::Allow);
 
-    let decision =
-        server::permissions::decide_call(server::permissions::Decision::Allow, "ask_josh", "{}");
+    let decision = server::permissions::decide_call(
+        server::permissions::Decision::Allow,
+        "ask_josh",
+        "{}",
+        false,
+    );
     assert_eq!(decision, server::permissions::Decision::Allow);
 
-    let decision =
-        server::permissions::decide_call(server::permissions::Decision::Allow, "ask_josh", "");
+    let decision = server::permissions::decide_call(
+        server::permissions::Decision::Allow,
+        "ask_josh",
+        "",
+        false,
+    );
     assert_eq!(decision, server::permissions::Decision::Allow);
 }
 
@@ -420,6 +552,7 @@ fn ask_josh_bad_json_returns_allow() {
         server::permissions::Decision::Allow,
         "ask_josh",
         "not json",
+        false,
     );
     assert_eq!(decision, server::permissions::Decision::Allow);
 }

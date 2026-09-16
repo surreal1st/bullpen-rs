@@ -485,6 +485,15 @@ pub fn resolve_decision(
     matched_ids: &[String],
     tool_name: &str,
     trigger: Trigger,
+    // S13b-03-03 (design §4.5): whether THIS RUN has ever had a
+    // `CLIENT_FULFILLED` read fulfilled in it - see
+    // `crate::runs::run_is_tainted`'s own doc. A DYNAMIC (per-run) fact,
+    // deliberately NOT folded into the static `cannot_be_lifted_at_all`
+    // check below (design §4.5 says so explicitly): that set is fixed at
+    // compile time for three names that are always pinned; this one
+    // depends on what happened earlier in THIS run and can apply to any of
+    // thirteen different names.
+    tainted: bool,
 ) -> RuleDecision {
     let matched_ids: HashSet<&str> = matched_ids.iter().map(String::as_str).collect();
     let matched: Vec<&Rule> = rules
@@ -524,6 +533,16 @@ pub fn resolve_decision(
     {
         decision = Decision::Ask;
     }
+    // 🔴 S13b-03-03 (design §4.5, §7 bite 10(d)): a rule may not lift a tool
+    // THIS RUN's own taint has tightened to "ask" - at ANY trigger,
+    // including `Trigger::Chat`, same reach as the check above but a
+    // DYNAMIC refusal rather than a static one. This is the LAST word: the
+    // auto-review rules block (`runs.rs`) only runs when the grid's own
+    // decision was already "ask", and replaces `decision` wholesale with
+    // whatever this function returns.
+    if decision == Decision::Allow && tainted && permissions::is_taint_tightened(tool_name) {
+        decision = Decision::Ask;
+    }
 
     RuleDecision {
         decision,
@@ -558,6 +577,12 @@ pub async fn apply_rules(
     tool_name: &str,
     args: &str,
     trigger: Trigger,
+    // S13b-03-03: forwarded straight to `resolve_decision` - see its own
+    // doc. A future non-spawned caller of this whole-cloth convenience
+    // needs to derive this the same way `run_turn` does
+    // (`crate::runs::run_is_tainted`), not pass a value carried from
+    // somewhere else.
+    tainted: bool,
 ) -> RuleDecision {
     let rules = match list_rules_for(db, bot_id) {
         Ok(rules) => rules,
@@ -571,7 +596,7 @@ pub async fn apply_rules(
     }
 
     let matched_ids = classify(port, &rules, tool_name, args).await;
-    let resolved = resolve_decision(&rules, &matched_ids, tool_name, trigger);
+    let resolved = resolve_decision(&rules, &matched_ids, tool_name, trigger, tainted);
 
     if let Some(id) = &resolved.rule_id
         && let Err(err) = record_hit(db, id)

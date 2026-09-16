@@ -613,7 +613,7 @@ pub fn decide(db: &store::Db, bot_id: &str, tool_name: &str) -> Result<Decision,
 /// that needed a decision would be unable to ask for one and would go back to
 /// guessing - which is the entire failure this closes. Being asked a question is
 /// not a privilege that needs revoking.
-pub fn decide_call(base: Decision, tool_name: &str, args: &str) -> Decision {
+pub fn decide_call(base: Decision, tool_name: &str, args: &str, tainted: bool) -> Decision {
     // 🔴 S13b-03-02, folding in DEFERRED D10: `propose_tool` (W5), `purchase`
     // (S7) and every CLIENT_FULFILLED tool (`read_file` today, the one
     // this port has registered - `runs.rs`'s own list, duplicated here by
@@ -639,6 +639,29 @@ pub fn decide_call(base: Decision, tool_name: &str, args: &str) -> Decision {
     // and can fail - independently of the other; losing either alone still
     // leaves the tool liftable to "allow" by the other route.
     if matches!(tool_name, "propose_tool" | "purchase" | "read_file") {
+        return if base == Decision::Deny {
+            Decision::Deny
+        } else {
+            Decision::Ask
+        };
+    }
+
+    // S13b-03-03 (design §4.5): a RUN that has ever had a `CLIENT_FULFILLED`
+    // read fulfilled in it tightens `TAINT_TIGHTEN_SET` to "ask" for the
+    // rest of that run - `Allow` -> `Ask` ONLY, a stored `Deny` stays `Deny`
+    // (the taint only ever TIGHTENS; the obvious implementation, assigning
+    // `Ask` outright, would quietly widen a tool Josh turned off).
+    //
+    // 🔴 MUST run before the `ask_josh`-specific branch below: that branch
+    // returns `Allow` for a non-`wait` `ask_josh` WHATEVER `base` says, so a
+    // taint check placed after it (or folded into `base` before this
+    // function is even called, i.e. tightening the permission MAP instead
+    // of the decision) would do nothing for `ask_josh` at all - design §4.5
+    // names this explicitly as the thing four earlier review rounds missed.
+    // `tainted` itself is derived once per `run_turn` call, never carried as
+    // a parameter through a pause - see `crate::runs::run_is_tainted`'s own
+    // doc for why a carried flag is unsafe (R6-L1).
+    if tainted && is_taint_tightened(tool_name) {
         return if base == Decision::Deny {
             Decision::Deny
         } else {
@@ -761,4 +784,62 @@ pub fn cannot_be_lifted_at_all(tool_name: &str) -> bool {
 /// to allow is refused.
 pub fn cannot_be_remembered_as_allow(tool_name: &str) -> bool {
     matches!(tool_name, "read_file" | "purchase" | "propose_tool")
+}
+
+/// S13b-03-03 (design §4.5): the thirteen names a run's OWN taint tightens
+/// to "ask" for the rest of that run, once a `CLIENT_FULFILLED` read has
+/// been approved in it. Never `Deny` in `decide_call`'s own tightening
+/// below - `tools::build` drops a `Deny`'d spec from the offered list
+/// entirely (`tools/mod.rs`), and a vanished tool tells the model nothing,
+/// where an `Ask` at least explains itself. Grouped the way §4.5 groups
+/// them:
+/// - egress: `browse`, `read_page`, `message_bot`;
+/// - memory writes: `remember`, `note`, `remember_shared`, `project_remember`;
+/// - goal writes: `set_goal`, `update_goal`, `reflect`;
+/// - `say` - `Allow`, always-on, uncapped, and it `append_message`s into
+///   the bot's DEFAULT conversation regardless of which one this run is in;
+/// - `ask_josh` - the same durability as `say` (it also `append_message`s
+///   into the bot's default thread), which is why it belongs here even
+///   though it reaches Josh himself rather than exfiltrating anywhere -
+///   see `decide_call`'s own doc for why listing it here does nothing at
+///   all unless the check runs before that function's `ask_josh`-specific
+///   branch;
+/// - `shell` - the invisible channel: it writes the persistent
+///   `bullpen-work-<bot>` volume that a LATER, UNTAINTED run reads back
+///   with `sandbox_read` (deliberately out of `tighten_set` and
+///   deliberately NOT tightened here either - the run that reads is not
+///   the run that is tainted, so tightening `sandbox_read` would not help).
+///
+/// `read_file`/`purchase`/`propose_tool` are deliberately absent - they are
+/// already always `Ask` via the pin above, taint or not. `fetch_url` and
+/// every other unregistered name a reader might expect here are absent for
+/// the same reason `cannot_be_lifted_at_all`'s doc gives: naming a tool
+/// with no spec in `tools::all_specs()` would imply coverage that does not
+/// exist. Revisit this list when any of them lands.
+const TAINT_TIGHTEN_SET: &[&str] = &[
+    "browse",
+    "read_page",
+    "message_bot",
+    "remember",
+    "note",
+    "remember_shared",
+    "project_remember",
+    "set_goal",
+    "update_goal",
+    "reflect",
+    "say",
+    "ask_josh",
+    "shell",
+];
+
+/// Whether a run's OWN taint (see `crate::runs::run_is_tainted`) tightens
+/// this tool to "ask" for the rest of that run. Consulted by `decide_call`
+/// above (the per-call gate) and by `rules::resolve_decision` (so the
+/// auto-review rules block cannot lift a tainted tool back to allow later
+/// in the same turn) - two SEPARATE call sites reading the same set,
+/// mirroring the split `cannot_be_lifted_at_all`/`decide_call`'s pin
+/// already draws for the identical reason: each guard must be provable, and
+/// breakable, on its own.
+pub fn is_taint_tightened(tool_name: &str) -> bool {
+    TAINT_TIGHTEN_SET.contains(&tool_name)
 }

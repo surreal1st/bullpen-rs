@@ -254,6 +254,44 @@ fn is_client_fulfilled(tool_name: &str) -> bool {
     CLIENT_FULFILLED.contains(&tool_name)
 }
 
+/// S13b-03-03 (design §4.5): does THIS RUN have any approval whose
+/// `status` is `'approved'` and whose `tool_name` is in `CLIENT_FULFILLED`?
+/// Queried FRESH every time `run_turn` starts - the very top, before its
+/// per-turn `perms` resolution - and NEVER carried through as a parameter.
+///
+/// 🔴 A carried flag dies at the first pause the taint itself causes
+/// (R6-L1, the sharpest finding of the whole design series): `Ask` ->
+/// `Outcome::Paused` -> `park`, and the only resume is `decide_approval`,
+/// which would otherwise have to recompute the flag from THAT approval
+/// alone. The attack this closes: the bot reads a file, Josh approves, the
+/// run resumes tainted; the bot then asks an innocuous
+/// `ask_josh{wait: true}` question - itself parked, on `decide_call`'s own
+/// pin, nothing to do with the taint; Josh answers it; a carried-parameter
+/// implementation would resume the run UNTAINTED, with the file's contents
+/// still sitting in `runs.messages`, and every egress tool back to
+/// `Allow`. Deriving fresh from the WHOLE run's history closes it: the
+/// taint is a fact about the run, not a value anyone has to remember to
+/// pass on, so it survives any number of intervening pauses for free.
+///
+/// `approvals::take_pending` UPDATEs `status` to `'approved'` rather than
+/// deleting the row (see its own doc), so this is answerable from what is
+/// already there. `sweep_approvals` only prunes DECIDED rows older than
+/// `APPROVAL_RETENTION_DAYS` (30 days, far longer than any run lives), so
+/// this stays answerable for the whole life of a run - see that constant's
+/// own doc for the one way that could change.
+fn run_is_tainted(db: &Db, run_id: &str) -> rusqlite::Result<bool> {
+    let placeholders = vec!["?"; CLIENT_FULFILLED.len()].join(", ");
+    let sql = format!(
+        "SELECT 1 FROM approvals \
+         WHERE run_id = ? AND status = 'approved' AND tool_name IN ({placeholders}) LIMIT 1"
+    );
+    let mut stmt = db.conn().prepare(&sql)?;
+    let mut values: Vec<String> = Vec::with_capacity(1 + CLIENT_FULFILLED.len());
+    values.push(run_id.to_string());
+    values.extend(CLIENT_FULFILLED.iter().map(|name| name.to_string()));
+    stmt.exists(rusqlite::params_from_iter(values.iter()))
+}
+
 /// The cap on what one approval's posted `result` may contribute to the
 /// transcript. Port of TS's `MAX_FULFILMENT_CHARS` (`clientTools.ts`),
 /// enforced HERE rather than trusted from the client - a cap only the
@@ -976,6 +1014,22 @@ impl RunManager {
             permissions::permissions_for_run(&db, bot_id, trigger).unwrap_or_default()
         };
 
+        // S13b-03-03 (design §4.5): DERIVED here, at the top of EVERY call
+        // to `run_turn` - the fresh start `drive` makes and every resume
+        // `decide_approval` spawns alike - never carried through as a
+        // parameter. See `run_is_tainted`'s own doc for why a carried flag
+        // is unsafe. A fresh run always reads `false` here (no approval row
+        // can exist yet for a run that has not taken its first step).
+        let tainted = {
+            let db = self.db();
+            run_is_tainted(&db, run_id).unwrap_or_else(|err| {
+                tracing::error!("run {run_id}: failed to check read taint: {err}");
+                // Fail CLOSED: an unreadable taint state must never silently
+                // widen what the rest of this run may do.
+                true
+            })
+        };
+
         while steps < MAX_STEPS {
             if self.take_stop(run_id) {
                 return Outcome::Failed {
@@ -1129,7 +1183,9 @@ were doing unless he changed it."
                 // rules are the only authority" - it must not run
                 // unapproved just because it slipped past the filter.
                 let mut decision = match perms.get(call.name.as_str()).copied() {
-                    Some(base) => permissions::decide_call(base, &call.name, &call.arguments),
+                    Some(base) => {
+                        permissions::decide_call(base, &call.name, &call.arguments, tainted)
+                    }
                     None => {
                         if toolbox.specs.iter().any(|spec| spec.name == call.name) {
                             Decision::Ask
@@ -1302,8 +1358,13 @@ were doing unless he changed it."
                             &call.arguments,
                         )
                         .await;
-                        let resolved =
-                            rules::resolve_decision(&bot_rules, &matched_ids, &call.name, trigger);
+                        let resolved = rules::resolve_decision(
+                            &bot_rules,
+                            &matched_ids,
+                            &call.name,
+                            trigger,
+                            tainted,
+                        );
 
                         if let Some(id) = &resolved.rule_id {
                             {

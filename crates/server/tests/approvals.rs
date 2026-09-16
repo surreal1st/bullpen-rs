@@ -86,6 +86,38 @@ fn pending_approval(db: &Arc<Mutex<Db>>, run_id: &str) -> Option<(String, String
     rows.into_iter().next()
 }
 
+/// S13b-03-03: the one PENDING approval row for a run. `pending_approval`
+/// above has no status filter and panics past a run's FIRST approval - fine
+/// for every single-step test in this file so far, but the taint bites
+/// below resume a run more than once, so an already-`approved` row (kept,
+/// not deleted - see `approvals::take_pending`'s own doc) sits alongside
+/// the new `pending` one. This is that helper's multi-step counterpart.
+fn latest_pending_approval(
+    db: &Arc<Mutex<Db>>,
+    run_id: &str,
+) -> Option<(String, String, String, String)> {
+    let db = db.lock().expect("db mutex poisoned");
+    let mut stmt = db
+        .conn()
+        .prepare(
+            "SELECT id, tool_name, tool_args, status FROM approvals \
+             WHERE run_id = ?1 AND status = 'pending'",
+        )
+        .expect("prepare");
+    let rows: Vec<(String, String, String, String)> = stmt
+        .query_map(rusqlite::params![run_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .expect("query")
+        .collect::<Result<_, _>>()
+        .expect("collect");
+    assert!(
+        rows.len() <= 1,
+        "expected at most one PENDING approval row, got {rows:?}"
+    );
+    rows.into_iter().next()
+}
+
 /// The stored tool-result text for the one `role: "tool"` message on a run,
 /// same extraction every test here that reads the transcript needs, pulled
 /// out once rather than repeated inline. Ported from `tests/shell_tool.rs`'s
@@ -1026,6 +1058,302 @@ got {text:?}"
         "the injected instruction must still be present, but as fenced DATA never consumed \
 as an instruction, got {text:?}"
     );
+}
+
+// ---- S13b-03-03: a fulfilled read taints the RUN (design §4.5, §7 bite
+// 10). Every tool §4.5 names tightens to "ask" for the rest of the run,
+// even though its OWN grid entry (or a rule) would otherwise say allow.
+// Bite 10(d) - a tainted tool cannot be lifted by a matching rule - lives
+// in `tests/rules.rs`, the file that owns the rules engine's own test
+// infrastructure (`RulesPort`, `ClassifyBehavior`). ----
+
+/// A `read_file` call once, then a `read_page` call - the shape bite 10(a)
+/// needs: turn 1 taints the run, turn 2 is the tool the taint must have
+/// tightened.
+fn read_file_then_read_page() -> ScriptedPort {
+    ScriptedPort::new(vec![
+        vec![ModelEvent::ToolCalls {
+            calls: vec![ToolCall {
+                id: "call-1".to_string(),
+                name: "read_file".to_string(),
+                arguments: json!({"path": "C:\\Users\\rain\\Documents\\notes.md"}).to_string(),
+            }],
+            usage: None,
+        }],
+        vec![ModelEvent::ToolCalls {
+            calls: vec![ToolCall {
+                id: "call-2".to_string(),
+                name: "read_page".to_string(),
+                arguments: "{}".to_string(),
+            }],
+            usage: None,
+        }],
+    ])
+}
+
+// (a) After a fulfilled read, the SAME run's next `read_page` parks - even
+// though `read_page` defaults to `Allow` (`permissions::default_decisions`).
+#[tokio::test]
+async fn bite10a_a_fulfilled_read_parks_the_next_read_page() {
+    let db = open_db();
+    seed_bot(&db, "arthur", "Arthur");
+    let conversation_id = own_conversation(&db, "arthur");
+    seed_user_message(
+        &db,
+        &conversation_id,
+        "read my notes, then look something up",
+    );
+
+    let manager = Arc::new(RunManager::new(
+        Arc::clone(&db),
+        as_port(read_file_then_read_page()),
+    ));
+    let run_id = manager.start(StartOptions {
+        bot_id: "arthur".to_string(),
+        conversation_id: conversation_id.clone(),
+        model: "test/model".to_string(),
+        messages: vec![ModelMessage::user("read my notes, then look something up")],
+        trigger: Trigger::Chat,
+        room: false,
+    });
+
+    drain_until_paused_or_done(manager.subscribe(&run_id)).await;
+    let (approval_id, tool_name, ..) =
+        latest_pending_approval(&db, &run_id).expect("read_file must park pending");
+    assert_eq!(tool_name, "read_file");
+
+    assert!(
+        manager
+            .decide_approval(&approval_id, true, Some("the notes say hi".to_string()))
+            .await
+    );
+
+    assert_eq!(wait_for_status(&db, &run_id, "waiting").await, "waiting");
+    let (_, tool_name2, _, status2) = latest_pending_approval(&db, &run_id)
+        .expect("read_page must park once the run is tainted, even though it defaults to allow");
+    assert_eq!(tool_name2, "read_page");
+    assert_eq!(status2, "pending");
+}
+
+/// `read_file`, then an `ask_josh{wait:true}` call, then `read_page` - the
+/// shape bite 10(b) needs: turn 2 is an UNRELATED pause (parked on
+/// `decide_call`'s own pin, nothing to do with the taint), turn 3 is the
+/// tool the taint must still have tightened after it.
+fn read_file_then_wait_ask_then_read_page() -> ScriptedPort {
+    ScriptedPort::new(vec![
+        vec![ModelEvent::ToolCalls {
+            calls: vec![ToolCall {
+                id: "call-1".to_string(),
+                name: "read_file".to_string(),
+                arguments: json!({"path": "C:\\Users\\rain\\Documents\\notes.md"}).to_string(),
+            }],
+            usage: None,
+        }],
+        vec![ModelEvent::ToolCalls {
+            calls: vec![ToolCall {
+                id: "call-2".to_string(),
+                name: "ask_josh".to_string(),
+                arguments: json!({"question": "should I also check email?", "wait": true})
+                    .to_string(),
+            }],
+            usage: None,
+        }],
+        vec![ModelEvent::ToolCalls {
+            calls: vec![ToolCall {
+                id: "call-3".to_string(),
+                name: "read_page".to_string(),
+                arguments: "{}".to_string(),
+            }],
+            usage: None,
+        }],
+    ])
+}
+
+// (b) THE bite that matters most (R6-L1): the taint must SURVIVE an
+// UNRELATED approval pause. After the fulfilled read, the bot asks an
+// innocuous `ask_josh{wait:true}` question - parked on `decide_call`'s own
+// pin, nothing to do with the taint; Josh answers it; the RESUMED run must
+// STILL park `read_page`. A carried-parameter implementation would
+// recompute "tainted" from the ask_josh approval alone (not
+// client-fulfilled) and lose it here - exactly the attack §4.5 walks.
+#[tokio::test]
+async fn bite10b_the_taint_survives_an_unrelated_approval_pause() {
+    let db = open_db();
+    seed_bot(&db, "arthur", "Arthur");
+    let conversation_id = own_conversation(&db, "arthur");
+    seed_user_message(
+        &db,
+        &conversation_id,
+        "read my notes, ask if unsure, then look something up",
+    );
+
+    let manager = Arc::new(RunManager::new(
+        Arc::clone(&db),
+        as_port(read_file_then_wait_ask_then_read_page()),
+    ));
+    let run_id = manager.start(StartOptions {
+        bot_id: "arthur".to_string(),
+        conversation_id: conversation_id.clone(),
+        model: "test/model".to_string(),
+        messages: vec![ModelMessage::user(
+            "read my notes, ask if unsure, then look something up",
+        )],
+        trigger: Trigger::Chat,
+        room: false,
+    });
+
+    drain_until_paused_or_done(manager.subscribe(&run_id)).await;
+    let (read_approval_id, tool_name, ..) =
+        latest_pending_approval(&db, &run_id).expect("read_file must park pending");
+    assert_eq!(tool_name, "read_file");
+    assert!(
+        manager
+            .decide_approval(
+                &read_approval_id,
+                true,
+                Some("the notes say hi".to_string())
+            )
+            .await
+    );
+
+    assert_eq!(wait_for_status(&db, &run_id, "waiting").await, "waiting");
+    let (ask_approval_id, tool_name2, _, status2) = latest_pending_approval(&db, &run_id).expect(
+        "ask_josh{wait:true} must park too - on decide_call's own pin, unrelated to the taint",
+    );
+    assert_eq!(tool_name2, "ask_josh");
+    assert_eq!(status2, "pending");
+    assert!(
+        manager
+            .decide_approval(&ask_approval_id, true, Some("no, that's all".to_string()))
+            .await
+    );
+
+    assert_eq!(wait_for_status(&db, &run_id, "waiting").await, "waiting");
+    let (_, tool_name3, _, status3) = latest_pending_approval(&db, &run_id).expect(
+        "read_page must STILL park after the unrelated ask_josh pause - the taint must \
+survive it (R6-L1), not be recomputed from that one approval alone",
+    );
+    assert_eq!(tool_name3, "read_page");
+    assert_eq!(status3, "pending");
+}
+
+/// `read_file`, then `say`, then a NON-wait `ask_josh`, then `shell` - the
+/// shape bite 10(c) needs.
+fn read_file_then_say_then_ask_then_shell() -> ScriptedPort {
+    ScriptedPort::new(vec![
+        vec![ModelEvent::ToolCalls {
+            calls: vec![ToolCall {
+                id: "call-1".to_string(),
+                name: "read_file".to_string(),
+                arguments: json!({"path": "C:\\Users\\rain\\Documents\\notes.md"}).to_string(),
+            }],
+            usage: None,
+        }],
+        vec![ModelEvent::ToolCalls {
+            calls: vec![ToolCall {
+                id: "call-2".to_string(),
+                name: "say".to_string(),
+                arguments: json!({"text": "Found it."}).to_string(),
+            }],
+            usage: None,
+        }],
+        vec![ModelEvent::ToolCalls {
+            calls: vec![ToolCall {
+                id: "call-3".to_string(),
+                name: "ask_josh".to_string(),
+                arguments: json!({"question": "want the summary too?", "wait": false}).to_string(),
+            }],
+            usage: None,
+        }],
+        vec![ModelEvent::ToolCalls {
+            calls: vec![ToolCall {
+                id: "call-4".to_string(),
+                name: "shell".to_string(),
+                arguments: json!({"command": "echo done"}).to_string(),
+            }],
+            usage: None,
+        }],
+    ])
+}
+
+// (c) `say`, a NON-wait `ask_josh`, and `shell` (with its grid held on
+// "allow") all park too, once the run is tainted - the three durable
+// channels design §4.5 names: `say`/`ask_josh` both `append_message` into
+// the bot's DEFAULT conversation regardless of which one this run is in,
+// and `shell` writes the bot's persistent work volume that a LATER,
+// UNTAINTED run reads back with `sandbox_read`.
+//
+// 🔴 Must use a non-wait ask_josh and a stored `shell: allow` (R7-M1): with
+// `wait:true`, or with `shell` left at its default `ask`, this bite would
+// be green in BOTH a correct build and a broken one - those two park for
+// reasons that have nothing to do with the taint.
+#[tokio::test]
+async fn bite10c_say_a_non_wait_ask_josh_and_an_allowed_shell_all_park_when_tainted() {
+    let db = open_db();
+    seed_bot(&db, "arthur", "Arthur");
+    {
+        let guard = db.lock().expect("db mutex poisoned");
+        let current = server::permissions::get_permissions(&guard, "arthur").expect("get perms");
+        server::permissions::set_permissions(&guard, "arthur", &{
+            let mut m = current;
+            m.insert("shell".to_string(), server::permissions::Decision::Allow);
+            m
+        })
+        .expect("set perms");
+    }
+    let conversation_id = own_conversation(&db, "arthur");
+    seed_user_message(
+        &db,
+        &conversation_id,
+        "read my notes, say it, ask me, then clean up",
+    );
+
+    let manager = Arc::new(RunManager::new(
+        Arc::clone(&db),
+        as_port(read_file_then_say_then_ask_then_shell()),
+    ));
+    let run_id = manager.start(StartOptions {
+        bot_id: "arthur".to_string(),
+        conversation_id: conversation_id.clone(),
+        model: "test/model".to_string(),
+        messages: vec![ModelMessage::user(
+            "read my notes, say it, ask me, then clean up",
+        )],
+        trigger: Trigger::Chat,
+        room: false,
+    });
+
+    drain_until_paused_or_done(manager.subscribe(&run_id)).await;
+    let (read_id, tool_name, ..) =
+        latest_pending_approval(&db, &run_id).expect("read_file must park");
+    assert_eq!(tool_name, "read_file");
+    assert!(
+        manager
+            .decide_approval(&read_id, true, Some("the notes say hi".to_string()))
+            .await
+    );
+
+    assert_eq!(wait_for_status(&db, &run_id, "waiting").await, "waiting");
+    let (say_id, tool_name2, _, status2) = latest_pending_approval(&db, &run_id)
+        .expect("say must park once tainted - it defaults to allow");
+    assert_eq!(tool_name2, "say");
+    assert_eq!(status2, "pending");
+    assert!(manager.decide_approval(&say_id, true, None).await);
+
+    assert_eq!(wait_for_status(&db, &run_id, "waiting").await, "waiting");
+    let (ask_id, tool_name3, _, status3) = latest_pending_approval(&db, &run_id).expect(
+        "a non-wait ask_josh must park once tainted - its OWN branch would otherwise say \
+allow no matter what base says",
+    );
+    assert_eq!(tool_name3, "ask_josh");
+    assert_eq!(status3, "pending");
+    assert!(manager.decide_approval(&ask_id, true, None).await);
+
+    assert_eq!(wait_for_status(&db, &run_id, "waiting").await, "waiting");
+    let (_, tool_name4, _, status4) = latest_pending_approval(&db, &run_id)
+        .expect("shell must park once tainted even though its OWN stored grid says allow");
+    assert_eq!(tool_name4, "shell");
+    assert_eq!(status4, "pending");
 }
 
 // ---- HTTP: GET /api/approvals, POST /api/approvals/:id ----

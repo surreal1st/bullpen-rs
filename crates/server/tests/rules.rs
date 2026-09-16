@@ -140,6 +140,35 @@ fn pending_approval(db: &Arc<Mutex<Db>>, run_id: &str) -> Option<(String, String
     rows.into_iter().next()
 }
 
+/// S13b-03-03: the one PENDING approval row for a run. `pending_approval`
+/// above has no status filter, which is fine for every single-step test in
+/// this file so far - but the taint bite below resumes a run twice, so an
+/// already-`approved` row (kept, not deleted - see `approvals::take_pending`'s
+/// own doc) sits alongside the new `pending` one and trips that helper's
+/// "at most one row" assertion.
+fn latest_pending_approval(
+    db: &Arc<Mutex<Db>>,
+    run_id: &str,
+) -> Option<(String, String, String, String)> {
+    let db = db.lock().expect("db mutex poisoned");
+    let mut stmt = db
+        .conn()
+        .prepare("SELECT id, tool_name, tool_args, status FROM approvals WHERE run_id = ?1 AND status = 'pending'")
+        .expect("prepare");
+    let rows: Vec<(String, String, String, String)> = stmt
+        .query_map(rusqlite::params![run_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .expect("query")
+        .collect::<Result<_, _>>()
+        .expect("collect");
+    assert!(
+        rows.len() <= 1,
+        "expected at most one PENDING approval row, got {rows:?}"
+    );
+    rows.into_iter().next()
+}
+
 async fn drain_until_paused_or_done(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<RunEvent>,
 ) -> Vec<RunEvent> {
@@ -1319,6 +1348,7 @@ fn resolve_decision_never_lifts_purchase_or_propose_tool_at_any_trigger() {
                 std::slice::from_ref(&rule.id),
                 tool,
                 trigger,
+                false,
             );
             assert_eq!(
                 resolved.decision,
@@ -1346,8 +1376,146 @@ fn resolve_decision_never_lifts_purchase_or_propose_tool_at_any_trigger() {
         std::slice::from_ref(&rule.id),
         "fetch_url",
         Trigger::Chat,
+        false,
     );
     assert_eq!(resolved.decision, server::permissions::Decision::Allow);
+}
+
+// ---- S13b-03-03: bite 10(d) - a tainted tool is not lifted by a matching
+// `allow` rule, at any trigger (design §4.5/§7 bite 10). Pure companion to
+// the D10 test above, same shape: `resolve_decision` takes no `&Db`, so
+// this needs no run. The real-run counterpart below
+// (`a_tainted_run_is_not_lifted_to_allow_by_a_matching_shell_rule`) proves
+// `run_turn` actually PASSES the right `tainted` value in; this one proves
+// `resolve_decision` does the right thing with it once it has it. ----
+#[test]
+fn resolve_decision_never_lifts_a_tainted_tool_at_chat_trigger() {
+    // Trigger::Chat isolates this guard from `resolve_decision`'s other two
+    // checks: `cannot_be_lifted_at_all` only ever names `read_file`/
+    // `purchase`/`propose_tool` (none of these), and
+    // `cannot_be_lifted_unattended` only fires when `trigger != Chat`. So at
+    // Chat, with a matching `allow` rule, ONLY the taint check can produce
+    // `Ask` below - the isolation design §7's own preamble asks every bite
+    // to have.
+    for tool in [
+        "shell",
+        "say",
+        "ask_josh",
+        "browse",
+        "read_page",
+        "message_bot",
+    ] {
+        let rule = Rule {
+            id: "r1".to_string(),
+            bot_id: None,
+            text: "always allow it".to_string(),
+            behavior: RuleBehavior::Allow,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            hits: 0,
+        };
+
+        let tainted = rules::resolve_decision(
+            std::slice::from_ref(&rule),
+            std::slice::from_ref(&rule.id),
+            tool,
+            Trigger::Chat,
+            true,
+        );
+        assert_eq!(
+            tainted.decision,
+            server::permissions::Decision::Ask,
+            "{tool} must not be liftable to allow by a rule once the run is tainted"
+        );
+
+        // Positive control: the SAME rule, SAME tool, SAME trigger, only
+        // `tainted` flipped to false, lifts normally - proving the taint
+        // check above (and not some other guard) is what mattered.
+        let untainted = rules::resolve_decision(
+            std::slice::from_ref(&rule),
+            std::slice::from_ref(&rule.id),
+            tool,
+            Trigger::Chat,
+            false,
+        );
+        assert_eq!(
+            untainted.decision,
+            server::permissions::Decision::Allow,
+            "{tool} must lift normally when the run is NOT tainted"
+        );
+    }
+}
+
+// The real-run counterpart to the pure test above: a matching `allow` rule
+// for `shell`, a run tainted by a fulfilled `read_file`, at
+// `Trigger::Chat` (the one trigger `cannot_be_lifted_unattended` does not
+// cover). `shell`'s own grid entry defaults to "ask", so WITHOUT the taint
+// the rule would lift it straight to allow and run it - this proves the
+// taint, derived inside `run_turn`, actually reaches `resolve_decision` and
+// beats that lift.
+#[tokio::test]
+async fn a_tainted_run_is_not_lifted_to_allow_by_a_matching_shell_rule() {
+    let db = open_db();
+    seed_bot(&db, "arthur", "Arthur");
+    let allow_id = seed_rule(&db, "arthur", "clean up temp files", RuleBehavior::Allow);
+
+    let conversation_id = own_conversation(&db, "arthur");
+    seed_user_message(&db, &conversation_id, "read my notes, then clean up");
+    let port = Arc::new(RulesPort::new(
+        move |turn| {
+            if turn == 1 {
+                vec![ModelEvent::ToolCalls {
+                    calls: vec![ToolCall {
+                        id: "call-1".to_string(),
+                        name: "read_file".to_string(),
+                        arguments: json!({"path": "C:\\Users\\rain\\Documents\\notes.md"})
+                            .to_string(),
+                    }],
+                    usage: None,
+                }]
+            } else {
+                vec![ModelEvent::ToolCalls {
+                    calls: vec![ToolCall {
+                        id: format!("call-{turn}"),
+                        name: "shell".to_string(),
+                        arguments: json!({"command": "find /work -name '*.tmp' -delete"})
+                            .to_string(),
+                    }],
+                    usage: None,
+                }]
+            }
+        },
+        ClassifyBehavior::Reply(vec![allow_id]),
+    ));
+    let manager = Arc::new(RunManager::new(Arc::clone(&db), port));
+    let run_id = manager.start(StartOptions {
+        bot_id: "arthur".to_string(),
+        conversation_id: conversation_id.clone(),
+        model: "test/model".to_string(),
+        messages: vec![ModelMessage::user("read my notes, then clean up")],
+        trigger: Trigger::Chat,
+        room: false,
+    });
+
+    drain_until_paused_or_done(manager.subscribe(&run_id)).await;
+    assert_eq!(wait_for_status(&db, &run_id, "waiting").await, "waiting");
+    let (read_id, tool_name, ..) =
+        latest_pending_approval(&db, &run_id).expect("read_file must park first");
+    assert_eq!(tool_name, "read_file");
+
+    // Approve WITH a fulfilment - this is what taints the run.
+    assert!(
+        manager
+            .decide_approval(&read_id, true, Some("the notes say hi".to_string()))
+            .await
+    );
+
+    assert_eq!(wait_for_status(&db, &run_id, "waiting").await, "waiting");
+    let (_, tool_name2, _, status2) = latest_pending_approval(&db, &run_id).expect(
+        "shell must still park - a tainted run's own auto-review rule must not lift it, even \
+         though the SAME rule would otherwise skip the approval entirely",
+    );
+    assert_eq!(tool_name2, "shell");
+    assert_eq!(status2, "pending");
 }
 
 // ---- (c): THE bite that matters most - a stored grid `allow`, written
