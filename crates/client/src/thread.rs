@@ -19,6 +19,7 @@ use crate::permissions_editor::PermissionsModal;
 use crate::questions::Questions;
 use crate::routines_editor::RoutinesModal;
 use crate::types::{Bot, Message, Role};
+use crate::vm_card::VmCard;
 use crate::working_bar::WorkingBar;
 use dioxus::prelude::*;
 use std::rc::Rc;
@@ -239,6 +240,17 @@ pub fn ChatPane(
                         }
                     }
                 }
+                // S6-VM-01: the bot's own computer, live, at the top of the
+                // panel - same placement the TS `BotPanel.tsx` gives it,
+                // first thing under the head. See `vm_card.rs`'s own doc
+                // for why this file (not a separate panel file) is where
+                // "the top of the bot panel" lands in this client. Inside
+                // this same `if let Some(current) = ...` as `pane-head`
+                // (not a sibling of it) so a room's conversation - `bot` is
+                // `None` there, see this component's own doc - stays
+                // narrowed to the non-room path exactly like the
+                // permissions grid and `ModelChip` just above it.
+                VmCard { bot_id: bot_id.clone(), bot_name: bot_name.clone() }
             }
             if *perms_open.read() {
                 PermissionsModal {

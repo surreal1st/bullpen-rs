@@ -724,3 +724,145 @@
   opacity: 0.5;
   cursor: default;
 }
+
+/* S6-VM-01: `vm_card.rs`'s card - ported from `projects/bullpen-gate/src/
+   client/shell.css` (`.vm-*`, lines ~4851-4977), byte-close to the named
+   rules. Placed here (not `settings.css`, where `.pane-head` itself landed
+   for S2-09b) since this card sits directly in `.pane`'s own flow, right
+   under that header - see `vm_card.rs`'s doc on why "the top of the bot
+   panel" is `thread.rs`'s `ChatPane` in this client. `.vm-sect`'s padding
+   is new (not a port): the TS original sat inside `BotPanel`'s own
+   `.panel-body` padding, which nothing here provides. */
+
+.vm-sect {
+  padding: 0.85rem 1.15rem 0;
+}
+
+.vm-screen {
+  position: relative;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #0b0d11;
+  /* The webtop desktop is 1280x800; matching it means the thumbnail never
+     letterboxes and never crops. */
+  aspect-ratio: 16 / 10;
+  overflow: hidden;
+}
+
+.vm-screen.is-blank {
+  display: grid;
+  place-items: center;
+  border-style: dashed;
+  border-color: var(--line-strong);
+  color: var(--faint);
+}
+
+.vm-blank {
+  display: grid;
+  justify-items: center;
+  gap: 0.45rem;
+  padding: 0.9rem 1rem;
+  text-align: center;
+}
+
+.vm-blank-line {
+  margin: 0;
+  max-width: 18rem;
+  color: var(--muted);
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+
+.vm-wake {
+  margin-top: 0.1rem;
+  border: 1px solid var(--line-strong);
+  background: var(--raised);
+  color: var(--ink-dim);
+  border-radius: 999px;
+  padding: 0.22rem 0.75rem;
+  font: inherit;
+  font-size: 0.74rem;
+  cursor: pointer;
+  transition:
+    color var(--fast) ease,
+    border-color var(--fast) ease;
+}
+
+.vm-wake:hover:not(:disabled) {
+  color: var(--ink);
+  border-color: var(--accent);
+}
+
+.vm-wake:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* The whole picture is the button. A small "open" affordance inside a
+   screenshot competes with the screenshot; the screen itself is the target. */
+.vm-open {
+  display: block;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+}
+
+.vm-shot {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: top left;
+}
+
+.vm-open-hint {
+  position: absolute;
+  inset: auto 0 0 0;
+  padding: 1.6rem 0.6rem 0.45rem;
+  background: linear-gradient(to top, rgb(0 0 0 / 62%), transparent);
+  color: #fff;
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  text-align: right;
+  opacity: 0;
+  transition: opacity var(--fast) ease;
+}
+
+.vm-open:hover .vm-open-hint,
+.vm-open:focus-visible .vm-open-hint {
+  opacity: 1;
+}
+
+.vm-caption {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0.45rem 0 0;
+  color: var(--faint);
+  font-size: 0.74rem;
+}
+
+.vm-name {
+  color: var(--ink-dim);
+}
+
+.vm-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--faint);
+  margin-left: auto;
+}
+
+.vm-dot.is-on {
+  background: var(--ok);
+  box-shadow: 0 0 0 3px rgb(74 196 138 / 16%);
+}
+
+.vm-state {
+  color: var(--muted);
+}

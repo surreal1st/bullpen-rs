@@ -11,6 +11,20 @@ use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::ReadableStreamDefaultReader;
 
+/// S6-VM-01: `transport::open_view`'s web half - a new tab at `path`
+/// (browser-resolved against the current origin, same as every other
+/// relative URL this build already uses), so the click that opens a bot's
+/// screen leaves this tab rather than trying to embed a second page's own
+/// WebSocket-driven canvas inside this one's DOM. `.ok()`: nothing useful
+/// to do with a blocked popup here beyond not opening the screen, the same
+/// silent-degrade posture `api.rs::fetch_bot_tools` already takes for a
+/// missing route.
+pub fn open_view(path: &str) {
+    if let Some(window) = web_sys::window() {
+        let _ = window.open_with_url_and_target(path, "_blank");
+    }
+}
+
 pub struct WebTransport;
 
 impl Transport for WebTransport {

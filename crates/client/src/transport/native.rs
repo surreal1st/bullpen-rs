@@ -147,6 +147,38 @@ fn resolve_url_with_base(base: &str, path: &str) -> Result<String, String> {
     })
 }
 
+/// S6-VM-01: `transport::open_view`'s native half. Resolves `path` (a
+/// `viewPath` from a `VmState`, e.g. `/api/bots/dora/vm/view/`) against the
+/// same base every ordinary request already targets, then hands the
+/// absolute URL to the OS's default browser rather than trying to load it
+/// inside this app's own webview - `dioxus-desktop` has no "navigate this
+/// window to an arbitrary external origin" call, and the VM's own screen
+/// (`selkies`, proxied by `crate::vm_proxy` server-side) is a full page
+/// with its own WebSocket, not a widget this window could easily embed.
+///
+/// Windows-only in practice: this project ships a Windows desktop build
+/// alone (`deploy/Bullpen-rs.cmd`, the `bundle/windows/nsis` target this
+/// repo's own `target-*` directories show) - `cmd /C start` is the plain OS
+/// mechanism for "open this URL in the default browser" there, with no new
+/// dependency. A silent no-op off Windows rather than a `compile_error!`:
+/// `cargo check`/`clippy` on this crate still has to succeed on whatever
+/// host runs them.
+pub(crate) fn open_view_path(path: &str) {
+    let Ok(url) = resolve_url_with_base(&base_url(), path) else {
+        return;
+    };
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("cmd")
+            .args(["/C", "start", "", &url])
+            .spawn();
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = url;
+    }
+}
+
 pub struct NativeTransport;
 
 impl Transport for NativeTransport {
@@ -422,6 +454,77 @@ mod tests {
         assert_eq!(
             resolve_url_with_base("http://100.119.100.103:4380/", "/api/bots/b1/seen").unwrap(),
             "http://100.119.100.103:4380/api/bots/b1/seen"
+        );
+    }
+
+    /// A one-shot HTTP/1.1 server that answers 200 only when the request
+    /// carries `Authorization: Bearer <expected_token>`, 401 otherwise - so
+    /// S6-VM-01's bite (d) can prove a real header reaches a real server
+    /// instead of asserting against `reqwest`'s request-builder internals.
+    /// `feature = "desktop"`-gated like its one caller below (`SESSION_TOKEN`'s
+    /// own doc has the full reasoning: the default `web`-feature build of
+    /// this crate still compiles this file natively, so an unguarded helper
+    /// with no caller there is a dead-code warning `cargo clippy -D warnings`
+    /// then fails on).
+    #[cfg(feature = "desktop")]
+    fn spawn_auth_checking_server(expected_token: &'static str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind a local test port");
+        let addr = listener.local_addr().expect("a bound listener has an addr");
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
+                let expected_header = format!("authorization: bearer {expected_token}");
+                let carries_token = request.lines().any(|line| line.trim() == expected_header);
+                let (status, body): (&str, &[u8]) = if carries_token {
+                    ("200 OK", b"ok")
+                } else {
+                    ("401 Unauthorized", b"no bearer token")
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.write_all(body);
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// **Bite (d)** (S6-VM-01's `## Results`): this is the exact mechanism
+    /// `api.rs::fetch_vm_thumbnail` depends on instead of a plain
+    /// `<img src="/api/.../thumbnail.png">` - see that function's own doc
+    /// on why an `<img>` tag would 401 in the desktop build (no cookie,
+    /// and no way for an HTML attribute to carry a Bearer header at all).
+    /// Two worlds: **guard present** - `request_with_base` attaches
+    /// `Authorization: Bearer <token>` to every request once a silent
+    /// sign-in has stored one, unconditionally (see the `#[cfg(feature =
+    /// "desktop")] if let Some(token) = stored_session_token()` block
+    /// above) - so a request shaped exactly like the thumbnail fetch
+    /// reaches this server carrying it and gets 200. **Guard removed**
+    /// (mutation run, captured for `## Results` then reverted by
+    /// re-editing - never `git checkout`): commenting out that block sends
+    /// the same request with no `Authorization` header at all, and this
+    /// goes red with a 401 - the literal failure the ticket names.
+    #[cfg(feature = "desktop")]
+    #[tokio::test]
+    async fn desktop_requests_carry_the_stored_bearer_token() {
+        store_session_token("s6-vm-01-test-token".to_string());
+        let base = spawn_auth_checking_server("s6-vm-01-test-token");
+        let spec = RequestSpec {
+            method: Method::Get,
+            url: "/api/bots/dora/vm/thumbnail.png?f=1".to_string(),
+            body: None,
+            with_credentials: false,
+        };
+        let resp = request_with_base(&base, spec)
+            .await
+            .expect("a completed HTTP response is Ok even when the status is 401");
+        assert!(
+            resp.ok_for_test(),
+            "the stored bearer token must reach the server, or the desktop build 401s on the thumbnail request exactly as the ticket describes"
         );
     }
 

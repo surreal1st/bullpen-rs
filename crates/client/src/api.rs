@@ -10,7 +10,7 @@ use crate::types::{
     MemoryEntryField, MemoryView, ModelError, ModelField, ModelsResponse, OpenQuestion,
     PendingApproval, PermissionsField, ProjectField, ProjectSummary, ProjectsField,
     QuestionsResponse, RoomResponse, RoomSummary, RoomsResponse, Routine, RoutineRun, RoutingState,
-    RulesField, SharedCoreField, SharedLogField, Tier1Models, Tier1Response, WorkingBot,
+    RulesField, SharedCoreField, SharedLogField, Tier1Models, Tier1Response, VmState, WorkingBot,
     WorkingResponse,
 };
 use serde::{Deserialize, Serialize};
@@ -346,6 +346,75 @@ pub async fn auth_status() -> Result<AuthStatus, String> {
         return Err(format!("/api/auth/status -> {}", resp.status()));
     }
     resp.json::<AuthStatus>().await.map_err(|e| e.to_string())
+}
+
+/* -------------------------------------------------------------- S6-VM-01 */
+
+/// `GET /api/bots/:id/vm` - the machine's current state. Read-only: never
+/// starts anything (`crates/server/src/routes/vms.rs::get_status`'s own
+/// doc, "looking never starts anything") - this is the call `vm_card.rs`'s
+/// mount effect and its poll loop both use, never `ensure_vm` below (rule
+/// 1: opening a bot's panel must not start it a computer).
+pub async fn fetch_vm(bot_id: &str) -> Result<VmState, String> {
+    let url = format!("/api/bots/{bot_id}/vm");
+    let resp = Request::get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("{url} -> {}", resp.status()));
+    }
+    resp.json::<VmState>().await.map_err(|e| e.to_string())
+}
+
+/// `POST /api/bots/:id/vm/ensure` - creates or wakes the machine. The ONLY
+/// function in this module that may start a bot's computer; `vm_card.rs`
+/// wires this to its "Start it"/"Wake it" button alone, never to a mount
+/// effect or a poll tick - see `fetch_vm`'s doc.
+pub async fn ensure_vm(bot_id: &str) -> Result<VmState, String> {
+    let url = format!("/api/bots/{bot_id}/vm/ensure");
+    let resp = Request::post(&url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("{url} -> {}", resp.status()));
+    }
+    resp.json::<VmState>().await.map_err(|e| e.to_string())
+}
+
+/// `GET /api/bots/:id/vm/thumbnail.png` - the live screen, read as raw
+/// bytes through this same authenticated transport every other call in
+/// this module uses, rather than a plain `<img src="...">`.
+///
+/// 🔴 The trap this exists to dodge: the desktop build signs in Rust-side
+/// and carries a Bearer token on every `transport::Request`
+/// (`transport/native.rs`, S13b-01) - the webview itself has no session
+/// cookie. An `<img>` tag is the browser/webview fetching a resource
+/// directly, outside this transport entirely, so it would carry no
+/// credential at all there and 401 - exactly the shape that ships broken
+/// for the one client Josh actually runs while looking fine on the web
+/// build (its same-origin `fetch` cookie covers the gap an `<img>` tag
+/// happens to inherit too). Routing the bytes through `Request::get` here
+/// means the Bearer token attaches the same way it does for every other
+/// route this file already calls - proven directly in
+/// `transport::native`'s own test module (bite (d)).
+///
+/// Any non-2xx - a 404 ("no machine" - the route's own deliberate guard,
+/// see its doc: never "fixed" by calling `ensure_vm` here), a 409
+/// ("asleep"), a 503 ("no frame yet") - folds into `Ok(None)` rather than
+/// an `Err`: `vm_card.rs` reads that as "nothing to show this tick", the
+/// same as the TS original's `<img onError>` treats any failed image load,
+/// regardless of status. Only a genuine transport failure is `Err`.
+pub async fn fetch_vm_thumbnail(bot_id: &str, frame: u64) -> Result<Option<Vec<u8>>, String> {
+    let url = format!("/api/bots/{bot_id}/vm/thumbnail.png?f={frame}");
+    let resp = Request::get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Ok(None);
+    }
+    let mut stream = resp.into_body_stream();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = stream.next_chunk().await? {
+        bytes.extend(chunk);
+    }
+    Ok(Some(bytes))
 }
 
 #[derive(Serialize)]

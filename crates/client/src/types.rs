@@ -235,6 +235,33 @@ pub struct AuthStatus {
     pub signed_in: bool,
 }
 
+/* -------------------------------------------------------------- S6-VM-01 */
+
+/// `GET`/`POST .../vm[/ensure]`'s response shape
+/// (`crates/server/src/routes/vms.rs::vm_view_json`) - the fields
+/// `vm_card.rs`'s pure `blank_line`/`state_word` functions and its render
+/// switch on. `container`/`cdpPort`/`webPort`/`lastUsedAt` are part of the
+/// wire shape (the ticket's own Endpoints list) but nothing on the card
+/// reads them - narrowed the same way `Message` narrows `shared/types.ts`'s
+/// fuller shape (see that type's own doc), and the same fields the TS
+/// `VmCard.tsx`'s own local `VmState` interface keeps.
+///
+/// `PartialEq` (not just `Eq`-able by hand) is what lets `vm_card.rs` skip
+/// a `Signal::set` when a poll's answer is byte-identical to the one
+/// already shown - rule 3 from the ticket ("the same answer as last time
+/// must not re-render the card"), same `peek()`-then-compare idiom
+/// `thread.rs`'s own conversation fetch already uses.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VmState {
+    pub available: bool,
+    pub state: String,
+    #[serde(default)]
+    pub detail: String,
+    #[serde(default)]
+    pub view_path: Option<String>,
+}
+
 /* ---------------------------------------------------------- S2-09b: settings */
 
 /// `{"model": "..."}"`, the shape every plain model GET/PUT

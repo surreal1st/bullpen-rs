@@ -323,6 +323,24 @@ pub async fn sleep(ms: u32) {
     tokio::time::sleep(std::time::Duration::from_millis(ms as u64)).await;
 }
 
+/// S6-VM-01: opens a relative API path (a `viewPath` the server handed
+/// back - see `vm_card.rs`'s doc; never a hand-built path) in a place Josh
+/// can actually watch the desktop. This one call leaves the app's own
+/// window/document entirely, so - unlike every `Request` in `api.rs` -
+/// it needs a real OS-level action rather than an HTTP round trip: `web.rs`
+/// opens a browser tab, `native.rs` resolves the path against the same
+/// `BULLPEN_URL` base every request already targets and hands the
+/// absolute URL to the OS's default browser.
+#[cfg(target_arch = "wasm32")]
+pub fn open_view(path: &str) {
+    web::open_view(path);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn open_view(path: &str) {
+    native::open_view_path(path);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
