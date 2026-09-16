@@ -23,11 +23,23 @@
 //!     below.
 //! (b) page text must arrive FENCED in the prompt -
 //!     `browse_fences_the_pages_own_text_as_untrusted_data` below.
+//!
+//! S8a-03 adds `click`/`type_text` (`run_click`/`run_type_text`) to this
+//! same file, same reasoning as (a)/(b): no injection seam exists yet, so
+//! this drives the tool functions directly. Two more required bites,
+//! proven red the same way (re-editing `run_click`/`run_type_text` in
+//! `tools/browse.rs`, never `git checkout`):
+//! (c) a click on text nothing on the page matches must read back as a
+//!     FAILURE, never a success - `click_on_absent_text_reports_failure_not_success`
+//!     below.
+//! (d) typing into a selector nothing on the page matches must read back
+//!     the same way -
+//!     `type_text_into_absent_selector_reports_failure_not_success` below.
 
 use async_trait::async_trait;
 use server::desk::Cdp;
 use server::egress::Resolver;
-use server::tools::browse::{run_browse, run_read_page};
+use server::tools::browse::{run_browse, run_click, run_read_page, run_type_text};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use store::Db;
@@ -427,4 +439,159 @@ async fn browse_turns_a_cdp_failure_into_a_sentence() {
     .await;
 
     assert_eq!(result, "The shared computer did not answer: boom");
+}
+
+/* ------------------------------------------------------------- click / type_text */
+
+/// Happy path: `click` opens/reuses the bot's window (no navigation), asks
+/// `Runtime.evaluate` to search the page, and hands back the match FENCED
+/// - the clicked element's own visible text is page-derived the same as
+/// anything `read_page` returns.
+#[tokio::test]
+async fn click_finds_the_match_and_fences_the_result() {
+    let db = db();
+    let cdp = FakeCdp::new();
+    cdp.push_create_window("target-1");
+    cdp.push_call_ok(serde_json::json!({"result": {"value": "clicked: Sign In"}}));
+
+    let result = run_click(&db, &cdp, "arthur", r#"{"text":"Sign In"}"#).await;
+
+    assert!(
+        result.contains("<<<TOOL_OUTPUT_DATA>>>") && result.contains("<<<END_TOOL_OUTPUT_DATA>>>"),
+        "expected the untrusted-data fence around the click result, got {result:?}"
+    );
+    assert!(result.contains("clicked: Sign In"));
+    // No navigation happened - only a window open and one evaluate call.
+    assert_eq!(
+        cdp.sequence(),
+        vec![
+            "create_window(about:blank)".to_string(),
+            "call(target-1,Runtime.evaluate)".to_string(),
+        ]
+    );
+}
+
+/// 🔴 BITE (c) target. `desk::click_text` itself returns "nothing on this
+/// page says that" (not an `Err`) when no element matches - that is the
+/// guard this proves survives the trip through `run_click` unmutilated:
+/// the tool's returned string must say FAILURE, never read back as a
+/// click that succeeded.
+///
+/// GUARD-PRESENT world (this test, as written): `run_click` forwards
+/// whatever `desk::click_text` actually returned, so a no-match result
+/// reads as "nothing on this page says that" and never contains
+/// "clicked:".
+///
+/// GUARD-REMOVED world (proved in this ticket's Results by temporarily
+/// changing `run_click`'s `Ok(result) => fence_tool_output(&result)` arm
+/// to ignore `result` and hand back a hardcoded `fence_tool_output("clicked:
+/// something")` instead - a realistic wiring bug, not a contrived one:
+/// this exact test then goes red, because the returned string claims a
+/// click succeeded regardless of what the engine actually reported.
+#[tokio::test]
+async fn click_on_absent_text_reports_failure_not_success() {
+    let db = db();
+    let cdp = FakeCdp::new();
+    cdp.push_create_window("target-1");
+    cdp.push_call_ok(serde_json::json!({"result": {"value": "nothing on this page says that"}}));
+
+    let result = run_click(&db, &cdp, "arthur", r#"{"text":"Sign In"}"#).await;
+
+    assert!(
+        result.contains("nothing on this page says that"),
+        "expected the engine's own failure message to reach the model, got {result:?}"
+    );
+    assert!(
+        !result.contains("clicked:"),
+        "a click that matched nothing must never read back as a success: {result:?}"
+    );
+    assert!(
+        result.contains("<<<TOOL_OUTPUT_DATA>>>"),
+        "the click result is page-derived text and must still be fenced: {result:?}"
+    );
+}
+
+/// An empty `text` is refused before the `Cdp` is ever touched - same
+/// shape as `run_browse`'s empty-`url` guard, and NOT page-derived, so it
+/// is not fenced.
+#[tokio::test]
+async fn click_with_no_text_is_refused_before_touching_cdp() {
+    let db = db();
+    let cdp = FakeCdp::new();
+
+    let result = run_click(&db, &cdp, "arthur", r#"{"text":""}"#).await;
+
+    assert_eq!(result, "No text was given.");
+    assert!(cdp.sequence().is_empty());
+}
+
+/// Happy path for `type_text`: same window handling as `click`, delegating
+/// to `desk::type_into`, fenced the same way.
+#[tokio::test]
+async fn type_text_fills_the_field_and_fences_the_result() {
+    let db = db();
+    let cdp = FakeCdp::new();
+    cdp.push_create_window("target-1");
+    cdp.push_call_ok(serde_json::json!({"result": {"value": "typed into email"}}));
+
+    let result = run_type_text(
+        &db,
+        &cdp,
+        "arthur",
+        r##"{"selector":"#email","text":"josh@example.com"}"##,
+    )
+    .await;
+
+    assert!(result.contains("<<<TOOL_OUTPUT_DATA>>>"));
+    assert!(result.contains("typed into email"));
+}
+
+/// 🔴 BITE (d) target. Same shape as bite (c), proved the same way: the
+/// GUARD-PRESENT world (this test) shows `desk::type_into`'s own
+/// "no field matches that selector" surviving to the tool's returned
+/// string; the GUARD-REMOVED world (this ticket's Results) hardcodes
+/// `run_type_text`'s `Ok` arm to `fence_tool_output("typed into
+/// something")` regardless of what the engine said, and this exact test
+/// goes red because the failure message is gone and "typed into" - the
+/// success shape - is present instead.
+#[tokio::test]
+async fn type_text_into_absent_selector_reports_failure_not_success() {
+    let db = db();
+    let cdp = FakeCdp::new();
+    cdp.push_create_window("target-1");
+    cdp.push_call_ok(serde_json::json!({"result": {"value": "no field matches that selector"}}));
+
+    let result = run_type_text(
+        &db,
+        &cdp,
+        "arthur",
+        r##"{"selector":"#missing","text":"hello"}"##,
+    )
+    .await;
+
+    assert!(
+        result.contains("no field matches that selector"),
+        "expected the engine's own failure message to reach the model, got {result:?}"
+    );
+    assert!(
+        !result.contains("typed into"),
+        "a type_text that matched nothing must never read back as a success: {result:?}"
+    );
+    assert!(
+        result.contains("<<<TOOL_OUTPUT_DATA>>>"),
+        "the type_text result is page-derived text and must still be fenced: {result:?}"
+    );
+}
+
+/// An empty `selector` is refused before the `Cdp` is ever touched - same
+/// shape as `click_with_no_text_is_refused_before_touching_cdp`.
+#[tokio::test]
+async fn type_text_with_no_selector_is_refused_before_touching_cdp() {
+    let db = db();
+    let cdp = FakeCdp::new();
+
+    let result = run_type_text(&db, &cdp, "arthur", r#"{"selector":"","text":"hello"}"#).await;
+
+    assert_eq!(result, "No selector was given.");
+    assert!(cdp.sequence().is_empty());
 }

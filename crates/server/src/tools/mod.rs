@@ -203,6 +203,14 @@ fn all_specs() -> Vec<ToolSpec> {
         // ticket's own instructions warn about. Adding them here closes it.
         browse::browse_spec(),
         browse::read_page_spec(),
+        // S8a-03: `click`/`type_text` had the identical gap - a
+        // permission row each (`permissions.rs:262-263`) and a
+        // working-bar label each (`shared/src/working.rs:39-40`), but no
+        // spec here and no dispatch arm below. Their engines
+        // (`desk::click_text`/`desk::type_into`) already existed; this is
+        // the ticket that wires them in.
+        browse::click_spec(),
+        browse::type_text_spec(),
     ]
 }
 
@@ -372,6 +380,42 @@ pub fn build(params: BuildParams) -> ToolBox {
                         .await;
                         (
                             crate::tools::browse::run_read_page(&db, cdp.as_ref(), &bot_id).await,
+                            None,
+                        )
+                    }
+                    // S8a-03: same `cdp_for_bot` resolution as `browse`/
+                    // `read_page` above, for the same reason - the calling
+                    // bot's own machine, re-resolved at call time since it
+                    // can start/stop/hibernate between calls. Registering
+                    // these on anything else (a shared desk) is exactly
+                    // the bug S8a-02 removed; these two must not reopen it.
+                    "click" => {
+                        let cdp = crate::desk::cdp_for_bot(
+                            &db,
+                            Arc::clone(&vm_docker),
+                            &vm_config,
+                            vm_enabled,
+                            &bot_id,
+                        )
+                        .await;
+                        (
+                            crate::tools::browse::run_click(&db, cdp.as_ref(), &bot_id, &args)
+                                .await,
+                            None,
+                        )
+                    }
+                    "type_text" => {
+                        let cdp = crate::desk::cdp_for_bot(
+                            &db,
+                            Arc::clone(&vm_docker),
+                            &vm_config,
+                            vm_enabled,
+                            &bot_id,
+                        )
+                        .await;
+                        (
+                            crate::tools::browse::run_type_text(&db, cdp.as_ref(), &bot_id, &args)
+                                .await,
                             None,
                         )
                     }

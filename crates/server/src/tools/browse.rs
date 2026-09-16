@@ -1,9 +1,13 @@
-//! `browse`/`read_page`: the two desk tools a bot's model may call
-//! directly. Port of the relevant branch of TS `app.ts:7082-7116` (the
-//! `browse`/`read_page`/`click`/`type_text` dispatch), narrowed to the two
-//! tools S6-W-03 owns - `click`/`type_text` are a later ticket's scope,
-//! same reasoning `desk.rs`'s own "scope cuts" section gives for
-//! `deskShell`/`deskAction`.
+//! `browse`/`read_page`/`click`/`type_text`: the four desk tools a bot's
+//! model may call directly. Port of the relevant branch of TS
+//! `app.ts:7082-7116` (the same four-way dispatch). S6-W-03 narrowed this
+//! file to `browse`/`read_page` only - `click`/`type_text` were a later
+//! ticket's scope, same reasoning `desk.rs`'s own "scope cuts" section
+//! gives for `deskShell`/`deskAction`. **S8a-03 is that ticket**: it adds
+//! `click_spec`/`type_text_spec`/`run_click`/`run_type_text` alongside the
+//! original two, reusing `window_for_locked`/`transport_failure` rather
+//! than duplicating them, because all four tools share the same
+//! open-or-reuse-the-window plumbing.
 //!
 //! 🔴 **Page text is EXTERNAL DATA.** `format_page` below fences the page's
 //! own words (`super::fence_tool_output`) before they ever reach a bot's
@@ -57,6 +61,48 @@ pub fn read_page_spec() -> ToolSpec {
 Use after clicking or typing to see what changed."
             .to_string(),
         parameters: json!({ "type": "object", "properties": {} }),
+    }
+}
+
+/// S8a-03: spec text ported VERBATIM from TS `app.ts:5191-5199` - the
+/// wording is what a model reads to decide when to call this tool, so this
+/// is not this ticket's to reword.
+pub fn click_spec() -> ToolSpec {
+    ToolSpec {
+        name: "click".to_string(),
+        description: "Click the first link or button on your current page whose visible text \
+contains what you give. Then call read_page to see the result."
+            .to_string(),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "text": { "type": "string", "description": "Visible text of the link or button." }
+            },
+            "required": ["text"]
+        }),
+    }
+}
+
+/// S8a-03: spec text ported VERBATIM from TS `app.ts:5201-5210`, same
+/// reasoning as `click_spec`.
+pub fn type_text_spec() -> ToolSpec {
+    ToolSpec {
+        name: "type_text".to_string(),
+        description: "Type into a field on your current page, chosen by CSS selector. For \
+search boxes and forms. Never type a password: Josh completes those himself on the shared \
+desktop."
+            .to_string(),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "selector": {
+                    "type": "string",
+                    "description": "A CSS selector, such as input[name=q]."
+                },
+                "text": { "type": "string", "description": "What to type." }
+            },
+            "required": ["selector", "text"]
+        }),
     }
 }
 
@@ -194,6 +240,76 @@ pub async fn run_read_page(db: &Arc<Mutex<Db>>, cdp: &dyn Cdp, bot_id: &str) -> 
     };
     match desk::read_page(cdp, &target_id).await {
         Ok(view) => format_page(&view),
+        Err(err) => transport_failure(&err),
+    }
+}
+
+#[derive(Deserialize, Default)]
+struct ClickArgs {
+    #[serde(default)]
+    text: String,
+}
+
+#[derive(Deserialize, Default)]
+struct TypeTextArgs {
+    #[serde(default)]
+    selector: String,
+    #[serde(default)]
+    text: String,
+}
+
+/// Runs `click`: acts on the bot's CURRENT window - opened first if this
+/// bot has never browsed yet, same as `run_read_page` - without
+/// navigating. TS dispatch: `app.ts:7092-7096`.
+///
+/// `desk::click_text` does the actual DOM search-and-click over CDP; this
+/// wraps it exactly the way `run_browse`/`run_read_page` wrap
+/// `desk::browse`/`desk::read_page` - resolve the window under the lock,
+/// release it, then make the `Cdp` call.
+///
+/// 🔴 The returned string is PAGE-DERIVED: either the clicked element's own
+/// visible text, or the "nothing on this page says that" sentence
+/// `desk::click_text` produces when no element matches. Both go through
+/// `fence_tool_output`, same reason `format_page` fences a page's body -
+/// see this module's own top-of-file doc. `"No text was given."` is the
+/// one branch that is NOT page-derived (a bot called `click` with an empty
+/// `text`, refused before `Cdp` is ever touched, same shape as
+/// `run_browse`'s empty-`url` guard) and stays unfenced accordingly.
+pub async fn run_click(db: &Arc<Mutex<Db>>, cdp: &dyn Cdp, bot_id: &str, args: &str) -> String {
+    let parsed: ClickArgs = serde_json::from_str(args).unwrap_or_default();
+    let text = parsed.text.trim();
+    if text.is_empty() {
+        return "No text was given.".to_string();
+    }
+
+    let target_id = match window_for_locked(db, cdp, bot_id).await {
+        Ok(id) => id,
+        Err(err) => return transport_failure(&err),
+    };
+
+    match desk::click_text(cdp, &target_id, text).await {
+        Ok(result) => fence_tool_output(&result),
+        Err(err) => transport_failure(&err),
+    }
+}
+
+/// Runs `type_text`: same window handling as `run_click`, delegating the
+/// field lookup/fill to `desk::type_into`. TS dispatch: `app.ts:7097-7103`.
+/// Same fencing/refusal shape as `run_click` - see that function's doc.
+pub async fn run_type_text(db: &Arc<Mutex<Db>>, cdp: &dyn Cdp, bot_id: &str, args: &str) -> String {
+    let parsed: TypeTextArgs = serde_json::from_str(args).unwrap_or_default();
+    let selector = parsed.selector.trim();
+    if selector.is_empty() {
+        return "No selector was given.".to_string();
+    }
+
+    let target_id = match window_for_locked(db, cdp, bot_id).await {
+        Ok(id) => id,
+        Err(err) => return transport_failure(&err),
+    };
+
+    match desk::type_into(cdp, &target_id, selector, &parsed.text).await {
+        Ok(result) => fence_tool_output(&result),
         Err(err) => transport_failure(&err),
     }
 }
