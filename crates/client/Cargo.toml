@@ -21,17 +21,6 @@ futures = { workspace = true }
 # `dangerous_inner_html` - see that module's doc comment for why. The one
 # new dependency this ticket adds.
 pulldown-cmark = "0.13"
-# S13b-03-04: `local_read.rs`'s credential-shape refusal list is a direct
-# port of `localPaths.ts`'s `REFUSED` regexes (design §5.2) - reusing the
-# already-workspace-pinned `regex` crate (server already depends on it,
-# `Cargo.toml`'s own `regex = "1"`) keeps that port literal instead of
-# hand-rolling equivalent-but-not-identical string matching for a
-# security-relevant list. Desktop-only in practice (this module is gated
-# `not(wasm32) && feature = "desktop"`), but left ungated in this manifest
-# like `chrono`/`serde` above rather than added under the
-# `cfg(not(target_arch = "wasm32"))` block, since `regex` itself compiles
-# fine on wasm32 (pure Rust, no OS calls) - it just goes unused there.
-regex = { workspace = true }
 # S1-07a: the SSE run stream reads its response body as a raw
 # `web_sys::ReadableStream` (api.rs) - `gloo-net`'s `Response::body()`
 # already returns one, but consuming it needs the reader type explicitly,
@@ -83,6 +72,19 @@ desktop = ["dioxus/desktop"]
 mobile = ["dioxus/mobile"]
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# S13b-03-04: `local_read.rs`'s credential-shape refusal list is a direct port
+# of `localPaths.ts`'s `REFUSED` regexes (design §5.2); reusing the
+# workspace-pinned `regex` keeps that port literal rather than hand-rolling
+# equivalent-but-not-identical matching for a security-relevant list.
+#
+# 🔴 HERE, not in the unconditional block. The builder put it there reasoning
+# that `regex` compiles fine on wasm32 and would simply go unused - but the
+# question is not whether it compiles, it is whether it ships BYTES TO THE
+# BROWSER. `regex` is a large crate and that would be leaning on dead-code
+# elimination to keep it out of the wasm bundle. `local_read` is gated
+# `not(wasm32) && feature = "desktop"`, so the dependency belongs on the same
+# side of the split as the only module that uses it (orchestrator, 2026-09-16).
+regex = { workspace = true }
 # S13a-01: the native half of `transport::Request`/`Response`
 # (`src/transport/native.rs`) - rustls only, never native-tls, see that
 # module's doc on why - plus the shared cookie-jar client that keeps
