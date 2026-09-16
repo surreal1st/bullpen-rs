@@ -100,29 +100,74 @@ fn judge_line(verdict: Option<&str>, reason: Option<&str>) -> Option<(&'static s
     Some((class, format!("Why it's asking: {reason}")))
 }
 
+/// True for a C0 control (U+0000-U+001F) or DEL (U+007F) - the characters
+/// that let a bot-chosen argument break the `<pre>`'s layout with a literal
+/// newline/carriage-return rather than reorder its glyphs (design §5.5).
+fn is_c0_or_del(c: char) -> bool {
+    matches!(c, '\u{0000}'..='\u{001F}' | '\u{007F}')
+}
+
+/// True for a Unicode bidi-formatting character: LRM/RLM, the five
+/// embedding/override controls, and the four isolate controls. This is the
+/// exact set design §5.5 names, not "non-ASCII" in general - an accented or
+/// CJK filename is legitimate content and must render unchanged.
+fn is_bidi_format_char(c: char) -> bool {
+    matches!(c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
+/// The approval card is the only thing Josh sees before deciding (§5.5): a
+/// bot-chosen argument that embeds U+202E (RIGHT-TO-LEFT OVERRIDE) can make
+/// the card display one filename while the bytes mean another, and a raw
+/// `\r`/`\n` does the same thing more crudely by splitting or reflowing the
+/// `<pre>`. Every C0 control, DEL, and bidi-formatting character is replaced
+/// with its Rust `\u{..}` escape - **visibly, not silently stripped**:
+/// removing the override would still leave the glyphs in honest left-to-right
+/// order, but it throws away the fact that something was there, and a card
+/// that looks merely odd is safer than one that looks clean. This never
+/// touches the underlying value used elsewhere (the actual tool argument, or
+/// what gets posted back as an answer) - only what gets painted.
+fn sanitize_for_card(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for c in input.chars() {
+        if is_c0_or_del(c) || is_bidi_format_char(c) {
+            out.push_str(&format!("\\u{{{:x}}}", c as u32));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// Renders a tool call's arguments for the card. A single-key object shows
 /// its one value bare (what matters when approving `shell` is the command,
 /// not its JSON encoding); anything else is pretty-printed at one-space
 /// indent, matching the TS `JSON.stringify(parsed, null, 1)` exactly rather
 /// than `serde_json`'s two-space default. Malformed JSON is shown verbatim -
-/// same "never throw" posture as the rest of this pane.
+/// same "never throw" posture as the rest of this pane. **Every return path
+/// goes through `sanitize_for_card`** (§5.5): this is the only place a
+/// bot-chosen path or other tool argument reaches the `<pre>`, and it does
+/// so with no filesystem or network call of any kind - the card shows the
+/// typed value, sanitised, and nothing else (§5.4's divergence check, not
+/// this function, is what makes the typed value trustworthy at read time,
+/// and that check has no seam here - it runs later, inside the read).
 fn pretty(args: &str) -> String {
     let Ok(parsed) = serde_json::from_str::<serde_json::Value>(args) else {
-        return args.to_string();
+        return sanitize_for_card(args);
     };
     if let serde_json::Value::Object(ref map) = parsed
         && map.len() == 1
         && let Some(s) = map.values().next().and_then(|v| v.as_str())
     {
-        return s.to_string();
+        return sanitize_for_card(s);
     }
     let mut buf = Vec::new();
     let formatter = serde_json::ser::PrettyFormatter::with_indent(b" ");
     let mut ser = serde_json::Serializer::with_formatter(&mut buf, formatter);
-    match serde::Serialize::serialize(&parsed, &mut ser) {
+    let rendered = match serde::Serialize::serialize(&parsed, &mut ser) {
         Ok(()) => String::from_utf8(buf).unwrap_or_else(|_| args.to_string()),
         Err(_) => args.to_string(),
-    }
+    };
+    sanitize_for_card(&rendered)
 }
 
 #[component]
@@ -221,7 +266,7 @@ fn ApprovalCard(
                 span { class: "approval-cause", "{cause}" }
             }
             if let Some(q) = question.clone() {
-                p { class: "approval-question", "{q.question}" }
+                p { class: "approval-question", "{sanitize_for_card(&q.question)}" }
             } else {
                 pre { class: "mono approval-args", "{pretty(&tool_args)}" }
             }
@@ -247,7 +292,7 @@ fn ApprovalCard(
                                             fire_decide(items, busy, ids.clone(), true, Some(option.clone()), None);
                                         }
                                     },
-                                    "{option}"
+                                    "{sanitize_for_card(&option)}"
                                 }
                             }
                         }
@@ -341,7 +386,84 @@ fn ApprovalCard(
 
 #[cfg(test)]
 mod tests {
-    use super::judge_line;
+    use super::{judge_line, pretty, sanitize_for_card};
+
+    /// design §5.5, §7 bite 6 (rendering half): a bidi override must never
+    /// reach the rendered card as a live formatting character, only as a
+    /// visible escape - proven by removing `sanitize_for_card`'s call sites
+    /// in `pretty` and watching this go red (see ticket Results for the
+    /// literal red output).
+    #[test]
+    fn bidi_override_never_reaches_the_rendered_card() {
+        let args = "{\"path\":\"C:\\\\Users\\\\rain\\\\Documents\\\\\u{202E}gnp.yek_retuorneponom\\\\selif\\\\.txt\"}";
+        let rendered = pretty(args);
+        assert!(
+            !rendered.contains('\u{202E}'),
+            "raw RLO override must never reach the card: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("\\u{202e}"),
+            "override must be visibly escaped, not silently dropped: {rendered:?}"
+        );
+    }
+
+    /// Same bite, the crude form: a raw `\r`/`\n` in a tool argument must
+    /// not become a real line break in the `<pre>`.
+    #[test]
+    fn crlf_never_reaches_the_rendered_card_as_a_real_newline() {
+        let args = "{\"path\":\"notes.txt\\r\\nDELETE ALL FILES\"}";
+        let rendered = pretty(args);
+        assert!(
+            !rendered.contains('\r'),
+            "raw CR must never reach the card: {rendered:?}"
+        );
+        assert!(
+            !rendered.contains('\n'),
+            "raw LF must never reach the card: {rendered:?}"
+        );
+        assert!(rendered.contains("\\u{d}"));
+        assert!(rendered.contains("\\u{a}"));
+    }
+
+    /// The sanitiser targets exactly the two character classes design §5.5
+    /// names - not "non-ASCII" in general. An accented or CJK path is
+    /// legitimate content the bidi-fix must not mangle.
+    #[test]
+    fn ordinary_non_ascii_path_renders_unchanged() {
+        let args = "{\"path\":\"C:\\\\Users\\\\Jos\u{e9}\\\\\u{7b14}\u{8bb0}.txt\"}";
+        let rendered = pretty(args);
+        assert_eq!(rendered, "C:\\Users\\Jos\u{e9}\\\u{7b14}\u{8bb0}.txt");
+    }
+
+    /// The malformed-JSON fallback branch (`pretty` returns the raw string
+    /// verbatim when parsing fails) must still be sanitised - it is a
+    /// second return path, easy to add a sanitiser to only the happy path.
+    #[test]
+    fn malformed_json_fallback_is_still_sanitised() {
+        let rendered = pretty("not json \u{202E}here");
+        assert!(!rendered.contains('\u{202E}'));
+        assert!(rendered.contains("\\u{202e}"));
+    }
+
+    /// The multi-key pretty-printed branch must also be sanitised - it is a
+    /// third return path, distinct from the single-key bare-string branch.
+    #[test]
+    fn multi_key_pretty_printed_branch_is_still_sanitised() {
+        let args = "{\"path\":\"\u{202E}x\",\"recursive\":true}";
+        let rendered = pretty(args);
+        assert!(!rendered.contains('\u{202E}'));
+        assert!(rendered.contains("\\u{202e}"));
+    }
+
+    #[test]
+    fn sanitize_for_card_escapes_every_c0_and_bidi_char_directly() {
+        let input = "a\u{0}\u{1F}\u{7F}\u{200E}\u{200F}\u{202A}\u{202B}\u{202C}\u{202D}\u{202E}\u{2066}\u{2067}\u{2068}\u{2069}b";
+        let out = sanitize_for_card(input);
+        assert_eq!(
+            out,
+            "a\\u{0}\\u{1f}\\u{7f}\\u{200e}\\u{200f}\\u{202a}\\u{202b}\\u{202c}\\u{202d}\\u{202e}\\u{2066}\\u{2067}\\u{2068}\\u{2069}b"
+        );
+    }
 
     #[test]
     fn renders_nothing_when_both_fields_are_null() {
