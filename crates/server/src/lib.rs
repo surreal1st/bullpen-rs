@@ -349,6 +349,28 @@ impl AppState {
         if let Err(err) = model::routing::ensure_routing_tables(&db) {
             tracing::error!("failed to ensure routing_log table exists: {err}");
         }
+        // S8a-01: same F1 shape, same reason. `desk::ensure_desk_tables`
+        // (`desk.rs:214`) is self-creating but lives in THIS crate, not
+        // `store` - `store::Db::open` already wires up every other
+        // self-creating table it can reach (`slack::ensure_slack_tables`,
+        // `vms::ensure_vm_tables`, `goals::ensure_goal_tables`), but `store`
+        // has no dependency on `server` (see `store/Cargo.toml`) and never
+        // can, so a desk-table call cannot live there without a dependency
+        // cycle - exactly why `model::routing::ensure_routing_tables` above
+        // is called here instead of from `store::Db::open` too. Before this,
+        // nothing in production called it at all: `browse`'s first
+        // `existing_window` (`desk.rs:259`) hit "no such table:
+        // desk_windows" on a live server's first request, and only
+        // `tests/desk.rs`/`tests/browse_tools.rs` created the table
+        // themselves. `AppState::build` is the one place every constructor
+        // (`new`, every `with_*` test helper) funnels through before a
+        // route or a test runs, so wiring it here - not into `MIGRATIONS`,
+        // which stays byte-identical to the TS source so a live `bullpen.db`
+        // opens unchanged - covers the real server and every test that
+        // builds an `AppState` in one place.
+        if let Err(err) = desk::ensure_desk_tables(&db) {
+            tracing::error!("failed to ensure desk_windows table exists: {err}");
+        }
         let db = Arc::new(Mutex::new(db));
         // S6L-02: threaded through so a `with_sandbox` test double (or a
         // real `on` server) actually reaches `shell`/`sandbox_read` - without
