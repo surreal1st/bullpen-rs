@@ -106,6 +106,29 @@ async fn main() {
     // route shares, taken before `build_app` consumes `state` below.
     let db_handle = state.db_handle();
 
+    // The idle sweep. Ported in S6-06b and then never started from here, so
+    // nothing has hibernated a VM since: `bullpen-vm-dora` stayed up all of
+    // 2026-09-15 into 09-16 holding its RAM. Port of TS `index.ts:127-131`,
+    // including the 60s default from `vm.ts:448-452`'s `everyMs = 60_000`.
+    //
+    // Guarded by `vm_enabled` for the same reason TS guards it with
+    // `vmsEnabled()`: a server that runs no VMs should also run no timer.
+    // Started BEFORE `build_app` consumes `state`, same constraint as
+    // `db_handle` above.
+    if state.vm_enabled {
+        let _vm_reaper = server::vm::start_vm_reaper(
+            state.db_handle(),
+            state.vm_docker.clone(),
+            state.vm_config.clone(),
+            std::time::Duration::from_secs(60),
+        );
+        tracing::info!(
+            slots = state.vm_config.slots,
+            idle_ms = state.vm_config.idle_ms,
+            "vm reaper started"
+        );
+    }
+
     let app = server::build_app(state);
 
     // B7: was `0.0.0.0` - every route was unauthenticated (before this

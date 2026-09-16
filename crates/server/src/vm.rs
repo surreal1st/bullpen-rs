@@ -808,7 +808,12 @@ fn next_slot(used: &[i32], cfg: &VmConfig) -> Option<i32> {
 pub fn start_vm_reaper(
     db: Arc<Mutex<Db>>,
     docker: Arc<dyn DockerRun>,
-    cfg: VmConfig,
+    // `Arc`, not a bare `VmConfig`: `AppState` holds its config as
+    // `Arc<store::vms::VmConfig>` (the struct derives no `Clone`, see
+    // `lib.rs:114-117`), so taking it by value gave `main.rs` no way to hand
+    // the reaper the SAME config every route already shares - which is how
+    // this ended up ported-but-never-started.
+    cfg: Arc<VmConfig>,
     every: Duration,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {

@@ -503,7 +503,12 @@ async fn start_vm_reaper_stops_an_idle_vm_on_tick() {
     let mut cfg = test_config();
     cfg.idle_ms = 1_000; // anything older than 1s is idle
 
-    let handle = start_vm_reaper(db.clone(), docker.clone(), cfg, Duration::from_millis(15));
+    let handle = start_vm_reaper(
+        db.clone(),
+        docker.clone(),
+        Arc::new(cfg),
+        Duration::from_millis(15),
+    );
 
     // Real-time wait for at least one tick; this is timing-sensitive but
     // needs no docker/browser, only the fake and a short sleep.
