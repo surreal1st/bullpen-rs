@@ -67,7 +67,17 @@ use std::sync::OnceLock;
 /// build; this reads the same variable, falling back to the server's own
 /// tailnet address (S13a ticket's stated default) when it is unset - e.g.
 /// running the binary by hand outside the launcher script.
-const DEFAULT_BASE_URL: &str = "http://100.119.100.103:4380";
+/// 🔴 HTTPS, and not for tidiness. selkies - the VM screen served from inside
+/// a bot's container, proxied by `routes/vms.rs` - calls
+/// `window.isSecureContext` and refuses over plain http, because WebCodecs
+/// requires it ("This application requires a secure connection (HTTPS)",
+/// proven from the container's own `selkies-core.js` and from a screenshot
+/// of the failure, 2026-09-16). Tailscale Serve terminates TLS on meridian
+/// at :8452 and proxies to `127.0.0.1:4380` - tailnet only, the same
+/// exposure the plain port already had, with a real cert. Point this at
+/// `http://100.119.100.103:4380` again and every API call still works while
+/// the per-bot screen silently shows a black window with one error line.
+const DEFAULT_BASE_URL: &str = "https://meridian.tail74afb5.ts.net:8452";
 
 fn base_url() -> String {
     std::env::var("BULLPEN_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string())
