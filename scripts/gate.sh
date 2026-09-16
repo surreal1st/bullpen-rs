@@ -19,7 +19,24 @@ cargo test --all-features --no-fail-fast
 # reached a ship log that no gate run could have seen. A release-only COMPILE
 # error would have passed the gate and failed the deploy.
 #
-# Only the server: it is what ships as a binary. The client's release bundle is
-# built by `build-client.sh`/`build-desktop.sh`, which the gate does not cover
-# either - see DEFERRED F19b, still open.
+# Only the server: it is what ships as a binary. The client's release BUNDLE is
+# still built by `build-client.sh`/`build-desktop.sh` and is not covered here;
+# the browser client's compile is, by the wasm32 check below (F19b, half closed
+# 2026-09-16 - the DESKTOP client remains uncovered).
 cargo build --release -p server
+
+# F19b: the gate's compile coverage of the BROWSER client was ZERO. Every cargo
+# line above runs on the native host, and `--all-features` turns web+desktop+
+# mobile on together - a combination nothing ships. After S13a-01b split every
+# client file on `target_arch`, nothing in this script ever compiled the wasm
+# half, so a change could break the shipped browser client and still go green.
+#
+# DEFAULT features on purpose, not `--all-features`: `default = ["web"]`
+# (`crates/client/Cargo.toml:69`) IS the browser configuration. Turning desktop
+# and mobile on under wasm32 would check a target that does not exist.
+#
+# `check`, not `build`: this catches type and cfg errors, which is the whole
+# failure class F19b describes, without paying for codegen on a third target.
+# The real bundle is still built by `build-client.sh`/`build-desktop.sh`, and
+# the DESKTOP client remains uncovered - that half of F19b stays open.
+cargo check -p client --target wasm32-unknown-unknown
