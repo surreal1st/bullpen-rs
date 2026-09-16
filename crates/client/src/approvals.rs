@@ -24,6 +24,12 @@ use dioxus::prelude::*;
 use shared::approval_groups::{Groupable, group_approvals};
 use shared::ask_josh::{is_answerable, parse_ask_josh};
 
+// S13b-03-06 (design §5.6): `local_read` only exists on the one build that
+// can read Josh's own disk - this mirrors `main.rs`'s `mod local_read;`
+// gate exactly so the two never drift apart.
+#[cfg(all(not(target_arch = "wasm32"), feature = "desktop"))]
+use crate::local_read::{RealFs, read_local_file};
+
 impl Groupable for PendingApproval {
     fn id(&self) -> &str {
         &self.id
@@ -70,6 +76,126 @@ fn fire_decide(
         busy.set(false);
         reload(items).await;
     });
+}
+
+/// S13b-03-06 (design §4.2, §5.6). The server's own `CLIENT_FULFILLED` list
+/// (`crates/server/src/runs.rs`) is private to that crate - the design says
+/// so explicitly: "the list is private to `crates/server`, so the CLIENT
+/// cannot ask it what is fulfillable - the client decides from the
+/// approval's `toolName` it already has." Hardcoded here rather than
+/// imported, the same call `permissions.rs` made server-side for the
+/// identical reason (S13b-03-02's own judgment call) - keep this in sync by
+/// hand if `CLIENT_FULFILLED` ever grows past one name.
+const READ_FILE_TOOL: &str = "read_file";
+
+fn is_client_fulfilled(tool_name: &str) -> bool {
+    tool_name == READ_FILE_TOOL
+}
+
+/// design §5.7: the Approve button must render disabled for a
+/// client-fulfilled tool on any build that cannot itself perform the
+/// fulfilment - today that means every build except desktop, since only the
+/// desktop client can read Josh's own disk (§5.6). Takes "can this build
+/// read locally" as a plain `bool` rather than reading `cfg!` inside this
+/// function, so the decision is one plain `#[test]` against both worlds
+/// instead of two separate feature-gated compilations (design §7 bite d).
+fn approve_is_disabled(tool_name: &str, can_read_locally: bool) -> bool {
+    is_client_fulfilled(tool_name) && !can_read_locally
+}
+
+/// Extracts the `path` argument from ONE PENDING ROW's own `toolArgs` -
+/// never a path from elsewhere in the app, and never one typed into a box
+/// beside the button (design §5.6's explicit rule). Total, never throwing:
+/// malformed JSON or a missing/non-string `path` becomes an empty string,
+/// which `local_read::read_local_file`'s own step 1 refuses with "no path
+/// given" rather than this function guessing at a fallback.
+#[cfg(all(not(target_arch = "wasm32"), feature = "desktop"))]
+fn read_file_path_from_tool_args(tool_args: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(tool_args)
+        .ok()
+        .and_then(|v| v.get("path")?.as_str().map(str::to_string))
+        .unwrap_or_default()
+}
+
+/// design §5.6: performs the read and produces exactly what gets posted as
+/// the approval's `result` - the file's text on success, or `local_read`'s
+/// own refusal sentence on any refusal, NEVER an empty string (§4.7: a
+/// model reads `""` as "the file was blank"). Design §6.2: this port
+/// returns text only, so a file that reads back as bytes but is not valid
+/// UTF-8 is refused with a sentence of its own rather than lossily
+/// substituting the replacement character for whatever the file actually
+/// held.
+#[cfg(all(not(target_arch = "wasm32"), feature = "desktop"))]
+fn read_file_result(tool_args: &str) -> String {
+    let path = read_file_path_from_tool_args(tool_args);
+    match read_local_file(&RealFs, &path) {
+        Ok(outcome) => String::from_utf8(outcome.bytes).unwrap_or_else(|_| {
+            "that file isn't valid text, so it can't be read into a conversation".to_string()
+        }),
+        Err(refusal) => refusal.message(),
+    }
+}
+
+/// design §5.6: the desktop-only Approve path for a `read_file` card. Reads
+/// the file (or produces the refusal sentence) ONCE and posts the SAME
+/// result to every id in the group - safe because
+/// `shared::approval_groups::group_approvals` only ever groups approvals
+/// with byte-identical `toolArgs` (bot + tool + arguments is the grouping
+/// key, see that module's doc), so every id here names the identical path.
+#[cfg(all(not(target_arch = "wasm32"), feature = "desktop"))]
+fn fire_decide_read_file(
+    items: Signal<Vec<PendingApproval>>,
+    mut busy: Signal<bool>,
+    ids: Vec<String>,
+    tool_args: String,
+) {
+    busy.set(true);
+    spawn(async move {
+        let result = read_file_result(&tool_args);
+        for id in ids {
+            let _ = api::decide_approval(&id, true, Some(&result), None).await;
+        }
+        busy.set(false);
+        reload(items).await;
+    });
+}
+
+/// design §5.6: what pressing Approve does for a `read_file` card on the
+/// desktop build - read the file locally first, then post its contents (or
+/// the refusal sentence) as `result`. Every other tool still takes the
+/// ordinary `fire_decide` path with no `result` at all.
+#[cfg(all(not(target_arch = "wasm32"), feature = "desktop"))]
+fn approve_pressed(
+    items: Signal<Vec<PendingApproval>>,
+    busy: Signal<bool>,
+    ids: Vec<String>,
+    tool_name: String,
+    tool_args: String,
+) {
+    if is_client_fulfilled(&tool_name) {
+        fire_decide_read_file(items, busy, ids, tool_args);
+    } else {
+        fire_decide(items, busy, ids, true, None, None);
+    }
+}
+
+/// design §5.7: every build that is not desktop never reaches this for a
+/// client-fulfilled tool in practice - `approve_is_disabled` renders the
+/// button `disabled` for that case, so no click ever fires. This still
+/// takes the ordinary (no-`result`) path rather than doing nothing if that
+/// disabled check is ever bypassed, which is what keeps §4.7's "the run
+/// must never hang" true on every build, not just desktop: an approved
+/// `read_file` with no posted `result` gets `NOT_ON_THIS_MACHINE` from the
+/// server, never a silent stall.
+#[cfg(not(all(not(target_arch = "wasm32"), feature = "desktop")))]
+fn approve_pressed(
+    items: Signal<Vec<PendingApproval>>,
+    busy: Signal<bool>,
+    ids: Vec<String>,
+    _tool_name: String,
+    _tool_args: String,
+) {
+    fire_decide(items, busy, ids, true, None, None);
 }
 
 /// Where this request came from, in words Josh would use. A trimmed port of
@@ -252,6 +378,13 @@ fn ApprovalCard(
     };
     let cause = cause_of(trigger.as_deref());
     let judge = judge_line(judge_verdict.as_deref(), judge_reason.as_deref());
+    // design §5.7: only the desktop build can perform a client-fulfilled
+    // tool's read - `cfg!` (a value, not an attribute) so this is the same
+    // plain `bool` `approve_is_disabled`'s own test drives directly.
+    let read_file_disabled = approve_is_disabled(
+        &tool_name,
+        cfg!(all(not(target_arch = "wasm32"), feature = "desktop")),
+    );
 
     rsx! {
         article { class: "{card_class}",
@@ -340,10 +473,14 @@ fn ApprovalCard(
                 div { class: "approval-acts",
                     button {
                         class: "ok",
-                        disabled: *busy.read(),
+                        disabled: read_file_disabled || *busy.read(),
                         onclick: {
                             let ids = group_ids.clone();
-                            move |_| fire_decide(items, busy, ids.clone(), true, None, None)
+                            let tool_name = tool_name.clone();
+                            let tool_args = tool_args.clone();
+                            move |_| {
+                                approve_pressed(items, busy, ids.clone(), tool_name.clone(), tool_args.clone())
+                            }
                         },
                         if count > 1 { "Approve all {count}" } else { "Approve" }
                     }
@@ -379,6 +516,11 @@ fn ApprovalCard(
                         "Never"
                     }
                 }
+                if read_file_disabled {
+                    p { class: "approval-local-only-note",
+                        "Open the Bullpen desktop app to approve this - it reads the file, and a browser can't."
+                    }
+                }
             }
         }
     }
@@ -386,7 +528,7 @@ fn ApprovalCard(
 
 #[cfg(test)]
 mod tests {
-    use super::{judge_line, pretty, sanitize_for_card};
+    use super::{approve_is_disabled, judge_line, pretty, sanitize_for_card};
 
     /// design §5.5, §7 bite 6 (rendering half): a bidi override must never
     /// reach the rendered card as a live formatting character, only as a
@@ -487,5 +629,119 @@ mod tests {
     fn dangerous_gets_the_red_badge() {
         let (class, _) = judge_line(Some("dangerous"), Some("could wipe the drive")).unwrap();
         assert_eq!(class, "dangerous");
+    }
+
+    /// design §5.7, §7 bite d. `read_file` is the only registered
+    /// client-fulfilled tool (design §4.2) - on a build that cannot read
+    /// locally (`can_read_locally: false`, i.e. every non-desktop build)
+    /// Approve must render disabled; on the desktop build (`true`) it must
+    /// not; an ordinary tool must never be disabled by this rule on either
+    /// build. Not gated to `feature = "desktop"` - the whole point is that
+    /// this same plain function answers correctly for both worlds without
+    /// needing two separate compilations.
+    #[test]
+    fn approve_is_disabled_only_for_read_file_on_a_build_that_cannot_read_locally() {
+        assert!(approve_is_disabled("read_file", false));
+        assert!(!approve_is_disabled("read_file", true));
+        assert!(!approve_is_disabled("shell", false));
+        assert!(!approve_is_disabled("shell", true));
+    }
+}
+
+/// S13b-03-06, design §7 bites a, b, c: the desktop-only wiring that
+/// actually performs the read. Gated identically to `local_read` itself -
+/// these functions do not exist on any other build, so their tests cannot
+/// either.
+#[cfg(all(test, not(target_arch = "wasm32"), feature = "desktop"))]
+mod desktop_read_file_tests {
+    use super::{read_file_path_from_tool_args, read_file_result};
+
+    /// Writes a throwaway fixture under the OS temp dir and returns its
+    /// absolute path as a `String` - same construction as
+    /// `local_read_tests.rs::real_fs_reads_an_actual_file_end_to_end`, kept
+    /// unique per call (pid + a counter) so bite (c)'s two-file test does
+    /// not collide with itself.
+    fn write_fixture(label: &str, content: &[u8]) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "bullpen-rs-approvals-{label}-{pid}-{nanos}.txt",
+            pid = std::process::id(),
+            nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("the clock is after 1970")
+                .as_nanos()
+        ));
+        std::fs::write(&path, content).expect("write the throwaway fixture");
+        path
+    }
+
+    fn tool_args_for(path: &std::path::Path) -> String {
+        serde_json::json!({ "path": path.to_string_lossy() }).to_string()
+    }
+
+    /// design §7 bite a: approving a `read_file` card posts the file's own
+    /// contents as `result`.
+    #[test]
+    fn approved_read_posts_the_files_contents() {
+        let path = write_fixture("bite-a", b"the file's own contents");
+        let result = read_file_result(&tool_args_for(&path));
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(result, "the file's own contents");
+    }
+
+    /// design §7 bite b: a refusal posts the refusal SENTENCE, never an
+    /// empty string and never the (nonexistent) file. A UNC path is refused
+    /// at the shape allow-list, before any syscall - see design §5.3/§5.6's
+    /// own doc on why that path never even reaches `canonicalize`.
+    #[test]
+    fn a_refusal_posts_the_refusal_sentence_never_empty_never_a_file() {
+        let tool_args = serde_json::json!({ "path": r"\\45.13.1.1\share\notes.txt" }).to_string();
+        let result = read_file_result(&tool_args);
+        assert_eq!(
+            result,
+            "that isn't a plain local drive path - network shares and device paths aren't read"
+        );
+        assert_ne!(result, "");
+    }
+
+    /// design §7 bite c: the path used is the PENDING ROW's own `toolArgs`
+    /// and nowhere else. Two distinct fixtures with distinct contents;
+    /// `tool_args` names fixture A. Mutation (see ticket `## Results` for
+    /// the literal red output): `read_file_result` is made to ignore the
+    /// path `read_file_path_from_tool_args` extracted and read a hardcoded
+    /// path instead - the second assertion below then observes a refusal
+    /// (no such file) instead of fixture A's contents and goes red, proving
+    /// the extracted path is what the read actually used rather than some
+    /// other source.
+    #[test]
+    fn the_path_read_is_the_pending_rows_own_toolargs() {
+        let path_a = write_fixture("bite-c-a", b"fixture A - the approved row's own path");
+        let path_b = write_fixture("bite-c-b", b"fixture B - must never be read for this row");
+
+        let extracted = read_file_path_from_tool_args(&tool_args_for(&path_a));
+        assert_eq!(
+            extracted,
+            path_a.to_string_lossy(),
+            "the extracted path must be the pending row's own toolArgs path"
+        );
+
+        let result = read_file_result(&tool_args_for(&path_a));
+
+        let _ = std::fs::remove_file(&path_a);
+        let _ = std::fs::remove_file(&path_b);
+
+        assert_eq!(result, "fixture A - the approved row's own path");
+    }
+
+    /// A non-UTF-8 file is refused with a sentence (design §6.2), never
+    /// read lossily.
+    #[test]
+    fn non_utf8_content_is_refused_not_read_lossily() {
+        let path = write_fixture("bite-utf8", &[0xff, 0xfe, 0x00, 0xff]);
+        let result = read_file_result(&tool_args_for(&path));
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(
+            result,
+            "that file isn't valid text, so it can't be read into a conversation"
+        );
     }
 }

@@ -546,6 +546,15 @@
   cursor: default;
 }
 
+/* S13b-03-06 (design §5.7): the one-line explanation under a disabled
+   Approve on a build that cannot read Josh's own disk (only desktop can). */
+.approval-local-only-note {
+  margin: 0.3rem 0 0;
+  text-align: right;
+  font-size: 0.7rem;
+  color: var(--muted);
+}
+
 /* "Always allow" / "Never": a standing decision for the TOOL, not a one-off
    verdict on this call, so they read as quieter and smaller than Approve
    and Reject rather than a third equally-weighted pair of choices. */
