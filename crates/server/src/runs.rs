@@ -230,11 +230,14 @@ pub struct RunManager {
     backlog_ttl: Duration,
 }
 
-/// S13b-F: tools whose result the CLIENT computes rather than the server -
-/// port of TS's `CLIENT_FULFILLED` (`clientTools.ts`). Empty today: S13b-F
-/// lands only the `is_answerable` arm of the gate in `decide_approval`
-/// below, and S13b-03 is the ticket that adds this crate's local-bridge
-/// equivalent of `read_file` as the first (and, per TS, only) entry.
+/// S13b-F/S13b-03: tools whose result the CLIENT computes rather than the
+/// server - port of TS's `CLIENT_FULFILLED` (`clientTools.ts`). S13b-F
+/// landed this list empty, shipping only the `is_answerable` arm of the
+/// gate in `decide_approval` below. S13b-03 adds the one entry TS has:
+/// `"read_file"`, the local-bridge tool (`tools/local_read.rs`) whose
+/// `run` always refuses - the desktop client is the only thing that can
+/// actually perform this read, and posting its result here is the only way
+/// the model ever sees one.
 ///
 /// 🔴 Kept a SEPARATE list from `is_answerable` on purpose, carrying TS's
 /// own reasoning (`runs.ts:749-754`): `is_client_fulfilled` means only the
@@ -245,7 +248,7 @@ pub struct RunManager {
 /// machine behind it - this list is a security boundary, not a
 /// convenience, so nothing outside it (never `shell`) may be added without
 /// the same reasoning applying.
-const CLIENT_FULFILLED: &[&str] = &[];
+const CLIENT_FULFILLED: &[&str] = &["read_file"];
 
 fn is_client_fulfilled(tool_name: &str) -> bool {
     CLIENT_FULFILLED.contains(&tool_name)
@@ -2121,7 +2124,24 @@ is looking at."
             let (result, delegated_usage) = if let Some(fulfilment) = gated_fulfilment {
                 let clipped_fulfilment: String =
                     fulfilment.chars().take(MAX_FULFILMENT_CHARS).collect();
-                (clipped_fulfilment, None)
+                // §4.4: fence ONLY the client-fulfilled arm, after the cap.
+                // A client-fulfilled result is untrusted tool output - bytes
+                // off Josh's own disk that a bot chose the path for - and
+                // `tools::fence_tool_output`'s own doc records that an
+                // earlier version was escapable by echoing its close
+                // marker, which a client-supplied string has exactly the
+                // power to do. `is_answerable`'s arm is Josh's own typed
+                // answer to a question, not tool output, and must reach the
+                // model byte-exact - fencing it here would both misrepresent
+                // it as untrusted and break the stored-verbatim contract
+                // `tests/approvals.rs`'s `"use the blue one"` assertion
+                // depends on.
+                let fenced = if is_client_fulfilled(&call.name) {
+                    tools::fence_tool_output(&clipped_fulfilment)
+                } else {
+                    clipped_fulfilment
+                };
+                (fenced, None)
             } else {
                 toolbox.run(&call.name, &call.arguments).await
             };

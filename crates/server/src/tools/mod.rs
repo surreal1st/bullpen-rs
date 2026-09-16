@@ -28,6 +28,7 @@ pub mod browse;
 mod create_room;
 pub(crate) mod escalate;
 mod goal_tools;
+mod local_read;
 mod message_bot;
 mod note;
 mod project_remember;
@@ -179,6 +180,7 @@ fn all_specs() -> Vec<ToolSpec> {
         add_to_room::spec(),
         shell::spec(),
         read_file::spec(),
+        local_read::spec(),
         escalate::spec(),
         goal_tools::set_goal_spec(),
         goal_tools::update_goal_spec(),
@@ -283,6 +285,12 @@ pub fn build(params: BuildParams) -> ToolBox {
                     "sandbox_read" => {
                         (read_file::run(sandbox.as_ref(), &bot_id, &args).await, None)
                     }
+                    // S13b-03: the server never has Josh's file - this arm
+                    // is reached only when the approval was never fulfilled
+                    // by the desktop client (browser approval, expired
+                    // approval, or a bug in the fulfilment gate). See
+                    // `local_read`'s own doc.
+                    "read_file" => (local_read::run(), None),
                     "escalate" => {
                         let model_now = current_model
                             .lock()
