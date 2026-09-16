@@ -467,6 +467,33 @@ pub fn parse_sse_stream(
 
         macro_rules! final_event {
             () => {{
+                // S8b: logged HERE, inside the macro, not after the loop.
+                // The first version of this sat before the fall-through
+                // `yield` at the end of the function - but `[DONE]` yields
+                // and RETURNS, and OpenRouter always sends `[DONE]`, so the
+                // summary never fired on the normal path. It was shipped,
+                // observed missing from the journal on four live runs, and
+                // moved here. Every terminal event goes through this macro,
+                // so every stream now leaves exactly one summary line.
+                if delta_count == 0 && partial.is_empty() {
+                    tracing::warn!(
+                        model = %resolved_model,
+                        frames = frame_count,
+                        finish_reason = finish_reason.as_deref().unwrap_or("(none)"),
+                        usage = usage.is_some(),
+                        "model stream produced no text and no tool call"
+                    );
+                } else {
+                    tracing::debug!(
+                        model = %resolved_model,
+                        frames = frame_count,
+                        deltas = delta_count,
+                        tool_calls = partial.len(),
+                        finish_reason = finish_reason.as_deref().unwrap_or("(none)"),
+                        usage = usage.is_some(),
+                        "model stream complete"
+                    );
+                }
                 if !partial.is_empty() && saw_tool_finish {
                     let calls: Vec<ToolCall> = partial
                         .iter()
@@ -592,33 +619,6 @@ pub fn parse_sse_stream(
                     }
                 }
             }
-        }
-
-        // S8b: the one line that makes a silent run diagnosable. An empty
-        // result is legitimate (a tool-kind routine's `nothing-new`
-        // short-circuit) or a defect (a stream that carried nothing), and
-        // before this there was no way to tell them apart after the fact.
-        // WARN, not DEBUG, when nothing at all arrived: that is the case
-        // worth waking up for.
-        let produced_nothing = delta_count == 0 && partial.is_empty();
-        if produced_nothing {
-            tracing::warn!(
-                model = %resolved_model,
-                frames = frame_count,
-                finish_reason = finish_reason.as_deref().unwrap_or("(none)"),
-                usage = usage.is_some(),
-                "model stream produced no text and no tool call"
-            );
-        } else {
-            tracing::debug!(
-                model = %resolved_model,
-                frames = frame_count,
-                deltas = delta_count,
-                tool_calls = partial.len(),
-                finish_reason = finish_reason.as_deref().unwrap_or("(none)"),
-                usage = usage.is_some(),
-                "model stream complete"
-            );
         }
 
         // The stream ended without a `[DONE]` marker - same decision as that
