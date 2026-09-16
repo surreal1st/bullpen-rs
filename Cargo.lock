@@ -606,6 +606,7 @@ dependencies = [
  "gloo-timers",
  "js-sys",
  "pulldown-cmark",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",

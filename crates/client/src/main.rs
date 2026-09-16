@@ -11,6 +11,25 @@ mod composer;
 mod desktop;
 mod events;
 mod goals_editor;
+// S13b-03-04: the pure half of reading a file a bot asked for - see that
+// module's own doc for why nothing calls it yet. Gated on both
+// `feature = "desktop"` and `not(target_arch = "wasm32")` per this
+// ticket's explicit instruction, one belt-and-braces wider than
+// `window_state`'s desktop-only gate - `desktop`/`web` are not mutually
+// exclusive at the Cargo level, only "in practice" (this file's own
+// comment above), so this module's direct `std::fs`/`regex` use stays off
+// a wasm32 build even if `desktop` were ever combined with it.
+//
+// `allow(dead_code)`, scoped to `not(test)`: `client` is a bin-only crate
+// (no `[lib]` in `Cargo.toml`), so unlike a library, `pub(crate)` does not
+// make rustc treat these items as "used" - every one of them is exercised
+// only by `local_read_tests.rs`, which does not exist in the ordinary
+// (non-test) build. That is the correct state, not a gap - nothing calls
+// this module yet, by design (see its top doc) - so the honest fix is this
+// explicit, narrowly-scoped allow rather than inventing a caller.
+#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "desktop"))]
+mod local_read;
 mod markdown;
 mod memory_editor;
 mod message_time;
