@@ -189,7 +189,7 @@ async fn approving_shell_runs_the_real_sandbox_and_fences_the_output() {
 
     drain_until_paused_or_done(manager.subscribe(&run_id)).await;
     let approval_id = pending_approval(&db, &run_id).expect("pending approval");
-    assert!(manager.decide_approval(&approval_id, true).await);
+    assert!(manager.decide_approval(&approval_id, true, None).await);
     assert_eq!(wait_for_status(&db, &run_id, "done").await, "done");
 
     let commands = runner.commands();
@@ -242,7 +242,7 @@ async fn rejecting_shell_never_touches_the_sandbox() {
 
     drain_until_paused_or_done(manager.subscribe(&run_id)).await;
     let approval_id = pending_approval(&db, &run_id).expect("pending approval");
-    assert!(manager.decide_approval(&approval_id, false).await);
+    assert!(manager.decide_approval(&approval_id, false, None).await);
     assert_eq!(wait_for_status(&db, &run_id, "done").await, "done");
 
     assert!(
@@ -365,7 +365,7 @@ async fn shell_stays_on_the_s2_text_when_the_sandbox_is_unavailable() {
 
     drain_until_paused_or_done(manager.subscribe(&run_id)).await;
     let approval_id = pending_approval(&db, &run_id).expect("pending approval");
-    assert!(manager.decide_approval(&approval_id, true).await);
+    assert!(manager.decide_approval(&approval_id, true, None).await);
     assert_eq!(wait_for_status(&db, &run_id, "done").await, "done");
 
     let text = tool_result_text(&db, &run_id);

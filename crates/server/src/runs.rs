@@ -230,6 +230,33 @@ pub struct RunManager {
     backlog_ttl: Duration,
 }
 
+/// S13b-F: tools whose result the CLIENT computes rather than the server -
+/// port of TS's `CLIENT_FULFILLED` (`clientTools.ts`). Empty today: S13b-F
+/// lands only the `is_answerable` arm of the gate in `decide_approval`
+/// below, and S13b-03 is the ticket that adds this crate's local-bridge
+/// equivalent of `read_file` as the first (and, per TS, only) entry.
+///
+/// 🔴 Kept a SEPARATE list from `is_answerable` on purpose, carrying TS's
+/// own reasoning (`runs.ts:749-754`): `is_client_fulfilled` means only the
+/// desktop app on Josh's own machine can perform the read. `is_answerable`
+/// means there is nothing to perform at all - the bot asked a question and
+/// Josh's typed answer IS the result. Folding them into one list would let
+/// a future client-fulfilled tool be satisfied by a typed string with no
+/// machine behind it - this list is a security boundary, not a
+/// convenience, so nothing outside it (never `shell`) may be added without
+/// the same reasoning applying.
+const CLIENT_FULFILLED: &[&str] = &[];
+
+fn is_client_fulfilled(tool_name: &str) -> bool {
+    CLIENT_FULFILLED.contains(&tool_name)
+}
+
+/// The cap on what one approval's posted `result` may contribute to the
+/// transcript. Port of TS's `MAX_FULFILMENT_CHARS` (`clientTools.ts`),
+/// enforced HERE rather than trusted from the client - a cap only the
+/// client applies is not a cap.
+const MAX_FULFILMENT_CHARS: usize = 200_000;
+
 impl RunManager {
     pub fn new(db: Arc<Mutex<Db>>, port: Arc<dyn ModelPort>) -> Self {
         Self::with_backlog_ttl(db, port, BACKLOG_TTL)
@@ -1932,12 +1959,17 @@ is looking at."
         );
     }
 
-    /// S2-03: Josh's decision on a waiting run's one pending tool call. Port
-    /// of the TS `decideApproval` (`runs.ts:699-772`), minus the
-    /// client-fulfilled-tool `fulfilment` parameter - S2 has no tool whose
-    /// result the desktop app computes instead of the server (that is
-    /// `read_file`, out of scope here) - and minus the empty-abnormal-answer
-    /// retry `drive` itself does on a fresh start, which a resume does not
+    /// S2-03/S13b-F: Josh's decision on a waiting run's one pending tool
+    /// call. Port of the TS `decideApproval` (`runs.ts:699-772`), now
+    /// including its `fulfilment` parameter - a result Josh (or, once
+    /// S13b-03 fills in `CLIENT_FULFILLED`, the desktop app) supplies
+    /// instead of the server computing one. Ported verbatim in shape as
+    /// TS's own gate (`runs.ts:756`): honored only when `approved` AND the
+    /// call names a tool in `CLIENT_FULFILLED` or `is_answerable`, clipped
+    /// to `MAX_FULFILMENT_CHARS` - for every other tool the field is
+    /// silently discarded and `toolbox.run` still computes the result, same
+    /// as `app.ts:4072-4074`. Still minus the empty-abnormal-answer retry
+    /// `drive` itself does on a fresh start, which a resume does not
     /// repeat.
     ///
     /// Returns `false` for an approval id that names no PENDING row -
@@ -1947,7 +1979,12 @@ is looking at."
     /// steps, if any, continue on a spawned task exactly like `start`'s own
     /// first step - so approving a `message_bot` call that itself takes a
     /// few seconds does not hold the HTTP response open for it.
-    pub async fn decide_approval(self: &Arc<Self>, approval_id: &str, approved: bool) -> bool {
+    pub async fn decide_approval(
+        self: &Arc<Self>,
+        approval_id: &str,
+        approved: bool,
+        fulfilment: Option<String>,
+    ) -> bool {
         let pending = {
             let db = self.db();
             match approvals::take_pending(&db, approval_id, approved) {
@@ -2073,7 +2110,21 @@ is looking at."
                     args: call.arguments.clone(),
                 },
             );
-            let (result, delegated_usage) = toolbox.run(&call.name, &call.arguments).await;
+            // S13b-F: a posted `result` is only ever honored for the two
+            // lists TS keeps deliberately separate (see `is_client_fulfilled`'s
+            // own doc) - anything else's `result` is discarded here and
+            // `toolbox.run` still computes the answer, same as
+            // `app.ts:4072-4074`.
+            let gated_fulfilment = fulfilment.filter(|_| {
+                is_client_fulfilled(&call.name) || shared::ask_josh::is_answerable(&call.name)
+            });
+            let (result, delegated_usage) = if let Some(fulfilment) = gated_fulfilment {
+                let clipped_fulfilment: String =
+                    fulfilment.chars().take(MAX_FULFILMENT_CHARS).collect();
+                (clipped_fulfilment, None)
+            } else {
+                toolbox.run(&call.name, &call.arguments).await
+            };
             let clipped: String = result.chars().take(4000).collect();
             self.emit(
                 &pending.run_id,

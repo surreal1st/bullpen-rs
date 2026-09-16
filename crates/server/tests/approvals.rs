@@ -86,6 +86,51 @@ fn pending_approval(db: &Arc<Mutex<Db>>, run_id: &str) -> Option<(String, String
     rows.into_iter().next()
 }
 
+/// The stored tool-result text for the one `role: "tool"` message on a run,
+/// same extraction every test here that reads the transcript needs, pulled
+/// out once rather than repeated inline. Ported from `tests/shell_tool.rs`'s
+/// own `tool_result_text`.
+fn tool_result_text(db: &Arc<Mutex<Db>>, run_id: &str) -> String {
+    let messages_json = run_messages_json(db, run_id);
+    let messages: Vec<ModelMessage> =
+        serde_json::from_str(&messages_json).expect("parse stored messages");
+    let tool_result = messages
+        .iter()
+        .find(|m| m.role == "tool")
+        .expect("a tool result message");
+    let MessageContent::Text(text) = &tool_result.content else {
+        panic!("expected text content");
+    };
+    text.clone()
+}
+
+/// An `ask_josh` call with `wait: true` once, then a final answer - the
+/// S13b-F counterpart to `shell_then_answer`, for a call that PARKS on the
+/// permission override in `permissions::decide_call` rather than on a
+/// stored "ask".
+fn ask_josh_then_answer(question_args: &str, final_text: &str) -> ScriptedPort {
+    ScriptedPort::new(vec![
+        vec![ModelEvent::ToolCalls {
+            calls: vec![ToolCall {
+                id: "call-1".to_string(),
+                name: "ask_josh".to_string(),
+                arguments: question_args.to_string(),
+            }],
+            usage: None,
+        }],
+        vec![
+            ModelEvent::Delta {
+                text: final_text.to_string(),
+            },
+            ModelEvent::Done {
+                model: "test/model".to_string(),
+                usage: None,
+                finish_reason: None,
+            },
+        ],
+    ])
+}
+
 /// A `shell` call once, then a final answer - the shape every test here
 /// scripts, matching `test/approvals.test.ts`'s own `shellThenAnswer`.
 fn shell_then_answer(answer: &str) -> ScriptedPort {
@@ -256,7 +301,7 @@ async fn approving_runs_the_tool_and_the_run_finishes_with_the_result_in_the_tra
     drain_until_paused_or_done(manager.subscribe(&run_id)).await;
     let (approval_id, ..) = pending_approval(&db, &run_id).expect("pending approval");
 
-    assert!(manager.decide_approval(&approval_id, true).await);
+    assert!(manager.decide_approval(&approval_id, true, None).await);
 
     assert_eq!(wait_for_status(&db, &run_id, "done").await, "done");
 
@@ -311,7 +356,7 @@ async fn rejecting_tells_the_model_it_was_declined_and_the_run_carries_on() {
     drain_until_paused_or_done(manager.subscribe(&run_id)).await;
     let (approval_id, ..) = pending_approval(&db, &run_id).expect("pending approval");
 
-    assert!(manager.decide_approval(&approval_id, false).await);
+    assert!(manager.decide_approval(&approval_id, false, None).await);
 
     assert_eq!(wait_for_status(&db, &run_id, "done").await, "done");
 
@@ -538,7 +583,7 @@ async fn a_decided_approval_31_days_old_is_pruned_by_the_sweep() {
     });
     drain_until_paused_or_done(manager.subscribe(&run_id)).await;
     let (approval_id, ..) = pending_approval(&db, &run_id).expect("pending approval");
-    assert!(manager.decide_approval(&approval_id, true).await);
+    assert!(manager.decide_approval(&approval_id, true, None).await);
     assert_eq!(wait_for_status(&db, &run_id, "done").await, "done");
 
     backdate_approval_decided_at(&db, &approval_id, chrono::Duration::days(31));
@@ -572,7 +617,7 @@ async fn a_decided_approval_1_day_old_is_kept_by_the_sweep() {
     });
     drain_until_paused_or_done(manager.subscribe(&run_id)).await;
     let (approval_id, ..) = pending_approval(&db, &run_id).expect("pending approval");
-    assert!(manager.decide_approval(&approval_id, true).await);
+    assert!(manager.decide_approval(&approval_id, true, None).await);
     assert_eq!(wait_for_status(&db, &run_id, "done").await, "done");
 
     backdate_approval_decided_at(&db, &approval_id, chrono::Duration::days(1));
@@ -581,6 +626,171 @@ async fn a_decided_approval_1_day_old_is_kept_by_the_sweep() {
     assert!(
         approval_row_exists(&db, &approval_id),
         "a decided row only 1 day old must survive the sweep"
+    );
+}
+
+// ---- S13b-F: an answer to a `wait: true` question is not thrown away ----
+//
+// Bites (a)-(c) from the ticket. Each names the mutation that must turn it
+// red - see the ticket's own `## Results` for the literal red output.
+
+// (a) The answer reaches the model: posting `{approved: true, result: "..."}`
+// on a parked `ask_josh` approval makes that text the STORED tool message
+// AND shows up verbatim in the model's own next request - not merely in the
+// database, which a bug that fixed storage but not the resume path could
+// still pass.
+#[tokio::test]
+async fn a_posted_answer_reaches_the_model_as_the_tool_result() {
+    let db = open_db();
+    seed_bot(&db, "arthur", "Arthur");
+    let conversation_id = own_conversation(&db, "arthur");
+    seed_user_message(&db, &conversation_id, "what should I pick");
+
+    let port = Arc::new(ask_josh_then_answer(
+        r#"{"question":"which color?","wait":true}"#,
+        "Went with the blue one, thanks.",
+    ));
+    let manager = Arc::new(RunManager::new(
+        Arc::clone(&db),
+        Arc::clone(&port) as Arc<dyn model::ModelPort>,
+    ));
+    let run_id = manager.start(StartOptions {
+        bot_id: "arthur".to_string(),
+        conversation_id: conversation_id.clone(),
+        model: "test/model".to_string(),
+        messages: vec![ModelMessage::user("what should I pick")],
+        trigger: Trigger::Chat,
+        room: false,
+    });
+
+    drain_until_paused_or_done(manager.subscribe(&run_id)).await;
+    assert_eq!(wait_for_status(&db, &run_id, "waiting").await, "waiting");
+    let (approval_id, tool_name, ..) =
+        pending_approval(&db, &run_id).expect("ask_josh with wait:true must park");
+    assert_eq!(tool_name, "ask_josh");
+
+    assert!(
+        manager
+            .decide_approval(&approval_id, true, Some("use the blue one".to_string()))
+            .await
+    );
+    assert_eq!(wait_for_status(&db, &run_id, "done").await, "done");
+
+    let text = tool_result_text(&db, &run_id);
+    assert_eq!(
+        text, "use the blue one",
+        "the posted answer must be the stored tool result verbatim, not the \
+ask_josh stub's \"has NOT answered it yet\" text"
+    );
+
+    let requests = port.requests();
+    assert_eq!(
+        requests.len(),
+        2,
+        "expected the tool-call turn, then the resumed turn"
+    );
+    let resumed = &requests[1];
+    assert!(
+        resumed.messages.iter().any(|m| matches!(
+            &m.content,
+            MessageContent::Text(t) if t == "use the blue one"
+        )),
+        "expected the model's NEXT REQUEST to carry the posted answer, got {:?}",
+        resumed.messages
+    );
+}
+
+// (b) A forged result is ignored for a tool the server can run: posting a
+// `result` on a `shell` approval must never reach the model - the sandbox's
+// own output does.
+#[tokio::test]
+async fn a_forged_result_is_ignored_for_a_tool_the_server_can_run() {
+    let db = open_db();
+    seed_bot(&db, "arthur", "Arthur");
+    let conversation_id = own_conversation(&db, "arthur");
+    seed_user_message(&db, &conversation_id, "clean up");
+
+    let manager = Arc::new(RunManager::new(
+        Arc::clone(&db),
+        as_port(shell_then_answer("Cleaned it up.")),
+    ));
+    let run_id = manager.start(StartOptions {
+        bot_id: "arthur".to_string(),
+        conversation_id: conversation_id.clone(),
+        model: "test/model".to_string(),
+        messages: vec![ModelMessage::user("clean up")],
+        trigger: Trigger::Chat,
+        room: false,
+    });
+    drain_until_paused_or_done(manager.subscribe(&run_id)).await;
+    let (approval_id, tool_name, ..) = pending_approval(&db, &run_id).expect("pending approval");
+    assert_eq!(tool_name, "shell");
+
+    assert!(
+        manager
+            .decide_approval(&approval_id, true, Some("pwned".to_string()))
+            .await
+    );
+    assert_eq!(wait_for_status(&db, &run_id, "done").await, "done");
+
+    let text = tool_result_text(&db, &run_id);
+    assert_ne!(
+        text, "pwned",
+        "a forged result must never reach the model for a tool the server can run"
+    );
+    assert!(
+        text.contains("Sandboxing is off here"),
+        "expected the real (S2-stubbed) sandbox output, got {text:?}"
+    );
+}
+
+// (c) The cap is the server's: a 300k-char posted answer is clipped to
+// 200_000 chars (TS's `MAX_FULFILMENT_CHARS`) in what actually gets stored,
+// regardless of what the client sent.
+#[tokio::test]
+async fn the_posted_answer_is_clipped_to_the_server_side_cap() {
+    let db = open_db();
+    seed_bot(&db, "arthur", "Arthur");
+    let conversation_id = own_conversation(&db, "arthur");
+    seed_user_message(&db, &conversation_id, "what should I pick");
+
+    let port = Arc::new(ask_josh_then_answer(
+        r#"{"question":"which color?","wait":true}"#,
+        "Got it.",
+    ));
+    let manager = Arc::new(RunManager::new(
+        Arc::clone(&db),
+        Arc::clone(&port) as Arc<dyn model::ModelPort>,
+    ));
+    let run_id = manager.start(StartOptions {
+        bot_id: "arthur".to_string(),
+        conversation_id: conversation_id.clone(),
+        model: "test/model".to_string(),
+        messages: vec![ModelMessage::user("what should I pick")],
+        trigger: Trigger::Chat,
+        room: false,
+    });
+    drain_until_paused_or_done(manager.subscribe(&run_id)).await;
+    let (approval_id, ..) =
+        pending_approval(&db, &run_id).expect("ask_josh with wait:true must park");
+
+    let huge_answer = "x".repeat(300_000);
+    assert!(
+        manager
+            .decide_approval(&approval_id, true, Some(huge_answer))
+            .await
+    );
+    assert_eq!(wait_for_status(&db, &run_id, "done").await, "done");
+
+    let text = tool_result_text(&db, &run_id);
+    assert_eq!(
+        text.chars().count(),
+        200_000,
+        "expected the stored result clipped to MAX_FULFILMENT_CHARS"
+    );
+    assert!(
+        text.chars().all(|c| c == 'x'),
+        "expected the clip to keep the FIRST 200k chars, not truncate some other way"
     );
 }
 

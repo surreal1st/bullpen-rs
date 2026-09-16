@@ -90,6 +90,14 @@ struct DecideBody {
     /// "allow" | "deny" | absent. Port of the TS body's own `remember`
     /// field - see `decide`'s own doc for what pressing it does.
     remember: Option<String>,
+    /// S13b-F: what Josh typed as the answer to a question, or (once
+    /// S13b-03 fills `CLIENT_FULFILLED`) a client-computed tool result.
+    /// Absent field, absent behavior - this used to have no counterpart
+    /// here at all, so Serde silently dropped whatever the client sent and
+    /// every answer to a waiting `ask_josh` question was thrown away.
+    /// `RunManager::decide_approval` is the one place that decides whether
+    /// a given tool's `result` is honored or ignored.
+    result: Option<String>,
 }
 
 /// H4's "always allow" / "never" buttons, plus U7's rule on top: a
@@ -169,7 +177,10 @@ async fn decide(
     }
 
     let approved = remember.unwrap_or(parsed.approved);
-    let ok = state.runs.decide_approval(&id, approved).await;
+    let ok = state
+        .runs
+        .decide_approval(&id, approved, parsed.result)
+        .await;
     Ok(if ok {
         Json(json!({ "ok": true, "approved": approved })).into_response()
     } else {
