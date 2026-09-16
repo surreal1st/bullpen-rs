@@ -28,7 +28,7 @@ use model::{
     EventStream, MessageContent, ModelEvent, ModelMessage, ModelPort, ModelRequest, ToolCall,
 };
 use serde_json::{Value, json};
-use server::rules::{self, RuleBehavior};
+use server::rules::{self, Rule, RuleBehavior};
 use server::runs::{RunEvent, RunManager, StartOptions};
 use server::{AppState, build_app};
 use store::Db;
@@ -1124,5 +1124,270 @@ async fn list_rules_for_caps_at_the_newest_forty() {
         rules.first().expect("at least one rule").text,
         "rule number 5",
         "expected the oldest 5 to have been dropped by the cap"
+    );
+}
+
+// ---- S13b-03-02: the pin that cannot be lifted (design §4.6, §7 bite 11).
+//
+// Three routes, three independent guards, three mutations - each test below
+// names which one it proves and must go red under ONLY that mutation:
+//   (a) `routes/approvals.rs::decide`'s 400 on `remember:"allow"` for a
+//       client-fulfilled tool - mutation: remove that 400.
+//   (b) `rules::resolve_decision` refusing to lift `read_file` at Trigger::Chat
+//       (not just unattended triggers) - mutation: drop the name from
+//       `permissions::cannot_be_lifted_at_all`.
+//   (c) `permissions::decide_call`'s own pin, reached through a REAL PUT and
+//       a REAL chat run - mutation: drop the name from `decide_call`'s
+//       `matches!`. This is the one the ticket is named for: `runs.rs`'s
+//       auto-review block never runs at all when `decide_call` already
+//       pinned `read_file` to Ask with no rule in the table, so nothing else
+//       catches a stored grid `allow` on its own. ----
+
+// ---- (a): remember cannot lift read_file to allow, and refusing it must
+// not write EITHER the grid row or the rule - THE BITE ----
+#[tokio::test]
+async fn remembering_read_file_as_allow_is_refused_and_writes_neither() {
+    let db = open_db_plain();
+    store::set_password(&db, "test-password").expect("set password");
+    seed_bot_plain(&db, "arthur", "Arthur");
+    let session = seed_session(&db);
+    let port = common::ScriptedPort::new(vec![vec![ModelEvent::ToolCalls {
+        calls: vec![ToolCall {
+            id: "call-1".to_string(),
+            name: "read_file".to_string(),
+            arguments: json!({"path": "C:\\Users\\rain\\Documents\\notes.md"}).to_string(),
+        }],
+        usage: None,
+    }]]);
+    let app = app_for(db, as_port(port));
+
+    post_message_fire_and_forget(&app, "arthur", "read my notes", &session).await;
+    let approval = wait_for_one_pending(&app, &session).await;
+    let id = approval["id"].as_str().expect("approval id").to_string();
+    assert_eq!(approval["toolName"], "read_file");
+
+    let (status, body) = send_json(
+        &app,
+        "POST",
+        &format!("/api/approvals/{id}"),
+        json!({"approved": true, "remember": "allow"}),
+        &session,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"].as_str().is_some());
+
+    // Neither write happened: the grid still reads the untouched default
+    // (ask), and no rule exists - refusing one write and not the other
+    // would fix the symptom and leave the cause (a rule alone is enough to
+    // run the tool via the auto-review block).
+    let (_, perm_body) = get_json(&app, "/api/bots/arthur/permissions", &session).await;
+    assert_eq!(
+        perm_body["permissions"]["read_file"], "ask",
+        "the grid row must not have been written"
+    );
+    let (_, rules_body) = get_json(&app, "/api/auto-review/rules?botId=arthur", &session).await;
+    assert_eq!(
+        rules_body["rules"].as_array().map(Vec::len),
+        Some(0),
+        "no rule should have been written either"
+    );
+}
+
+// A `deny` press on a client-fulfilled tool must still work - "Never" is
+// not part of this pin, only lifting to "allow" is.
+#[tokio::test]
+async fn remembering_read_file_as_deny_still_works() {
+    let db = open_db_plain();
+    store::set_password(&db, "test-password").expect("set password");
+    seed_bot_plain(&db, "arthur", "Arthur");
+    let session = seed_session(&db);
+    let port = common::ScriptedPort::new(vec![vec![ModelEvent::ToolCalls {
+        calls: vec![ToolCall {
+            id: "call-1".to_string(),
+            name: "read_file".to_string(),
+            arguments: json!({"path": "C:\\Users\\rain\\Documents\\notes.md"}).to_string(),
+        }],
+        usage: None,
+    }]]);
+    let app = app_for(db, as_port(port));
+
+    post_message_fire_and_forget(&app, "arthur", "read my notes", &session).await;
+    let approval = wait_for_one_pending(&app, &session).await;
+    let id = approval["id"].as_str().expect("approval id").to_string();
+
+    let (status, _) = send_json(
+        &app,
+        "POST",
+        &format!("/api/approvals/{id}"),
+        json!({"approved": false, "remember": "deny"}),
+        &session,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "\"never\" must still work");
+
+    let (_, perm_body) = get_json(&app, "/api/bots/arthur/permissions", &session).await;
+    assert_eq!(perm_body["permissions"]["read_file"], "deny");
+}
+
+// ---- (b): a matching `allow` rule cannot lift `read_file` even at
+// Trigger::Chat, the one trigger the unattended-only floor
+// (`cannot_be_lifted_unattended`) never covered - THE BITE ----
+#[tokio::test]
+async fn a_matching_allow_rule_cannot_lift_read_file_even_at_chat_trigger() {
+    let db = open_db();
+    seed_bot(&db, "arthur", "Arthur");
+    let rule_id = seed_rule(
+        &db,
+        "arthur",
+        "let him read files on his own computer",
+        RuleBehavior::Allow,
+    );
+
+    let conversation_id = own_conversation(&db, "arthur");
+    seed_user_message(&db, &conversation_id, "read my notes");
+    let port = Arc::new(RulesPort::new(
+        move |turn| {
+            if turn == 1 {
+                vec![ModelEvent::ToolCalls {
+                    calls: vec![ToolCall {
+                        id: "call-1".to_string(),
+                        name: "read_file".to_string(),
+                        arguments: json!({"path": "C:\\Users\\rain\\Documents\\notes.md"})
+                            .to_string(),
+                    }],
+                    usage: None,
+                }]
+            } else {
+                vec![
+                    ModelEvent::Delta {
+                        text: "Here it is.".to_string(),
+                    },
+                    ModelEvent::Done {
+                        model: "test/model".to_string(),
+                        usage: None,
+                        finish_reason: None,
+                    },
+                ]
+            }
+        },
+        ClassifyBehavior::Reply(vec![rule_id]),
+    ));
+    let manager = Arc::new(RunManager::new(Arc::clone(&db), port));
+    let run_id = manager.start(StartOptions {
+        bot_id: "arthur".to_string(),
+        conversation_id: conversation_id.clone(),
+        model: "test/model".to_string(),
+        messages: vec![ModelMessage::user("read my notes")],
+        trigger: Trigger::Chat,
+        room: false,
+    });
+
+    drain_until_paused_or_done(manager.subscribe(&run_id)).await;
+    assert_eq!(wait_for_status(&db, &run_id, "waiting").await, "waiting");
+
+    let (_, tool_name, _, status) = pending_approval(&db, &run_id)
+        .expect("a matching allow rule must not lift read_file, even at Trigger::Chat");
+    assert_eq!(tool_name, "read_file");
+    assert_eq!(status, "pending");
+}
+
+// D10, folded in: `purchase` and `propose_tool` get the identical
+// `resolve_decision` guard, and need it at EVERY trigger, not only chat -
+// `tighten_set` (what the unattended-only floor reads) never contained
+// either, so before this fix a rule could lift them to "allow" unattended
+// too. Pure: `resolve_decision` takes no `&Db`, so this needs no run.
+#[test]
+fn resolve_decision_never_lifts_purchase_or_propose_tool_at_any_trigger() {
+    for tool in ["purchase", "propose_tool"] {
+        for trigger in [
+            Trigger::Chat,
+            Trigger::Routine,
+            Trigger::Goal,
+            Trigger::Webhook,
+        ] {
+            let rule = Rule {
+                id: "r1".to_string(),
+                bot_id: None,
+                text: "always allow it".to_string(),
+                behavior: RuleBehavior::Allow,
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                hits: 0,
+            };
+            let resolved = rules::resolve_decision(
+                std::slice::from_ref(&rule),
+                std::slice::from_ref(&rule.id),
+                tool,
+                trigger,
+            );
+            assert_eq!(
+                resolved.decision,
+                server::permissions::Decision::Ask,
+                "{tool} must not be liftable to allow by a rule at {trigger:?} (D10) - \
+                 tighten_set never held it, so before this fix a rule could lift it at \
+                 EVERY trigger"
+            );
+        }
+    }
+
+    // Positive control: an ordinary tool NOT in the never-lift set still
+    // lifts normally, proving the guard above is scoped to these three
+    // names rather than breaking rule resolution generally.
+    let rule = Rule {
+        id: "r1".to_string(),
+        bot_id: None,
+        text: "always fetch it".to_string(),
+        behavior: RuleBehavior::Allow,
+        created_at: "2026-01-01T00:00:00Z".to_string(),
+        hits: 0,
+    };
+    let resolved = rules::resolve_decision(
+        std::slice::from_ref(&rule),
+        std::slice::from_ref(&rule.id),
+        "fetch_url",
+        Trigger::Chat,
+    );
+    assert_eq!(resolved.decision, server::permissions::Decision::Allow);
+}
+
+// ---- (c): THE bite that matters most - a stored grid `allow`, written
+// straight through PUT /api/bots/:id/permissions with no rule involved at
+// all, must still park a client-fulfilled tool on a REAL chat run.
+// `permissions_for_run` returns the stored map untouched for
+// `Trigger::Chat`, so only `decide_call`'s own pin catches this - THE BITE ----
+#[tokio::test]
+async fn a_stored_grid_allow_for_read_file_still_parks_on_a_chat_turn() {
+    let db = open_db_plain();
+    store::set_password(&db, "test-password").expect("set password");
+    seed_bot_plain(&db, "arthur", "Arthur");
+    let session = seed_session(&db);
+
+    let port = common::ScriptedPort::new(vec![vec![ModelEvent::ToolCalls {
+        calls: vec![ToolCall {
+            id: "call-1".to_string(),
+            name: "read_file".to_string(),
+            arguments: json!({"path": "C:\\Users\\rain\\Documents\\notes.md"}).to_string(),
+        }],
+        usage: None,
+    }]]);
+    let app = app_for(db, as_port(port));
+
+    // The literal route the ticket names: no `remember` press, no rule -
+    // just the grid, straight through its own HTTP route.
+    let (put_status, _) = send_json(
+        &app,
+        "PUT",
+        "/api/bots/arthur/permissions",
+        json!({"permissions": {"read_file": "allow"}}),
+        &session,
+    )
+    .await;
+    assert_eq!(put_status, StatusCode::OK);
+
+    post_message_fire_and_forget(&app, "arthur", "read my notes", &session).await;
+    let approval = wait_for_one_pending(&app, &session).await;
+    assert_eq!(
+        approval["toolName"], "read_file",
+        "a stored grid allow must not skip decide_call's pin - read_file must still park"
     );
 }

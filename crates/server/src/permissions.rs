@@ -614,29 +614,31 @@ pub fn decide(db: &store::Db, bot_id: &str, tool_name: &str) -> Result<Decision,
 /// guessing - which is the entire failure this closes. Being asked a question is
 /// not a privilege that needs revoking.
 pub fn decide_call(base: Decision, tool_name: &str, args: &str) -> Decision {
-    // 🔴 W5: `propose_tool` can be turned OFF and cannot be turned to "always".
+    // 🔴 S13b-03-02, folding in DEFERRED D10: `propose_tool` (W5), `purchase`
+    // (S7) and every CLIENT_FULFILLED tool (`read_file` today, the one
+    // this port has registered - `runs.rs`'s own list, duplicated here by
+    // hand: `runs.rs` is owned by a different builder in this batch and its
+    // `CLIENT_FULFILLED` constant is not `pub`, so keep the two in sync as
+    // that list grows) all pin to "ask" no matter what the stored grid
+    // says - "always allow" must not skip the one human step each needs:
+    // `propose_tool` because approving IS what moves a bot's proposed
+    // source into the roster and offers it to every other bot; `purchase`
+    // because it is real money leaving the building; `read_file` because it
+    // is the desktop app reading a file off Josh's own machine. "Never"
+    // (`Decision::Deny`) still works for all three - this only ever refuses
+    // to LIFT to allow, it never blocks a stored deny.
     //
-    // The approval IS the mechanism - approving the call is what moves the source
-    // into `tools/approved` and offers it to the roster - so an "allow" in the
-    // grid would not skip a prompt, it would remove the only human step between a
-    // bot writing code and every bot running it. "Never" still works, and is the
-    // setting for a bot that has no business writing tools.
-    if tool_name == "propose_tool" {
-        return if base == Decision::Deny {
-            Decision::Deny
-        } else {
-            Decision::Ask
-        };
-    }
-
-    // 🔴 S7: `purchase` gets the identical pin, for the identical reason -
-    // "always" in the grid must not skip the one human step between a bot and
-    // real money leaving the building. "Never" still works. `app.ts`'s
-    // `runs.beforeAsk` is the second lock (re-pinning to "ask" even if a rule
-    // somehow resolved it to "allow" first) and the monthly-limit check is the
-    // one path that runs WITHOUT asking - and that path only ever REFUSES, it
-    // never spends.
-    if tool_name == "purchase" {
+    // 🔴 Deliberately a SEPARATE guard from `cannot_be_lifted_at_all` below,
+    // even though the three names are identical: this one is the grid's own
+    // pin, consulted on every call before a rule is ever in the picture;
+    // `cannot_be_lifted_at_all` is the second lock inside
+    // `rules::resolve_decision`, which stops a rule from silently
+    // overwriting what THIS pin already decided later in the same turn
+    // (`runs.rs`'s auto-review block replaces `decision` wholesale with
+    // whatever that function returns). Kept apart so each can be proven -
+    // and can fail - independently of the other; losing either alone still
+    // leaves the tool liftable to "allow" by the other route.
+    if matches!(tool_name, "propose_tool" | "purchase" | "read_file") {
         return if base == Decision::Deny {
             Decision::Deny
         } else {
@@ -716,4 +718,47 @@ pub fn permissions_for_run(
 /// conversation he was watching.
 pub fn cannot_be_lifted_unattended(tool_name: &str) -> bool {
     tighten_set().contains(&tool_name)
+}
+
+/// Whether a rule may never lift a tool to "allow" - at ANY trigger,
+/// including `Trigger::Chat`, not only the unattended ones
+/// `cannot_be_lifted_unattended` covers.
+///
+/// S13b-03-02 (closing DEFERRED D10 too): `decide_call` above pins
+/// `propose_tool`, `purchase` and every CLIENT_FULFILLED tool (`read_file`
+/// today - see that function's own doc on why the name is duplicated
+/// rather than imported from `runs.rs`) to "ask" regardless of the stored
+/// grid. That pin is not the last word: the auto-review rules block runs
+/// later in the SAME turn (`runs.rs`) and replaces `decision` wholesale
+/// with whatever `rules::resolve_decision` returns. Without this function
+/// gating that call, a rule reading e.g. "let him read files on my
+/// computer" would lift `read_file` back to "allow" in any CHAT turn - the
+/// one trigger `cannot_be_lifted_unattended` does NOT hold the floor for,
+/// since Josh is the one watching a chat turn happen.
+///
+/// `purchase` and `propose_tool` need this even more than `read_file` does:
+/// `tighten_set` (what `cannot_be_lifted_unattended` reads) never contained
+/// either, so before this a rule could lift them at EVERY trigger, not only
+/// an unattended one. Latent today - neither is a registered tool yet - but
+/// the guard must be real before they land.
+///
+/// 🔴 Deliberately a SEPARATE guard from `decide_call`'s own pin, even
+/// though the three names are identical - see that function's own doc for
+/// why the two are not allowed to share one set.
+pub fn cannot_be_lifted_at_all(tool_name: &str) -> bool {
+    matches!(tool_name, "read_file" | "purchase" | "propose_tool")
+}
+
+/// Whether an approval's "Always allow" press (`routes/approvals.rs::decide`'s
+/// `remember`) may not write "allow" for this tool - the THIRD route to the
+/// same lift, and on purpose a THIRD independent guard rather than a second
+/// call to `cannot_be_lifted_at_all` above: the two are proven by separate
+/// mutations (see that function's own doc and `decide_call`'s), and sharing
+/// one set here would mean losing either OTHER guard silently broke this
+/// one's test too, which is exactly the "a bite passes with a different
+/// guard's mutation" defect this design's reviews found twice. "Never"
+/// (a `deny` press) is not covered by this - only a press that would LIFT
+/// to allow is refused.
+pub fn cannot_be_remembered_as_allow(tool_name: &str) -> bool {
+    matches!(tool_name, "read_file" | "purchase" | "propose_tool")
 }

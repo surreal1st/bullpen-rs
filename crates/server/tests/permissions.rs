@@ -328,6 +328,64 @@ fn purchase_always_ask_even_if_allow() {
     assert_eq!(decision, server::permissions::Decision::Deny);
 }
 
+// ---- S13b-03-02: the pin that cannot be lifted (design §4.6/§7 bite 11) ----
+//
+// `read_file` is the one CLIENT_FULFILLED tool this port has registered so
+// far, and gets the identical `decide_call` pin `propose_tool`/`purchase`
+// already had - "always allow" in the grid must not be able to skip the one
+// human step a client-fulfilled read needs. Mutation: drop `"read_file"`
+// from the `matches!` in `decide_call` and this goes red - `decide_call`
+// would just hand back the stored `Allow` untouched.
+#[test]
+fn read_file_always_ask_even_if_allow() {
+    let decision =
+        server::permissions::decide_call(server::permissions::Decision::Allow, "read_file", "{}");
+    assert_eq!(decision, server::permissions::Decision::Ask);
+
+    // But deny stays deny - "Never" still works.
+    let decision =
+        server::permissions::decide_call(server::permissions::Decision::Deny, "read_file", "{}");
+    assert_eq!(decision, server::permissions::Decision::Deny);
+}
+
+// `cannot_be_lifted_at_all` is the SEPARATE guard `rules::resolve_decision`
+// consults - deliberately not the same code object `decide_call` reads
+// above, so each can be broken (and proven) independently. Mutation: drop
+// a name from the `matches!` inside `cannot_be_lifted_at_all` and its own
+// assertion below goes red, while `decide_call`'s pin (tested above) stays
+// green - proving the two guards do not share a blind spot.
+#[test]
+fn cannot_be_lifted_at_all_covers_read_file_purchase_and_propose_tool() {
+    for name in ["read_file", "purchase", "propose_tool"] {
+        assert!(
+            server::permissions::cannot_be_lifted_at_all(name),
+            "{name} must never be liftable to allow by a rule, at any trigger"
+        );
+    }
+    // A tool that is only unattended-tightened (not pinned) must NOT be in
+    // this stricter set, or the chat-trigger floor would wrongly swallow
+    // tools Josh is allowed to lift himself while watching.
+    assert!(!server::permissions::cannot_be_lifted_at_all("shell"));
+}
+
+// The THIRD independent guard (`routes/approvals.rs::decide`'s `remember`
+// refusal) - a separate code object from `cannot_be_lifted_at_all` on
+// purpose, proven by `tests/rules.rs`'s
+// `remembering_read_file_as_allow_is_refused_and_writes_neither` over HTTP.
+// This is the fast unit-level companion: mutation: drop a name from
+// `cannot_be_remembered_as_allow`'s `matches!` and this goes red without
+// touching `cannot_be_lifted_at_all`'s own test above.
+#[test]
+fn cannot_be_remembered_as_allow_covers_read_file_purchase_and_propose_tool() {
+    for name in ["read_file", "purchase", "propose_tool"] {
+        assert!(
+            server::permissions::cannot_be_remembered_as_allow(name),
+            "{name} must never be rememberable as allow"
+        );
+    }
+    assert!(!server::permissions::cannot_be_remembered_as_allow("shell"));
+}
+
 #[test]
 fn ask_josh_with_wait_true_returns_ask() {
     let decision = server::permissions::decide_call(

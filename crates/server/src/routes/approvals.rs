@@ -136,6 +136,46 @@ async fn decide(
                     .into_response());
             }
 
+            // S13b-03-02: a client-fulfilled tool (and, closing D10,
+            // `purchase`/`propose_tool`) carries a `decide_call` pin that
+            // "always allow" must not be able to route around from THIS
+            // button either - the third of three routes to the same lift
+            // (`decide_call`'s own pin and `rules::resolve_decision`'s
+            // never-lift set are the other two), each proven by its own
+            // mutation, so this reads its OWN guard
+            // (`cannot_be_lifted_at_all` is deliberately not reused - see
+            // `cannot_be_remembered_as_allow`'s own doc). Placed here,
+            // before EITHER write below, exactly where the `is_answerable`
+            // 400 above already returns: refusing the grid write and not
+            // the rule write (or the reverse) would fix the symptom and
+            // leave the cause, since a rule alone is enough to run the tool
+            // via `runs.rs`'s auto-review block. "Never" still works - only
+            // an `allow` press is refused; a `deny` press still writes
+            // both, same as any other tool.
+            // S13b-03-02: a client-fulfilled tool (and, closing D10,
+            // `purchase`/`propose_tool`) carries a `decide_call` pin that
+            // "always allow" must not be able to route around from THIS
+            // button either - the third of three routes to the same lift
+            // (`decide_call`'s own pin and `rules::resolve_decision`'s
+            // never-lift set are the other two), each proven by its own
+            // mutation, so this reads its OWN guard
+            // (`cannot_be_lifted_at_all` is deliberately not reused - see
+            // `cannot_be_remembered_as_allow`'s own doc). Placed here,
+            // before EITHER write below, exactly where the `is_answerable`
+            // 400 above already returns: refusing the grid write and not
+            // the rule write (or the reverse) would fix the symptom and
+            // leave the cause, since a rule alone is enough to run the tool
+            // via `runs.rs`'s auto-review block. "Never" still works - only
+            // an `allow` press is refused; a `deny` press still writes
+            // both, same as any other tool.
+            if allow && crate::permissions::cannot_be_remembered_as_allow(&target.tool_name) {
+                return Ok((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "this tool cannot be set to always allow"})),
+                )
+                    .into_response());
+            }
+
             // Read-then-write, not a fresh object: `set_permissions`
             // replaces the whole stored row, so writing just the one tool
             // would erase every other override Josh had already set.

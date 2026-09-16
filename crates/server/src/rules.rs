@@ -505,6 +505,16 @@ pub fn resolve_decision(
     }
 
     let mut decision = to_decision(winner.behavior);
+    // 🔴 S13b-03-02/D10: a rule may not lift a tool `decide_call` pins to
+    // "ask" no matter what - at ANY trigger, including `Trigger::Chat`.
+    // Checked BEFORE the unattended-only floor below: without this, a rule
+    // like "let him read files on my computer" lifted `read_file` back to
+    // "allow" in any chat turn, since the check below only ever fires when
+    // `trigger != Chat`. See `permissions::cannot_be_lifted_at_all`'s own
+    // doc for why this is a separate guard from `decide_call`'s pin.
+    if decision == Decision::Allow && permissions::cannot_be_lifted_at_all(tool_name) {
+        decision = Decision::Ask;
+    }
     // 🔴 A rule may not lift a tool an unattended run is not allowed at
     // all - the same floor `permissions_for_run` already enforces on the
     // grid, held here too so a rule cannot reopen what that closed.
