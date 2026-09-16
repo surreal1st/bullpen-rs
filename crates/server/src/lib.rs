@@ -376,10 +376,20 @@ impl AppState {
         // real `on` server) actually reaches `shell`/`sandbox_read` - without
         // this, `AppState.sandbox` was stored but never read, and
         // `RunManager` resolved its OWN default underneath it.
-        let runs = Arc::new(runs::RunManager::with_sandbox(
+        // S8a-02: `with_sandbox_and_vm`, not `with_sandbox` - `toolbox_for`
+        // needs its own copies of `vm_docker`/`vm_config`/`vm_enabled` to
+        // resolve `browse`/`read_page`'s `Cdp` per calling bot
+        // (`desk::cdp_for_bot`), the same reason `sandbox` is threaded
+        // through here rather than left to its own `BULLPEN_SANDBOX`
+        // default. Cloned rather than moved: `vm_docker`/`vm_config` are
+        // still needed below, for `AppState`'s own fields.
+        let runs = Arc::new(runs::RunManager::with_sandbox_and_vm(
             Arc::clone(&db),
             port,
             Arc::clone(&sandbox),
+            Arc::clone(&vm_docker),
+            Arc::clone(&vm_config),
+            vm_enabled,
         ));
         let room_engine = rooms::RoomEngine::install(Arc::clone(&db), Arc::clone(&runs));
 

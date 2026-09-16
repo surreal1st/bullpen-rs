@@ -49,6 +49,7 @@ use store::Db;
 
 use crate::permissions::{Decision, Permissions, always_on_set};
 use crate::sandbox::Sandbox;
+use crate::vm;
 
 /// S6L-02: wraps a `shell`/`sandbox_read` result the same way `rules.rs`
 /// fences a pending call's description for its classifier prompt
@@ -151,6 +152,16 @@ pub struct BuildParams {
     pub perms: Permissions,
     /// S6L-02: what `shell`/`sandbox_read` actually run against.
     pub sandbox: Arc<dyn Sandbox>,
+    /// S8a-02: what `browse`/`read_page` resolve their `Cdp` through -
+    /// `desk::cdp_for_bot` (its own doc has the three routing decisions).
+    /// Three plain fields, not a pre-resolved `Cdp`, for the same reason
+    /// `sandbox` above is a live `Arc<dyn Sandbox>` and not a captured
+    /// result: a bot's VM can start, stop (the reaper, `b010c30`) or hit its
+    /// slot cap between one tool call and the next, so this must be
+    /// re-resolved at call time, never once at `build`'s own call site.
+    pub vm_docker: Arc<dyn vm::DockerRun>,
+    pub vm_config: Arc<store::vms::VmConfig>,
+    pub vm_enabled: bool,
     /// F3 (`reviews/S5b-R.md`): narrows the offered specs to `always_on_set()
     /// ∪ only` when `Some` - port of the TS `app.ts:5783` narrowing a
     /// routine's phrasing turn passes `tools: []` into (ALWAYS_ON only,
@@ -232,6 +243,9 @@ pub fn build(params: BuildParams) -> ToolBox {
     let changes = params.changes;
     let perms = params.perms;
     let sandbox = params.sandbox;
+    let vm_docker = params.vm_docker;
+    let vm_config = params.vm_config;
+    let vm_enabled = params.vm_enabled;
     let only = params.only;
     // F3: `always_on_set()` rides through any `only` narrowing whatever it
     // says (TS `app.ts:5783`) - a routine's phrasing turn narrowed to `[]`
@@ -270,6 +284,8 @@ pub fn build(params: BuildParams) -> ToolBox {
             let escalated = Arc::clone(&escalated);
             let changes = changes.clone();
             let sandbox = Arc::clone(&sandbox);
+            let vm_docker = Arc::clone(&vm_docker);
+            let vm_config = Arc::clone(&vm_config);
             Box::pin(async move {
                 match name.as_str() {
                     "say" => (say::run(&db, &bot_id, &args), None),
@@ -314,19 +330,23 @@ pub fn build(params: BuildParams) -> ToolBox {
                     "set_goal" => (goal_tools::run_set_goal(&db, &bot_id, &args), None),
                     "update_goal" => (goal_tools::run_update_goal(&db, &bot_id, &args), None),
                     "reflect" => (goal_tools::run_reflect(&db, &bot_id, &args), None),
-                    // S6-W-03: the `Cdp` is resolved HERE, at call time, by
-                    // `desk::build_cdp` reading `BULLPEN_DESK` itself -
-                    // there is no `cdp` field on `BuildParams` the way
-                    // `sandbox` has one, because threading one in would
-                    // mean changing `runs.rs`'s `toolbox_for` (not a file
-                    // this ticket owns) the same way `sandbox` is threaded
-                    // in today. `desk::build_cdp` mirrors `sandbox::
-                    // default_sandbox`'s own env-gated fallback for the
-                    // identical reason: no browser exists on this
-                    // workstation, so the default must refuse loudly
-                    // rather than try and hang.
+                    // S8a-02: the `Cdp` is resolved HERE, at call time, by
+                    // `desk::cdp_for_bot` - the calling bot's OWN machine
+                    // (`vm::desk_for_in` -> `vm::vm_desk`) when per-bot VMs
+                    // are on, `UnavailableCdp` when they are off. Replaces
+                    // S6-W-03's `desk::build_cdp` (deleted), which read
+                    // `BULLPEN_DESK` and handed every bot the SAME shared
+                    // desk regardless of bot_id - see `cdp_for_bot`'s own
+                    // doc for the three routing decisions this closes.
                     "browse" => {
-                        let cdp = crate::desk::build_cdp();
+                        let cdp = crate::desk::cdp_for_bot(
+                            &db,
+                            Arc::clone(&vm_docker),
+                            &vm_config,
+                            vm_enabled,
+                            &bot_id,
+                        )
+                        .await;
                         let resolver = crate::desk::RealResolver;
                         (
                             crate::tools::browse::run_browse(
@@ -342,7 +362,14 @@ pub fn build(params: BuildParams) -> ToolBox {
                         )
                     }
                     "read_page" => {
-                        let cdp = crate::desk::build_cdp();
+                        let cdp = crate::desk::cdp_for_bot(
+                            &db,
+                            Arc::clone(&vm_docker),
+                            &vm_config,
+                            vm_enabled,
+                            &bot_id,
+                        )
+                        .await;
                         (
                             crate::tools::browse::run_read_page(&db, cdp.as_ref(), &bot_id).await,
                             None,

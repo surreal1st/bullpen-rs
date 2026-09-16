@@ -30,6 +30,7 @@ use crate::permissions::{self, Decision};
 use crate::rules;
 use crate::sandbox;
 use crate::tools::{self, RoomHook, ToolBox};
+use crate::vm;
 
 /// How many tool steps a single run may take before it is stopped rather
 /// than left to loop. Matches TS's `MAX_STEPS` (`run.ts:78`) now that S2-04
@@ -198,6 +199,15 @@ pub struct RunManager {
     /// (`new`, `with_backlog_ttl`); injected by `with_sandbox` for
     /// `AppState::build` and sandbox-aware tests.
     sandbox: Arc<dyn sandbox::Sandbox>,
+    /// S8a-02: what `toolbox_for` hands `browse`/`read_page` to resolve
+    /// their `Cdp` against - `desk::cdp_for_bot`'s own doc has the routing
+    /// decisions. Resolved from `BULLPEN_VM` by the no-arg constructors
+    /// (`new`, `with_backlog_ttl`, `with_sandbox`), same convention
+    /// `sandbox` above already uses for `BULLPEN_SANDBOX`; injected by
+    /// `with_sandbox_and_vm` for `AppState::build` and vm-aware tests.
+    vm_docker: Arc<dyn vm::DockerRun>,
+    vm_config: Arc<store::vms::VmConfig>,
+    vm_enabled: bool,
     /// The kind-based change bus (roster/approvals/questions/working) this
     /// manager touches. Public so a caller (a test, or S1-06's routes) can
     /// subscribe to it the same way the TS routes subscribe to `changes.ts`.
@@ -298,6 +308,21 @@ fn run_is_tainted(db: &Db, run_id: &str) -> rusqlite::Result<bool> {
 /// client applies is not a cap.
 const MAX_FULFILMENT_CHARS: usize = 200_000;
 
+/// The `vm::DockerRun`/`VmConfig`/enabled triple every no-arg-ish
+/// `RunManager` constructor resolves for itself, same convention
+/// `sandbox::default_sandbox` already gives the `sandbox` field - env-read
+/// fresh each call (matches `AppState`'s own private `default_vm_*` helpers
+/// in `lib.rs`, which this does not reuse only because they are private to
+/// that module; duplicated rather than made `pub(crate)` there since this
+/// ticket does not otherwise touch `lib.rs`'s constructor family).
+fn default_vm_parts() -> (Arc<dyn vm::DockerRun>, Arc<store::vms::VmConfig>, bool) {
+    let env: HashMap<String, String> = std::env::vars().collect();
+    let cfg = Arc::new(store::vms::vm_config(&env));
+    let docker = vm::default_docker_run(&env, &cfg);
+    let enabled = store::vms::vms_enabled(&env);
+    (docker, cfg, enabled)
+}
+
 impl RunManager {
     pub fn new(db: Arc<Mutex<Db>>, port: Arc<dyn ModelPort>) -> Self {
         Self::with_backlog_ttl(db, port, BACKLOG_TTL)
@@ -311,7 +336,16 @@ impl RunManager {
         port: Arc<dyn ModelPort>,
         backlog_ttl: Duration,
     ) -> Self {
-        Self::build(db, port, sandbox::default_sandbox(), backlog_ttl)
+        let (vm_docker, vm_config, vm_enabled) = default_vm_parts();
+        Self::build(
+            db,
+            port,
+            sandbox::default_sandbox(),
+            vm_docker,
+            vm_config,
+            vm_enabled,
+            backlog_ttl,
+        )
     }
 
     /// S6L-02: lets a caller (`AppState::build`, or a sandbox-aware test)
@@ -321,25 +355,70 @@ impl RunManager {
     /// still resolves its own default via `sandbox::default_sandbox`, so
     /// the many call sites across this crate's test suite that predate
     /// this ticket keep compiling and keep seeing the S2 Unavailable text
-    /// unchanged.
+    /// unchanged. S8a-02: vm parts still resolve from `BULLPEN_VM` here
+    /// (unchanged default) - a sandbox-only test never cared about VM
+    /// routing, so widening this constructor's signature too would touch
+    /// every one of its existing callers for nothing; a caller that DOES
+    /// need to inject VM parts wants `with_sandbox_and_vm` instead.
     pub fn with_sandbox(
         db: Arc<Mutex<Db>>,
         port: Arc<dyn ModelPort>,
         sandbox: Arc<dyn sandbox::Sandbox>,
     ) -> Self {
-        Self::build(db, port, sandbox, BACKLOG_TTL)
+        let (vm_docker, vm_config, vm_enabled) = default_vm_parts();
+        Self::build(
+            db,
+            port,
+            sandbox,
+            vm_docker,
+            vm_config,
+            vm_enabled,
+            BACKLOG_TTL,
+        )
     }
 
+    /// S8a-02: lets a caller (`AppState::build`, or a vm-aware test) inject
+    /// BOTH the `Sandbox` and the `vm::DockerRun`/`VmConfig`/`vm_enabled`
+    /// triple `browse`/`read_page` resolve their `Cdp` through - the same
+    /// seam `AppState::with_vm` already gives `routes/vms.rs`. Every other
+    /// constructor here keeps resolving its own env defaults for both.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_sandbox_and_vm(
+        db: Arc<Mutex<Db>>,
+        port: Arc<dyn ModelPort>,
+        sandbox: Arc<dyn sandbox::Sandbox>,
+        vm_docker: Arc<dyn vm::DockerRun>,
+        vm_config: Arc<store::vms::VmConfig>,
+        vm_enabled: bool,
+    ) -> Self {
+        Self::build(
+            db,
+            port,
+            sandbox,
+            vm_docker,
+            vm_config,
+            vm_enabled,
+            BACKLOG_TTL,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn build(
         db: Arc<Mutex<Db>>,
         port: Arc<dyn ModelPort>,
         sandbox: Arc<dyn sandbox::Sandbox>,
+        vm_docker: Arc<dyn vm::DockerRun>,
+        vm_config: Arc<store::vms::VmConfig>,
+        vm_enabled: bool,
         backlog_ttl: Duration,
     ) -> Self {
         Self {
             db,
             port,
             sandbox,
+            vm_docker,
+            vm_config,
+            vm_enabled,
             changes: ChangeBus::new(),
             bus: Mutex::new(HashMap::new()),
             backlog: Mutex::new(HashMap::new()),
@@ -798,6 +877,9 @@ impl RunManager {
             changes: self.changes.clone(),
             perms,
             sandbox: Arc::clone(&self.sandbox),
+            vm_docker: Arc::clone(&self.vm_docker),
+            vm_config: Arc::clone(&self.vm_config),
+            vm_enabled: self.vm_enabled,
             only,
         })
     }

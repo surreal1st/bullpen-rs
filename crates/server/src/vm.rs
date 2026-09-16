@@ -776,6 +776,53 @@ pub async fn hibernate_idle_in(
     Ok(stopped)
 }
 
+/// What a bot's tools should act on, resolved by `desk_for_in`. Not a
+/// `DeskConfig` alone: the "every slot is taken" case (`ensure_vm_in`'s own
+/// `EnsureOutcome::detail`) has no machine to hand back at all, and
+/// `desk_for`'s own caller-supplied `fallback: DeskConfig` would have to
+/// invent one to fill that slot - silently pointing at SOME desk being the
+/// exact multi-bot-collision bug this ticket (S8a-02) exists to close. An
+/// explicit `Unavailable(reason)` lets the caller refuse with a message a
+/// model can act on instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeskResolution {
+    /// The bot's own machine.
+    Own(crate::desk::DeskConfig),
+    /// No machine to hand back - the `String` is why, straight from
+    /// `EnsureOutcome::detail`.
+    Unavailable(String),
+}
+
+/// `desk_for`, reimplemented for a caller holding `Arc<Mutex<Db>>` across an
+/// await boundary that must stay `Send` - see this section's header doc for
+/// why `desk_for` itself cannot be called from `tools/mod.rs`'s dispatch
+/// closure directly (S8a-02: that closure is boxed as `ToolFuture = Pin<Box
+/// <dyn Future<...> + Send>>`, the identical wall `ensure_vm_in`'s own doc
+/// names for `routes/vms.rs`). `desk_for` itself is left UNCHANGED, same
+/// reasoning `ensure_vm`/`refresh_vm`/`hibernate_idle` are not rewritten:
+/// it is the correct shape for a caller that already owns (or exclusively
+/// borrows) a `Db` - `tests/vm.rs`.
+///
+/// Deliberately narrower than `desk_for`'s own signature: `enabled` and
+/// `fallback` are gone. S8a-02's ONE caller (`desk::cdp_for_bot`) already
+/// gates on `vm_enabled` itself before ever reaching this function (see its
+/// own doc for why `UnavailableCdp` - not a shared-desk `DeskConfig` - is
+/// what "VMs are off" resolves to now), so there is never a `fallback` this
+/// function itself would need to invent.
+pub async fn desk_for_in(
+    db: &Arc<Mutex<Db>>,
+    docker: Arc<dyn DockerRun>,
+    bot_id: &str,
+    bot_name: &str,
+    cfg: &VmConfig,
+) -> rusqlite::Result<DeskResolution> {
+    let outcome = ensure_vm_in(db, docker, bot_id, bot_name, cfg).await?;
+    Ok(match outcome.vm {
+        Some(vm) => DeskResolution::Own(vm_desk(&vm, cfg)),
+        None => DeskResolution::Unavailable(outcome.detail),
+    })
+}
+
 /// The next free slot from a list of used CDP ports.
 fn next_slot(used: &[i32], cfg: &VmConfig) -> Option<i32> {
     for slot in 0..cfg.slots {

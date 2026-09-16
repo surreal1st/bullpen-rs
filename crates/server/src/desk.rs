@@ -32,7 +32,7 @@ use futures::{SinkExt, StreamExt};
 use reqwest::Url;
 use rusqlite::OptionalExtension;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use store::Db;
 use tokio_tungstenite::tungstenite::Message;
@@ -775,25 +775,82 @@ impl Cdp for HttpCdp {
     }
 }
 
-/// The `Cdp` for driving the shared desk, chosen by `BULLPEN_DESK` at call
-/// time - mirrors `sandbox::default_sandbox`'s `BULLPEN_SANDBOX` gate for
-/// the identical reason: a dev workstation with no browser must get a
-/// clear refusal every time, never an `HttpCdp` quietly trying (and
-/// hanging, or half-working) against a socket nothing is listening on.
-/// Not threaded through `tools::BuildParams` (`sandbox`'s own field there),
-/// because this ticket owns no file that constructs `BuildParams`
-/// (`runs.rs`'s `toolbox_for` is not in its file list), so `tools::browse`
-/// resolves this itself, the same call-time pattern `default_sandbox`
-/// already uses rather than a value threaded in ahead of time.
-pub fn build_cdp() -> Arc<dyn Cdp> {
-    let mode = std::env::var("BULLPEN_DESK").unwrap_or_default();
-    if mode != "on" {
+/// The `Cdp` a bot's `browse`/`read_page` call should use - S8a-02.
+///
+/// Replaces `build_cdp()` (S6-W-03..S8a-01, deleted by this ticket): that
+/// function read `BULLPEN_DESK` and handed EVERY bot the same `HttpCdp`
+/// pointed at ONE shared desk, regardless of whether per-bot machines
+/// (`vm::desk_for_in`/`vm::vm_desk`, ported in S6-06b) were ever wired up to
+/// a caller - they had zero production callers until this ticket. This is
+/// that caller: resolved per bot, at call time, exactly like `build_cdp`'s
+/// own env-gated pattern (`sandbox::default_sandbox`'s `BULLPEN_SANDBOX`
+/// gate, cited in `build_cdp`'s old doc) - never threaded in ahead of time,
+/// because a bot's own VM can change state (started, hibernated by the
+/// reaper, `b010c30`) between one tool call and the next.
+///
+/// **Decision 1 (vm_enabled = false):** refuses with `UnavailableCdp`
+/// BEFORE ever touching `vm::desk_for_in` - never a shared-desk
+/// `DeskConfig`. `desk_for`'s own doc (still true for ITS callers,
+/// `tests/vm.rs`) frames "VMs off -> shared desk" as intentional, and
+/// `desk_for`'s existing test (`desk_for_returns_fallback_when_vms_disabled`)
+/// locks that reading in for `desk_for` itself - but `desk_for` takes its
+/// `fallback` as a value the CALLER supplies, and this is a fresh caller,
+/// free to supply "there is nothing to browse with" instead of a working
+/// alternate desk. `UnavailableCdp`'s reason string is exactly what a model
+/// can already act on (say so, try something else) - the same shape
+/// `sandbox::UnavailableSandbox` already gives `shell`/`sandbox_read`.
+///
+/// **Decision 2 (no VM row / `stopped`):** handled entirely inside
+/// `vm::ensure_vm_in` (via `desk_for_in`), unchanged by this function -
+/// `stopped` is the reaper-hibernated common case (`b010c30`), and
+/// `ensure_vm_in`'s `!state.running` branch issues `docker start` and hands
+/// back the SAME `cdp_port` the row always had, so a woken bot's very next
+/// `browse` reaches its own machine again, not a new one. The one dead end
+/// (`DeskResolution::Unavailable`) is every VM slot taken - genuinely no
+/// machine of this bot's own exists yet - and this refuses with that
+/// reason rather than inventing a stand-in desk.
+///
+/// **Decision 3 (`build_cdp`/`BULLPEN_DESK`):** deleted. Keeping it as a
+/// fallback would mean a misconfiguration (this function reached with a
+/// bad `vm_docker`/`vm_config`, or a future caller that forgets to check
+/// `vm_enabled`) could silently route a bot back onto ONE shared desk -
+/// exactly the bug S8a-02 exists to remove. `desk_config`/`HttpCdp` are
+/// NOT deleted (`tests/desk.rs` still exercises `desk_config` directly, and
+/// `HttpCdp` is what THIS function builds from a resolved `DeskConfig`);
+/// only the env-gated "pick a shared desk" resolution is gone.
+pub async fn cdp_for_bot(
+    db: &Arc<Mutex<Db>>,
+    vm_docker: Arc<dyn crate::vm::DockerRun>,
+    vm_config: &store::vms::VmConfig,
+    vm_enabled: bool,
+    bot_id: &str,
+) -> Arc<dyn Cdp> {
+    if !vm_enabled {
         return Arc::new(UnavailableCdp::new(
-            "The shared computer is off here. Set BULLPEN_DESK=on where it is wanted.",
+            "Per-bot machines are off here. There is nothing to browse with.",
         ));
     }
-    let env: HashMap<String, String> = std::env::vars().collect();
-    Arc::new(HttpCdp::new(desk_config(&env)))
+
+    // Cosmetic only (container TITLE env var, wake/boot log detail) - never
+    // read for routing, so a bot missing from `bots` (should not happen in
+    // production; cheap to fall back to `bot_id` rather than fail the call
+    // over a display string) still gets its own machine.
+    let bot_name = {
+        let guard = db.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        store::get_bot(&guard, bot_id)
+            .ok()
+            .flatten()
+            .map(|b| b.name)
+    }
+    .unwrap_or_else(|| bot_id.to_string());
+
+    match crate::vm::desk_for_in(db, vm_docker, bot_id, &bot_name, vm_config).await {
+        Ok(crate::vm::DeskResolution::Own(config)) => Arc::new(HttpCdp::new(config)),
+        Ok(crate::vm::DeskResolution::Unavailable(reason)) => Arc::new(UnavailableCdp::new(reason)),
+        Err(err) => Arc::new(UnavailableCdp::new(format!(
+            "Could not read this bot's machine: {err}"
+        ))),
+    }
 }
 
 /* ------------------------------------------------------------- scope cuts */
