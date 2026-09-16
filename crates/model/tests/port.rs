@@ -14,6 +14,10 @@ use model::{ModelEvent, ModelUsage, busy_wait_ms, parse_sse_stream, redact};
 
 const STREAM_FIXTURE: &str = include_str!("fixtures/openrouter-stream.txt");
 const TOOLCALL_FIXTURE: &str = include_str!("fixtures/openrouter-toolcall.txt");
+/// S8b: `openrouter-stream.txt` with the `cost` field removed and every other
+/// byte identical - not hand-written, derived from the captured response. Some
+/// providers report token counts with no cost at all.
+const NO_COST_FIXTURE: &str = include_str!("fixtures/openrouter-stream-no-cost.txt");
 
 /// Splits `text` into byte chunks of `size` (the last one shorter), feeds
 /// them through `parse_sse_stream`, and collects every event. `size` only
@@ -61,6 +65,44 @@ async fn does_not_leak_reasoning_tokens_into_the_answer() {
     let text = deltas(&events);
     assert!(!text.contains("User says"));
     assert!(text.len() < 40);
+}
+
+#[tokio::test]
+async fn a_usage_frame_without_a_cost_still_reports_its_token_counts() {
+    // S8b. The `cost` field used to GATE the whole usage block, so a frame
+    // carrying token counts but no cost was dropped entirely and the run
+    // recorded 0 input / 0 output / $0 - a run that provably called the
+    // model, filed as one that never ran. That is the signature ~9% of chat
+    // runs were showing on meridian, and it made a real call and a call that
+    // never happened indistinguishable in the database.
+    //
+    // Token counts are read from the recorded response, never from running
+    // our own code: this fixture is `openrouter-stream.txt` byte-for-byte
+    // with `"cost":0.00002435,` removed.
+    let events = parse_chunked(NO_COST_FIXTURE, "requested/model", 97).await;
+    match events.last() {
+        Some(ModelEvent::Done {
+            usage:
+                Some(ModelUsage {
+                    cost_usd,
+                    input_tokens,
+                    output_tokens,
+                    ..
+                }),
+            ..
+        }) => {
+            assert_eq!(
+                *input_tokens, 82,
+                "token counts must survive a missing cost"
+            );
+            assert_eq!(
+                *output_tokens, 45,
+                "token counts must survive a missing cost"
+            );
+            assert_eq!(*cost_usd, 0.0, "an absent cost is 0.0, never an estimate");
+        }
+        other => panic!("expected Done WITH usage despite no cost, got {other:?}"),
+    }
 }
 
 #[tokio::test]

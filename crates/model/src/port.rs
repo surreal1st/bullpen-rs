@@ -318,10 +318,16 @@ impl ModelPort for OpenRouterPort {
                 let res = match send {
                     Ok(r) => r,
                     Err(e) => {
+                        // S8b: the transport itself failed. This DID yield an
+                        // Error event, but nothing logged it, so a run that
+                        // never reached OpenRouter left no trace on the box.
+                        tracing::warn!(model = %model, "model request failed before a response");
                         yield ModelEvent::Error { message: redact(&e.to_string(), Some(&key)), status: None };
                         return;
                     }
                 };
+
+                tracing::debug!(model = %model, status = res.status().as_u16(), attempt = i + 1, "model response");
 
                 if res.status().as_u16() == 429 {
                     let retry_after = res
@@ -450,6 +456,13 @@ pub fn parse_sse_stream(
         let mut partial: BTreeMap<u32, PartialCall> = BTreeMap::new();
         let mut saw_tool_finish = false;
         let mut finish_reason: Option<String> = None;
+        // S8b: counted only so the end-of-stream summary below can say what
+        // arrived. A run that produces no text and no tool call is
+        // indistinguishable, after the fact, from one that was never sent -
+        // this crate had ZERO tracing calls, so ~9% of chat runs were
+        // finishing empty with no record of which of those two happened.
+        let mut delta_count: u32 = 0;
+        let mut frame_count: u32 = 0;
         let timeout_duration = idle_timeout.unwrap_or(Duration::from_secs(60));
 
         macro_rules! final_event {
@@ -507,16 +520,32 @@ pub fn parse_sse_stream(
                     Err(_) => continue,
                 };
 
+                frame_count += 1;
                 if let Some(m) = &frame.model
                     && !m.is_empty()
                 {
                     resolved_model = m.clone();
                 }
-                if let Some(u) = &frame.usage
-                    && let Some(cost) = u.cost
-                {
+                // The `cost` field used to GATE this whole block, so a usage
+                // frame that carried token counts but no cost was discarded
+                // entirely and the run recorded 0 input / 0 output / $0 - a
+                // run that provably called the model, filed as one that
+                // never ran. Cost is the one field Bullpen must never
+                // estimate (see `build_body`'s `usage.include`), so an
+                // absent cost still records 0.0 - but it no longer takes the
+                // token counts down with it, because "we do not know what it
+                // cost" and "nothing happened" are different facts and only
+                // one of them is true here.
+                if let Some(u) = &frame.usage {
+                    if u.cost.is_none() {
+                        tracing::warn!(
+                            model = %resolved_model,
+                            prompt_tokens = u.prompt_tokens.unwrap_or(0),
+                            "usage frame carried no cost; recording tokens with cost 0.0"
+                        );
+                    }
                     usage = Some(ModelUsage {
-                        cost_usd: cost,
+                        cost_usd: u.cost.unwrap_or(0.0),
                         input_tokens: u.prompt_tokens.unwrap_or(0),
                         output_tokens: u.completion_tokens.unwrap_or(0),
                         cached_tokens: u.prompt_tokens_details.as_ref().and_then(|d| d.cached_tokens).unwrap_or(0),
@@ -557,11 +586,39 @@ pub fn parse_sse_stream(
                         if let Some(text) = &delta.content
                             && !text.is_empty()
                         {
+                            delta_count += 1;
                             yield ModelEvent::Delta { text: text.clone() };
                         }
                     }
                 }
             }
+        }
+
+        // S8b: the one line that makes a silent run diagnosable. An empty
+        // result is legitimate (a tool-kind routine's `nothing-new`
+        // short-circuit) or a defect (a stream that carried nothing), and
+        // before this there was no way to tell them apart after the fact.
+        // WARN, not DEBUG, when nothing at all arrived: that is the case
+        // worth waking up for.
+        let produced_nothing = delta_count == 0 && partial.is_empty();
+        if produced_nothing {
+            tracing::warn!(
+                model = %resolved_model,
+                frames = frame_count,
+                finish_reason = finish_reason.as_deref().unwrap_or("(none)"),
+                usage = usage.is_some(),
+                "model stream produced no text and no tool call"
+            );
+        } else {
+            tracing::debug!(
+                model = %resolved_model,
+                frames = frame_count,
+                deltas = delta_count,
+                tool_calls = partial.len(),
+                finish_reason = finish_reason.as_deref().unwrap_or("(none)"),
+                usage = usage.is_some(),
+                "model stream complete"
+            );
         }
 
         // The stream ended without a `[DONE]` marker - same decision as that

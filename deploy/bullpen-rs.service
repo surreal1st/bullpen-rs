@@ -23,6 +23,19 @@ Environment=DOCKER_HOST=unix:///run/user/1004/docker.sock
 # a bot can reach the files and services meridian hosts.
 Environment=BULLPEN_SSH_KEY=/home/bullpen/.ssh/id_ed25519
 Environment=BULLPEN_SANDBOX=on
+# S8b: without this the server is SILENT. `tracing` emits nothing by default,
+# so `journalctl -u bullpen-rs` showed only systemd's own start/stop lines -
+# no "listening", no errors, nothing. Two consequences, both measured on
+# 2026-09-16: the VM reaper's start could not be confirmed from the box at all
+# (it had to be proven from container state and the `vms` table), and ~9% of
+# chat runs were finishing with no text, no tokens and no error, with no
+# record anywhere of whether the model was ever called. A server that
+# discards its own evidence cannot be diagnosed, only guessed at.
+#
+# `info` for the tree, `debug` for our own crates: the model port logs one
+# line per response and one summary per stream, which is the pair that makes
+# an empty run readable after the fact.
+Environment=RUST_LOG=info,server=debug,model=debug,bullpen=debug
 # Secrets live here, mode 600, owned by bullpen. Never in the repo, never in a
 # unit file, never on a command line.
 # 🔴 Its OWN file, never live's bullpen.env: an EnvironmentFile overrides Environment=
