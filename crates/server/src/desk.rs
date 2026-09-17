@@ -998,6 +998,59 @@ pub async fn cdp_for_bot(
     }
 }
 
+/// S8b-02: the `DeskConfig` a bot's `desk_shell` (and the four tools that
+/// route through it - `snap_desk`, `record_desk`, `desk_shell_stdin`,
+/// `desk_act`, none landed yet) should act on: the calling bot's OWN
+/// machine. Same routing as `cdp_for_bot` above (Decisions 1-2 in that
+/// function's own doc: refuse BEFORE `vm::desk_for_in` when VMs are off,
+/// let `desk_for_in`/`ensure_vm_in` handle "no row yet"/"stopped"/"every
+/// slot taken" on their own) - deliberately NOT reusing `cdp_for_bot`
+/// itself, because `desk_shell` execs into the container directly and never
+/// touches Chromium, so there is no `Cdp` to build and no
+/// `wait_for_ready`/`WAKE_POLL_BUDGET` poll to run; a command on a
+/// container whose `docker start` just returned needs no DevTools endpoint
+/// to be answering first.
+///
+/// Returns `Err(reason)` rather than an `UnavailableCdp`-shaped type -
+/// `desk_shell` has no `Cdp` trait object to wrap a refusal in, so its
+/// caller (`tools::desk_shell::run_desk_shell`'s call site in
+/// `tools/mod.rs`) folds this `Err` into the SAME "The shared computer did
+/// not answer: {reason}" sentence `browse`/`read_page`/`click`/`type_text`
+/// already produce for the identical class of refusal (`vm_enabled=false`,
+/// every slot taken) - one voice for "there is nothing to act on" across
+/// every desk tool, not a second wording invented for this one.
+pub async fn desk_config_for_bot(
+    db: &Arc<Mutex<Db>>,
+    vm_docker: Arc<dyn crate::vm::DockerRun>,
+    vm_config: &store::vms::VmConfig,
+    vm_enabled: bool,
+    bot_id: &str,
+) -> Result<DeskConfig, String> {
+    if !vm_enabled {
+        return Err(
+            "Per-bot machines are off here. There is nothing to run a command on.".to_string(),
+        );
+    }
+
+    // Cosmetic only - see `cdp_for_bot`'s identical comment on this same
+    // lookup for why a missing bot row falls back to `bot_id` rather than
+    // failing the call.
+    let bot_name = {
+        let guard = db.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        store::get_bot(&guard, bot_id)
+            .ok()
+            .flatten()
+            .map(|b| b.name)
+    }
+    .unwrap_or_else(|| bot_id.to_string());
+
+    match crate::vm::desk_for_in(db, vm_docker, bot_id, &bot_name, vm_config).await {
+        Ok(crate::vm::DeskResolution::Own(config)) => Ok(config),
+        Ok(crate::vm::DeskResolution::Unavailable(reason)) => Err(reason),
+        Err(err) => Err(format!("Could not read this bot's machine: {err}")),
+    }
+}
+
 /* ------------------------------------------------------------- scope cuts */
 //
 // What TS `desk.ts` exports that this file does NOT port, and why - per the
@@ -1011,14 +1064,12 @@ pub async fn cdp_for_bot(
 //   `call`). Still unproven against a real browser - a local test listener
 //   is not Chromium - see this file's header and S6-W-05's Results; the
 //   meridian smoke test (S6-SMOKE) is the only thing that can prove that.
-// - `deskShell`/`deskShellStdin`/`deskStatus` ("the terminal"/"status"
-//   sections, `desk.ts:382-461`) and `deskAction`/`DeskAction`
-//   ("coordinate-level input", `desk.ts:463-660`, the `xdotool` computer-use
-//   surface). Each is a separable subsystem TS itself marks off with its
-//   own `/* ---- */` banner, none of them named in this ticket's title
-//   ("desk: mayVisit, windowFor, readPage, browse"), and together they are
-//   a second ticket's worth of validation-heavy surface. `deskShell` in
-//   particular duplicates `crate::sandbox`'s `docker exec` shape closely
-//   enough that it deserves the same `CommandRunner`-style injection
-//   treatment sandbox.rs already has, which is a design decision for
-//   whichever ticket picks it up, not a five-minute addition to this one.
+// - (S8b-02, CLOSED) `deskShell` ("the terminal" section, `desk.ts:382-440`)
+//   is now ported - `desk_config_for_bot` above resolves the routing,
+//   `tools::desk_shell::run_desk_shell` runs the command. Still scoped out:
+//   `deskShellStdin`/`deskStatus` (the rest of "the terminal"/"status",
+//   `desk.ts:390-461`) and `deskAction`/`DeskAction` ("coordinate-level
+//   input", `desk.ts:463-660`, the `xdotool` computer-use surface) - each a
+//   separable subsystem TS itself marks off with its own `/* ---- */`
+//   banner, none of them this ticket's title, and together a second
+//   ticket's worth of validation-heavy surface.

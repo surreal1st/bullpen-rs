@@ -26,6 +26,11 @@ mod ask_josh;
 // pattern S6-W-02 already uses for its own `main.rs` call site.
 pub mod browse;
 mod create_room;
+// S8b-02: `pub`, same reasoning as `browse` above (this doc comment, just
+// up) - `crates/server/tests/desk_shell_routing.rs` is a separate crate and
+// needs to reach `run_desk_shell` directly, the same way
+// `tests/browse_tools.rs` reaches `run_browse`.
+pub mod desk_shell;
 pub(crate) mod escalate;
 mod goal_tools;
 mod local_read;
@@ -211,6 +216,14 @@ fn all_specs() -> Vec<ToolSpec> {
         // the ticket that wires them in.
         browse::click_spec(),
         browse::type_text_spec(),
+        // S8b-02: `desk_shell` had the identical gap - a permission row
+        // (`permissions.rs:268`, `Ask`), a `RISKY_TOOLS` entry
+        // (`judge.rs:18`) and a working-bar label
+        // (`shared/src/working.rs:42`), but no spec here and no dispatch
+        // arm below. This is the ticket that wires it in - the
+        // prerequisite `snap_desk`/`record_desk`/`desk_shell_stdin`/
+        // `desk_act` (S8 items 4-8) all need before any of them can land.
+        desk_shell::desk_shell_spec(),
     ]
 }
 
@@ -418,6 +431,40 @@ pub fn build(params: BuildParams) -> ToolBox {
                                 .await,
                             None,
                         )
+                    }
+                    // S8b-02: routing follows `browse`/`read_page`/`click`/
+                    // `type_text` above, but resolves a `DeskConfig`
+                    // (`desk::desk_config_for_bot`), never a `Cdp` -
+                    // `desk_shell` execs into the container directly and
+                    // never touches Chromium. A resolution failure (VMs off,
+                    // every slot taken) folds into the SAME "The shared
+                    // computer did not answer: {reason}" sentence the four
+                    // Cdp-based tools already produce for the identical
+                    // class of refusal - see `desk_config_for_bot`'s own
+                    // doc.
+                    "desk_shell" => {
+                        let text = match crate::desk::desk_config_for_bot(
+                            &db,
+                            Arc::clone(&vm_docker),
+                            &vm_config,
+                            vm_enabled,
+                            &bot_id,
+                        )
+                        .await
+                        {
+                            Ok(config) => {
+                                crate::tools::desk_shell::run_desk_shell(
+                                    vm_docker.as_ref(),
+                                    &config,
+                                    &args,
+                                )
+                                .await
+                            }
+                            Err(reason) => {
+                                format!("The shared computer did not answer: {reason}")
+                            }
+                        };
+                        (text, None)
                     }
                     other => (format!("Unknown tool: {other}"), None),
                 }
