@@ -374,6 +374,18 @@ pub async fn read_page(cdp: &dyn Cdp, target_id: &str) -> Result<PageView, Strin
     })
 }
 
+/// S8b-04: just the `location.href` half of `read_page`, for a caller that
+/// only needs to know WHERE the tab is currently showing, never its
+/// content. `tools::browse::run_click`/`run_type_text` use this to re-check
+/// `may_visit` after an action that may have navigated the page as a side
+/// effect - re-running the entire `read_page` (title + the full, possibly
+/// 12,000-character `innerText`) just to throw two thirds of it away would
+/// be waste, not thoroughness, and would cost every `click`/`type_text`
+/// call two extra `Runtime.evaluate` round trips it never needed.
+pub async fn current_url(cdp: &dyn Cdp, target_id: &str) -> Result<String, String> {
+    evaluate(cdp, target_id, "location.href").await
+}
+
 /// Cuts `raw` to at most `MAX_PAGE_CHARS` CHARACTERS - see that constant's
 /// own doc for why this must count `char`s, not bytes.
 fn truncate_page_text(raw: &str) -> (String, bool) {

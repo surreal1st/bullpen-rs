@@ -391,8 +391,15 @@ pub fn build(params: BuildParams) -> ToolBox {
                             &bot_id,
                         )
                         .await;
+                        let resolver = crate::desk::RealResolver;
                         (
-                            crate::tools::browse::run_read_page(&db, cdp.as_ref(), &bot_id).await,
+                            crate::tools::browse::run_read_page(
+                                &db,
+                                cdp.as_ref(),
+                                &resolver,
+                                &bot_id,
+                            )
+                            .await,
                             None,
                         )
                     }
@@ -402,6 +409,8 @@ pub fn build(params: BuildParams) -> ToolBox {
                     // can start/stop/hibernate between calls. Registering
                     // these on anything else (a shared desk) is exactly
                     // the bug S8a-02 removed; these two must not reopen it.
+                    // S8b-04: both now take the same `RealResolver` `browse`/
+                    // `read_page` do, to run the same post-action fence.
                     "click" => {
                         let cdp = crate::desk::cdp_for_bot(
                             &db,
@@ -411,9 +420,16 @@ pub fn build(params: BuildParams) -> ToolBox {
                             &bot_id,
                         )
                         .await;
+                        let resolver = crate::desk::RealResolver;
                         (
-                            crate::tools::browse::run_click(&db, cdp.as_ref(), &bot_id, &args)
-                                .await,
+                            crate::tools::browse::run_click(
+                                &db,
+                                cdp.as_ref(),
+                                &resolver,
+                                &bot_id,
+                                &args,
+                            )
+                            .await,
                             None,
                         )
                     }
@@ -426,9 +442,16 @@ pub fn build(params: BuildParams) -> ToolBox {
                             &bot_id,
                         )
                         .await;
+                        let resolver = crate::desk::RealResolver;
                         (
-                            crate::tools::browse::run_type_text(&db, cdp.as_ref(), &bot_id, &args)
-                                .await,
+                            crate::tools::browse::run_type_text(
+                                &db,
+                                cdp.as_ref(),
+                                &resolver,
+                                &bot_id,
+                                &args,
+                            )
+                            .await,
                             None,
                         )
                     }

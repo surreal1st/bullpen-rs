@@ -467,21 +467,29 @@ async fn browse_fences_the_pages_own_text_as_untrusted_data() {
     );
 }
 
+/// 🔴 S8b-04 regression guard (c) - NOT a bite. Must pass in BOTH worlds
+/// (guard present or removed): `read_page` on an ordinary public page must
+/// keep returning its content. Without this, a `run_read_page` that refused
+/// EVERYTHING (not just private addresses) would trivially pass bite (a)
+/// below.
 #[tokio::test]
 async fn read_page_fences_the_pages_own_text_too() {
     let db = db();
     let cdp = FakeCdp::new();
+    let resolver = RecordingResolver::new(vec!["8.8.8.8".to_string()]);
     cdp.push_create_window("target-1");
     cdp.push_read_page("https://example.com/", "Example", "plain page text");
 
-    let result = run_read_page(&db, &cdp, "arthur").await;
+    let result = run_read_page(&db, &cdp, &resolver, "arthur").await;
 
     assert!(
         result.contains("<<<TOOL_OUTPUT_DATA>>>"),
         "expected the untrusted-data fence, got {result:?}"
     );
     assert!(result.contains("plain page text"));
-    // read_page never navigates - only opens/reuses the window and reads.
+    // read_page never navigates - only opens/reuses the window, reads, and
+    // (S8b-04) checks the url it just read. No blank-out - the page is
+    // allowed.
     assert_eq!(
         cdp.sequence(),
         vec![
@@ -490,6 +498,64 @@ async fn read_page_fences_the_pages_own_text_too() {
             "call(target-1,Runtime.evaluate)".to_string(),
             "call(target-1,Runtime.evaluate)".to_string(),
         ]
+    );
+}
+
+/// 🔴 S8b-04 BITE (a) target. `read_page` used to take no `Resolver` at all
+/// and return whatever the tab showed, unconditionally - the shorter path
+/// to the same private page S8b-03's redirect fix left open: `browse` an
+/// allowed public page, `click` a link into a private address (bite (b)
+/// below), then `read_page` with no fence whatsoever. This proves
+/// `read_page` alone now refuses when the window is ALREADY parked on a
+/// private address, body never returned - the observable is whether
+/// `"SSRF-PROOF-INSTANCE-CREDENTIALS"` is present in `result` at all.
+///
+/// GUARD-PRESENT world (this test, as written): `run_read_page` re-runs
+/// `may_visit` on `view.url` after `desk::read_page` returns, sees a
+/// private address, and returns the refusal before `format_page` (and
+/// therefore `fence_tool_output`) ever touches `view.text`.
+///
+/// GUARD-REMOVED world (this ticket's Results has the literal red): comment
+/// out the `if let Some(refusal) = refusal_for_url(...)` block in
+/// `run_read_page` (`crates/server/src/tools/browse.rs`) so it falls
+/// straight through to `format_page(&view)` - this test then fails because
+/// `result` contains the metadata-service body verbatim.
+#[tokio::test]
+async fn read_page_refuses_when_the_window_is_showing_a_private_address_and_never_returns_its_body()
+{
+    let db = db();
+    let cdp = FakeCdp::new();
+    let resolver = RecordingResolver::new(vec!["8.8.8.8".to_string()]);
+
+    cdp.push_create_window("target-1");
+    cdp.push_read_page(
+        "http://169.254.169.254/latest/meta-data/iam/security-credentials/",
+        "",
+        "SSRF-PROOF-INSTANCE-CREDENTIALS",
+    );
+    cdp.push_call_ok(serde_json::json!({})); // the blank-out Page.navigate this ticket adds
+
+    let result = run_read_page(&db, &cdp, &resolver, "arthur").await;
+
+    assert!(
+        !result.contains("SSRF-PROOF-INSTANCE-CREDENTIALS"),
+        "the private page's body must never reach the caller: {result:?}"
+    );
+    assert!(
+        result.contains("169.254.169.254") && result.contains("not allowed"),
+        "expected a refusal naming what happened: {result:?}"
+    );
+    assert_eq!(
+        cdp.sequence(),
+        vec![
+            "create_window(about:blank)".to_string(),
+            "call(target-1,Runtime.evaluate)".to_string(),
+            "call(target-1,Runtime.evaluate)".to_string(),
+            "call(target-1,Runtime.evaluate)".to_string(),
+            "call(target-1,Page.navigate)".to_string(),
+        ],
+        "expected the three reads, then the about:blank blank-out: {:?}",
+        cdp.sequence()
     );
 }
 
@@ -590,23 +656,101 @@ async fn browse_turns_a_cdp_failure_into_a_sentence() {
 async fn click_finds_the_match_and_fences_the_result() {
     let db = db();
     let cdp = FakeCdp::new();
+    let resolver = RecordingResolver::new(vec!["8.8.8.8".to_string()]);
     cdp.push_create_window("target-1");
     cdp.push_call_ok(serde_json::json!({"result": {"value": "clicked: Sign In"}}));
+    // S8b-04: run_click re-checks wherever the tab ended up after the
+    // click - here, an ordinary public page, so nothing is refused.
+    cdp.push_call_ok(serde_json::json!({"result": {"value": "https://example.com/dashboard"}}));
 
-    let result = run_click(&db, &cdp, "arthur", r#"{"text":"Sign In"}"#).await;
+    let result = run_click(&db, &cdp, &resolver, "arthur", r#"{"text":"Sign In"}"#).await;
 
     assert!(
         result.contains("<<<TOOL_OUTPUT_DATA>>>") && result.contains("<<<END_TOOL_OUTPUT_DATA>>>"),
         "expected the untrusted-data fence around the click result, got {result:?}"
     );
     assert!(result.contains("clicked: Sign In"));
-    // No navigation happened - only a window open and one evaluate call.
+    // No navigation happened on the FAKE's part (it does not simulate real
+    // clicks), but S8b-04 still runs the post-click url check - a window
+    // open, the click's own evaluate, then the current_url check.
     assert_eq!(
         cdp.sequence(),
         vec![
             "create_window(about:blank)".to_string(),
             "call(target-1,Runtime.evaluate)".to_string(),
+            "call(target-1,Runtime.evaluate)".to_string(),
         ]
+    );
+}
+
+/// 🔴 S8b-04 BITE (b) target. `click` used to validate nothing at all: a
+/// click that navigated the tab to a private address (a link an attacker
+/// controls the label AND the `href` of) reported success and left the
+/// private page loaded for a later `read_page` to hand back verbatim. This
+/// proves `click` itself now refuses once it sees where the click landed -
+/// the observable is whether the click's own page-derived label
+/// (`"Instance Credentials"`) or its `"clicked: ..."` success shape reaches
+/// `result` at all.
+///
+/// GUARD-PRESENT world (this test, as written): `run_click` calls
+/// `refuse_if_now_showing_a_blocked_page` after `desk::click_text` returns,
+/// sees the private address, and returns the refusal before
+/// `fence_tool_output(&result)` (the click's own success text) ever runs.
+///
+/// GUARD-REMOVED world (this ticket's Results has the literal red): comment
+/// out the `if let Err(refusal) = refuse_if_now_showing_a_blocked_page(...)`
+/// block in `run_click` (`crates/server/src/tools/browse.rs`) so it falls
+/// straight through to `fence_tool_output(&result)` - this test then fails
+/// because `result` contains `"clicked: Instance Credentials"` verbatim.
+#[tokio::test]
+async fn click_that_navigates_to_a_private_address_does_not_report_success_and_does_not_leak() {
+    let db = db();
+    let cdp = FakeCdp::new();
+    let resolver = RecordingResolver::new(vec!["8.8.8.8".to_string()]);
+
+    cdp.push_create_window("target-1");
+    // The click itself "succeeds" from Chromium's point of view - it found
+    // and clicked a matching element. The label is page-derived, i.e.
+    // attacker-controlled.
+    cdp.push_call_ok(serde_json::json!({"result": {"value": "clicked: Instance Credentials"}}));
+    // ...but that element's href navigated the tab to the cloud metadata
+    // address.
+    cdp.push_call_ok(serde_json::json!({
+        "result": {"value": "http://169.254.169.254/latest/meta-data/iam/security-credentials/"}
+    }));
+    cdp.push_call_ok(serde_json::json!({})); // the blank-out Page.navigate this ticket adds
+
+    let result = run_click(
+        &db,
+        &cdp,
+        &resolver,
+        "arthur",
+        r#"{"text":"Instance Credentials"}"#,
+    )
+    .await;
+
+    assert!(
+        !result.contains("clicked:"),
+        "a click that landed on a refused address must never report success: {result:?}"
+    );
+    assert!(
+        !result.contains("Instance Credentials"),
+        "the click's own page-derived label must not reach the caller once the destination is refused: {result:?}"
+    );
+    assert!(
+        result.contains("169.254.169.254") && result.contains("not allowed"),
+        "expected a refusal naming what happened: {result:?}"
+    );
+    assert_eq!(
+        cdp.sequence(),
+        vec![
+            "create_window(about:blank)".to_string(),
+            "call(target-1,Runtime.evaluate)".to_string(), // click_text
+            "call(target-1,Runtime.evaluate)".to_string(), // current_url check
+            "call(target-1,Page.navigate)".to_string(),    // blank-out
+        ],
+        "expected the click, the post-click url check, then the blank-out: {:?}",
+        cdp.sequence()
     );
 }
 
@@ -631,10 +775,13 @@ async fn click_finds_the_match_and_fences_the_result() {
 async fn click_on_absent_text_reports_failure_not_success() {
     let db = db();
     let cdp = FakeCdp::new();
+    let resolver = RecordingResolver::new(vec!["8.8.8.8".to_string()]);
     cdp.push_create_window("target-1");
     cdp.push_call_ok(serde_json::json!({"result": {"value": "nothing on this page says that"}}));
+    // No match, no navigation - the page is still the same ordinary one.
+    cdp.push_call_ok(serde_json::json!({"result": {"value": "https://example.com/"}}));
 
-    let result = run_click(&db, &cdp, "arthur", r#"{"text":"Sign In"}"#).await;
+    let result = run_click(&db, &cdp, &resolver, "arthur", r#"{"text":"Sign In"}"#).await;
 
     assert!(
         result.contains("nothing on this page says that"),
@@ -657,11 +804,13 @@ async fn click_on_absent_text_reports_failure_not_success() {
 async fn click_with_no_text_is_refused_before_touching_cdp() {
     let db = db();
     let cdp = FakeCdp::new();
+    let resolver = RecordingResolver::new(vec!["8.8.8.8".to_string()]);
 
-    let result = run_click(&db, &cdp, "arthur", r#"{"text":""}"#).await;
+    let result = run_click(&db, &cdp, &resolver, "arthur", r#"{"text":""}"#).await;
 
     assert_eq!(result, "No text was given.");
     assert!(cdp.sequence().is_empty());
+    assert_eq!(resolver.call_count(), 0);
 }
 
 /// Happy path for `type_text`: same window handling as `click`, delegating
@@ -670,12 +819,17 @@ async fn click_with_no_text_is_refused_before_touching_cdp() {
 async fn type_text_fills_the_field_and_fences_the_result() {
     let db = db();
     let cdp = FakeCdp::new();
+    let resolver = RecordingResolver::new(vec!["8.8.8.8".to_string()]);
     cdp.push_create_window("target-1");
     cdp.push_call_ok(serde_json::json!({"result": {"value": "typed into email"}}));
+    // S8b-04: run_type_text re-checks the page afterward too, defensively -
+    // an ordinary field does not navigate, so nothing is refused here.
+    cdp.push_call_ok(serde_json::json!({"result": {"value": "https://example.com/form"}}));
 
     let result = run_type_text(
         &db,
         &cdp,
+        &resolver,
         "arthur",
         r##"{"selector":"#email","text":"josh@example.com"}"##,
     )
@@ -697,12 +851,15 @@ async fn type_text_fills_the_field_and_fences_the_result() {
 async fn type_text_into_absent_selector_reports_failure_not_success() {
     let db = db();
     let cdp = FakeCdp::new();
+    let resolver = RecordingResolver::new(vec!["8.8.8.8".to_string()]);
     cdp.push_create_window("target-1");
     cdp.push_call_ok(serde_json::json!({"result": {"value": "no field matches that selector"}}));
+    cdp.push_call_ok(serde_json::json!({"result": {"value": "https://example.com/form"}}));
 
     let result = run_type_text(
         &db,
         &cdp,
+        &resolver,
         "arthur",
         r##"{"selector":"#missing","text":"hello"}"##,
     )
@@ -728,9 +885,18 @@ async fn type_text_into_absent_selector_reports_failure_not_success() {
 async fn type_text_with_no_selector_is_refused_before_touching_cdp() {
     let db = db();
     let cdp = FakeCdp::new();
+    let resolver = RecordingResolver::new(vec!["8.8.8.8".to_string()]);
 
-    let result = run_type_text(&db, &cdp, "arthur", r#"{"selector":"","text":"hello"}"#).await;
+    let result = run_type_text(
+        &db,
+        &cdp,
+        &resolver,
+        "arthur",
+        r#"{"selector":"","text":"hello"}"#,
+    )
+    .await;
 
     assert_eq!(result, "No selector was given.");
     assert!(cdp.sequence().is_empty());
+    assert_eq!(resolver.call_count(), 0);
 }

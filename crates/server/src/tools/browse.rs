@@ -31,9 +31,31 @@
 //! private address and its content would come back with an honest, correct
 //! final url attached. `navigate_and_read` now re-runs `may_visit` on the
 //! `PageView`'s own url once `read_page` returns, and refuses (without
-//! returning the body) if that final url fails the fence. `run_read_page`/
-//! `run_click`/`run_type_text` do NOT get this check - see
-//! `run_read_page`'s S8b-03 doc for why that is a named gap, not a fixed one.
+//! returning the body) if that final url fails the fence.
+//!
+//! 🔴 **S8b-04: `run_read_page`/`run_click`/`run_type_text` had NO fence at
+//! all**, which was a strictly shorter path to the same private page:
+//! `browse` an allowed public page, `click` a link pointing at
+//! `169.254.169.254`/`127.0.0.1`/a LAN address (`click` validated nothing),
+//! then `read_page` (which also validated nothing) - three tools, zero
+//! fences after the first. All three now take a `Resolver` and run the same
+//! `may_visit` check `navigate_and_read` runs, via `refusal_for_url`/
+//! `refuse_if_now_showing_a_blocked_page` below:
+//! - `read_page` checks the url it just read, the same way `navigate_and_read`
+//!   checks the url `browse`'s own read just came back with - no extra `Cdp`
+//!   call, the url is already in hand.
+//! - `click`/`type_text` never issue the navigation themselves (only
+//!   `browse` does) - a click's destination is a side effect of the click,
+//!   so the check runs AFTER the action, against wherever the tab actually
+//!   ended up (`desk::current_url`), the same "necessarily after" reasoning
+//!   `navigate_and_read` already documents for `browse`'s own redirect case.
+//!   Chromium DOES fetch the private page into the tab either way; the
+//!   boundary this closes is that its content never reaches the model.
+//! - Refusal from any of the three returns the same shape `navigate_and_read`
+//!   returns for `browse`: a sentence naming what happened, never the page's
+//!   own text, and never the tool's own "success" shape (`click`'s
+//!   `"clicked: ..."`, `type_text`'s `"typed into ..."`) - a click that
+//!   landed somewhere refused must not read back as a click that succeeded.
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -293,33 +315,91 @@ async fn navigate_and_read(
     Ok(view)
 }
 
+/// S8b-04: the same final-url fence `navigate_and_read` (S8b-03) already
+/// runs on a `browse` redirect, applied to whatever url is passed in.
+/// `run_read_page` already has a `PageView` in hand (it always reads the
+/// page to return its content) and passes `view.url` straight through -
+/// no extra `Cdp` call. `run_click`/`run_type_text` never have a
+/// `PageView` (they don't return page content), so they fetch the url
+/// fresh via `refuse_if_now_showing_a_blocked_page` below instead.
+///
+/// Returns the message the caller should return IN PLACE of whatever it
+/// was about to say, or `None` if the current page is allowed and the
+/// caller should proceed normally. Never returns the page's own text
+/// either way - this only ever sees a url string.
+async fn refusal_for_url(
+    cdp: &dyn Cdp,
+    resolver: &dyn Resolver,
+    target_id: &str,
+    url: &str,
+) -> Option<String> {
+    let refusal = desk::may_visit(url, resolver).await.err()?;
+    // Best-effort blank-out, same reasoning as `navigate_and_read`'s own
+    // (S8b-03): the private page is already loaded in this tab, so this
+    // just stops it sitting there for a LATER read_page/click/type_text on
+    // the same window. Its own outcome is discarded - a failed blank-out
+    // must not turn a successful refusal into a reported transport error.
+    let _ = cdp
+        .call(target_id, "Page.navigate", json!({ "url": "about:blank" }))
+        .await;
+    Some(format!(
+        "Refused: your window is showing {url}, which is not allowed ({})",
+        refusal.error
+    ))
+}
+
+/// S8b-04: `click`/`type_text` never issue a navigation themselves (only
+/// `browse` does) - whatever the tab shows afterward is a SIDE EFFECT of
+/// the click (a link, a submit button) or, defensively, of `type_text` (a
+/// field's own `input`/`change` handler could navigate). So unlike
+/// `browse`'s own url, there is nothing to check BEFORE the action runs;
+/// the check can only run after, against wherever the tab actually landed.
+/// Chromium already fetched that page into the tab by the time this runs -
+/// the model never seeing its BODY is the boundary this enforces, not
+/// preventing the fetch itself (same distinction `navigate_and_read`'s own
+/// doc draws for `browse`'s redirect case).
+async fn refuse_if_now_showing_a_blocked_page(
+    cdp: &dyn Cdp,
+    resolver: &dyn Resolver,
+    target_id: &str,
+) -> Result<(), String> {
+    let url = desk::current_url(cdp, target_id)
+        .await
+        .map_err(|err| transport_failure(&err))?;
+    match refusal_for_url(cdp, resolver, target_id, &url).await {
+        Some(msg) => Err(msg),
+        None => Ok(()),
+    }
+}
+
 /// Runs `read_page`: whatever the bot's window currently shows, no
 /// navigation - opens the window first if this bot has never browsed yet,
 /// matching TS's own `windowFor` call ahead of `readPage` (`app.ts:7092,
 /// 7106`).
 ///
-/// 🔴 **S8b-03 named gap, not a fixed one.** This function has NEVER
-/// re-checked `location.href` against `may_visit` - not even for the
-/// original `browse` navigation, since `run_browse`'s new redirect check
-/// lives in `navigate_and_read`, one call up. That is fine for the
-/// `browse`-then-`read_page` sequence (the redirect check already ran),
-/// but `click` can navigate the page too (any link/button it matches), and
-/// a `read_page` called after THAT click has no fence at all - not "first
-/// hop only" the way `browse` used to, but no check whatsoever. Closing
-/// that means either giving `read_page` its own `Resolver` and running the
-/// same check here, or having `click`/`type_text` run it themselves; either
-/// is a real design decision (this function currently takes no `Resolver`
-/// at all) that deserves its own ticket and its own tests, not a fold-in
-/// here. Left open deliberately - see this ticket's Result for why.
-pub async fn run_read_page(db: &Arc<Mutex<Db>>, cdp: &dyn Cdp, bot_id: &str) -> String {
+/// 🔴 **S8b-04 closes the named gap S8b-03 left open**: this now takes a
+/// `Resolver` and re-runs `may_visit` on the url it just read, the same
+/// fence `browse`'s own redirect check runs - a bot that reached this
+/// page via a `click` that navigated somewhere refused gets refused here
+/// too, body never returned.
+pub async fn run_read_page(
+    db: &Arc<Mutex<Db>>,
+    cdp: &dyn Cdp,
+    resolver: &dyn Resolver,
+    bot_id: &str,
+) -> String {
     let target_id = match window_for_locked(db, cdp, bot_id).await {
         Ok(id) => id,
         Err(err) => return transport_failure(&err),
     };
-    match desk::read_page(cdp, &target_id).await {
-        Ok(view) => format_page(&view),
-        Err(err) => transport_failure(&err),
+    let view = match desk::read_page(cdp, &target_id).await {
+        Ok(view) => view,
+        Err(err) => return transport_failure(&err),
+    };
+    if let Some(refusal) = refusal_for_url(cdp, resolver, &target_id, &view.url).await {
+        return refusal;
     }
+    format_page(&view)
 }
 
 #[derive(Deserialize, Default)]
@@ -353,7 +433,20 @@ struct TypeTextArgs {
 /// one branch that is NOT page-derived (a bot called `click` with an empty
 /// `text`, refused before `Cdp` is ever touched, same shape as
 /// `run_browse`'s empty-`url` guard) and stays unfenced accordingly.
-pub async fn run_click(db: &Arc<Mutex<Db>>, cdp: &dyn Cdp, bot_id: &str, args: &str) -> String {
+///
+/// 🔴 **S8b-04**: a click can navigate the page as its own side effect (any
+/// link/button it matches), so after `desk::click_text` runs, this re-checks
+/// wherever the tab ended up (`refuse_if_now_showing_a_blocked_page`) BEFORE
+/// deciding what to return. A click that landed on a refused address never
+/// reaches the `fence_tool_output(&result)` arm below - it returns the
+/// refusal sentence instead, so it can never read back as `"clicked: ..."`.
+pub async fn run_click(
+    db: &Arc<Mutex<Db>>,
+    cdp: &dyn Cdp,
+    resolver: &dyn Resolver,
+    bot_id: &str,
+    args: &str,
+) -> String {
     let parsed: ClickArgs = serde_json::from_str(args).unwrap_or_default();
     let text = parsed.text.trim();
     if text.is_empty() {
@@ -365,16 +458,31 @@ pub async fn run_click(db: &Arc<Mutex<Db>>, cdp: &dyn Cdp, bot_id: &str, args: &
         Err(err) => return transport_failure(&err),
     };
 
-    match desk::click_text(cdp, &target_id, text).await {
-        Ok(result) => fence_tool_output(&result),
-        Err(err) => transport_failure(&err),
+    let result = match desk::click_text(cdp, &target_id, text).await {
+        Ok(result) => result,
+        Err(err) => return transport_failure(&err),
+    };
+
+    if let Err(refusal) = refuse_if_now_showing_a_blocked_page(cdp, resolver, &target_id).await {
+        return refusal;
     }
+
+    fence_tool_output(&result)
 }
 
 /// Runs `type_text`: same window handling as `run_click`, delegating the
 /// field lookup/fill to `desk::type_into`. TS dispatch: `app.ts:7097-7103`.
-/// Same fencing/refusal shape as `run_click` - see that function's doc.
-pub async fn run_type_text(db: &Arc<Mutex<Db>>, cdp: &dyn Cdp, bot_id: &str, args: &str) -> String {
+/// Same fencing/refusal shape as `run_click` - see that function's doc,
+/// including the S8b-04 post-action fence: typing does not itself navigate
+/// in the ordinary case, but a field's own `input`/`change` handler could,
+/// so this checks defensively rather than assuming it never will.
+pub async fn run_type_text(
+    db: &Arc<Mutex<Db>>,
+    cdp: &dyn Cdp,
+    resolver: &dyn Resolver,
+    bot_id: &str,
+    args: &str,
+) -> String {
     let parsed: TypeTextArgs = serde_json::from_str(args).unwrap_or_default();
     let selector = parsed.selector.trim();
     if selector.is_empty() {
@@ -386,8 +494,14 @@ pub async fn run_type_text(db: &Arc<Mutex<Db>>, cdp: &dyn Cdp, bot_id: &str, arg
         Err(err) => return transport_failure(&err),
     };
 
-    match desk::type_into(cdp, &target_id, selector, &parsed.text).await {
-        Ok(result) => fence_tool_output(&result),
-        Err(err) => transport_failure(&err),
+    let result = match desk::type_into(cdp, &target_id, selector, &parsed.text).await {
+        Ok(result) => result,
+        Err(err) => return transport_failure(&err),
+    };
+
+    if let Err(refusal) = refuse_if_now_showing_a_blocked_page(cdp, resolver, &target_id).await {
+        return refusal;
     }
+
+    fence_tool_output(&result)
 }
