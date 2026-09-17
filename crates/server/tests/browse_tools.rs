@@ -257,6 +257,145 @@ async fn browse_refuses_a_blocked_host_before_ever_touching_cdp() {
     assert_eq!(resolver.call_count(), 1);
 }
 
+/// 🔴 S8b-03 BITE (a) target. `may_visit` only validates the url a bot
+/// ASKED for, before navigation. Chromium follows redirects on its own; this
+/// proves the FINAL url (as `read_page` reports it, from `location.href`)
+/// is re-checked, and that a private-address landing spot never lets the
+/// page's body reach the caller - the observable is whether the body text
+/// (`"SSRF-PROOF-INSTANCE-CREDENTIALS"`) is present in `result` at all.
+///
+/// GUARD-PRESENT world (this test, as written): `navigate_and_read` re-runs
+/// `may_visit` on `view.url` after `read_page` returns, sees a private
+/// address, and returns `NavigateOutcome::Refused` before `format_page`
+/// (and therefore `fence_tool_output`) ever touches `view.text` - so the
+/// body never reaches `result` and the fake's sequence shows a SECOND
+/// `Page.navigate` (the about:blank blank-out).
+///
+/// GUARD-REMOVED world (this ticket's Results has the literal red): comment
+/// out the `if let Err(refusal) = desk::may_visit(&view.url, resolver)...`
+/// block in `navigate_and_read` (`crates/server/src/tools/browse.rs`) so it
+/// falls straight through to `Ok(view)` - this test then fails because
+/// `result` contains the metadata-service body verbatim.
+#[tokio::test]
+async fn browse_refuses_a_redirect_to_a_private_address_and_never_returns_its_body() {
+    let db = db();
+    let cdp = FakeCdp::new();
+    // The url the bot ASKED for is public and passes may_visit outright -
+    // the resolver ignores which host it is asked about and always answers
+    // 8.8.8.8, so this ONLY proves the redirect-time re-check, not the
+    // first-hop check bite (a) in the OTHER test above already covers.
+    let resolver = RecordingResolver::new(vec!["8.8.8.8".to_string()]);
+
+    cdp.push_create_window("target-1");
+    cdp.push_call_ok(serde_json::json!({})); // Page.enable
+    cdp.push_call_ok(serde_json::json!({})); // Page.navigate (to the requested, public url)
+    // Chromium followed a redirect on its own; read_page reports where it
+    // ACTUALLY landed - the cloud metadata address, with a recognisable body.
+    cdp.push_read_page(
+        "http://169.254.169.254/latest/meta-data/iam/security-credentials/",
+        "",
+        "SSRF-PROOF-INSTANCE-CREDENTIALS",
+    );
+    cdp.push_call_ok(serde_json::json!({})); // the blank-out Page.navigate this ticket adds
+
+    let result = run_browse(
+        &db,
+        &cdp,
+        &resolver,
+        "arthur",
+        r#"{"url":"https://evil.example.com/redirect-me"}"#,
+        Some(0),
+    )
+    .await;
+
+    assert!(
+        !result.contains("SSRF-PROOF-INSTANCE-CREDENTIALS"),
+        "the private page's body must never reach the caller: {result:?}"
+    );
+    assert!(
+        result.contains("169.254.169.254") && result.contains("not allowed"),
+        "expected a refusal naming what happened: {result:?}"
+    );
+    assert_eq!(
+        cdp.sequence(),
+        vec![
+            "create_window(about:blank)".to_string(),
+            "call(target-1,Page.enable)".to_string(),
+            "call(target-1,Page.navigate)".to_string(),
+            "call(target-1,Runtime.evaluate)".to_string(),
+            "call(target-1,Runtime.evaluate)".to_string(),
+            "call(target-1,Runtime.evaluate)".to_string(),
+            "call(target-1,Page.navigate)".to_string(),
+        ],
+        "expected enable, navigate, three reads, then the about:blank blank-out: {:?}",
+        cdp.sequence()
+    );
+}
+
+/// 🔴 S8b-03 regression guard for the test above - NOT a bite. This must
+/// pass in BOTH worlds (guard present or removed): a redirect to a
+/// DIFFERENT PUBLIC host is completely ordinary (`http`->`https`, `www`->
+/// apex, URL shorteners all do this) and must keep returning its content.
+/// It exists so a fix that refuses every redirect - "guard-removed" in the
+/// bite above would trivially pass a version of `navigate_and_read` that
+/// refused ANYTHING that didn't match the original host - gets caught here
+/// instead.
+#[tokio::test]
+async fn browse_still_returns_content_after_an_ordinary_public_redirect() {
+    let db = db();
+    let cdp = FakeCdp::new();
+    let resolver = RecordingResolver::new(vec!["93.184.216.34".to_string()]);
+
+    cdp.push_create_window("target-1");
+    cdp.push_call_ok(serde_json::json!({})); // Page.enable
+    cdp.push_call_ok(serde_json::json!({})); // Page.navigate (to the shortener)
+    // A url shortener redirecting to a different public host - ordinary,
+    // legitimate, and must keep working.
+    cdp.push_read_page(
+        "https://www.example.org/real-article",
+        "The Real Article",
+        "the actual page content, unbothered by the redirect",
+    );
+
+    let result = run_browse(
+        &db,
+        &cdp,
+        &resolver,
+        "arthur",
+        r#"{"url":"https://short.link/abc123"}"#,
+        Some(0),
+    )
+    .await;
+
+    assert!(
+        result.contains("The Real Article"),
+        "expected the title: {result}"
+    );
+    assert!(
+        result.contains("https://www.example.org/real-article"),
+        "expected the final url: {result}"
+    );
+    assert!(
+        result.contains("the actual page content, unbothered by the redirect"),
+        "expected the page content to come through: {result}"
+    );
+    // No blank-out navigate - the redirect was allowed, so there is nothing
+    // to blank. Exactly the happy-path sequence, nothing extra.
+    assert_eq!(
+        cdp.sequence(),
+        vec![
+            "create_window(about:blank)".to_string(),
+            "call(target-1,Page.enable)".to_string(),
+            "call(target-1,Page.navigate)".to_string(),
+            "call(target-1,Runtime.evaluate)".to_string(),
+            "call(target-1,Runtime.evaluate)".to_string(),
+            "call(target-1,Runtime.evaluate)".to_string(),
+        ],
+        "an ordinary public redirect must not trigger the blank-out: {:?}",
+        cdp.sequence()
+    );
+}
+
 #[tokio::test]
 async fn browse_refuses_an_empty_url_before_ever_touching_cdp() {
     let db = db();

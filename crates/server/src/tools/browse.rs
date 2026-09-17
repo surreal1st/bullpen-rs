@@ -23,6 +23,17 @@
 //! `crate::egress::decide_connect`) gates every navigation, and it runs
 //! BEFORE `window_for_locked` ever touches the `Cdp` - see
 //! `run_browse`'s own doc and this ticket's bite (a).
+//!
+//! 🔴 **S8b-03: that first check is not enough on its own.** `may_visit`
+//! only validates the url a bot ASKED for; Chromium follows redirects on
+//! its own after `Page.navigate`, and until S8b-03 nothing re-checked where
+//! it actually landed - an attacker-controlled public url could 302 to a
+//! private address and its content would come back with an honest, correct
+//! final url attached. `navigate_and_read` now re-runs `may_visit` on the
+//! `PageView`'s own url once `read_page` returns, and refuses (without
+//! returning the body) if that final url fails the fence. `run_read_page`/
+//! `run_click`/`run_type_text` do NOT get this check - see
+//! `run_read_page`'s S8b-03 doc for why that is a named gap, not a fixed one.
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -199,40 +210,107 @@ pub async fn run_browse(
         Err(refusal) => return refusal.error,
     };
 
-    match navigate_and_read(db, cdp, bot_id, url.as_str(), settle_ms).await {
+    match navigate_and_read(db, cdp, resolver, bot_id, raw_url, url.as_str(), settle_ms).await {
         Ok(view) => format_page(&view),
-        Err(err) => transport_failure(&err),
+        Err(NavigateOutcome::Refused(msg)) => msg,
+        Err(NavigateOutcome::Transport(err)) => transport_failure(&err),
     }
 }
 
+/// `navigate_and_read`'s two distinct failure shapes - kept apart so
+/// `run_browse` never mislabels a security refusal as `transport_failure`'s
+/// "the shared computer did not answer" (the computer answered fine; it
+/// answered with a page that is not allowed).
+enum NavigateOutcome {
+    /// A `Cdp` call itself errored (desk down, target vanished mid-call,
+    /// `HttpCdp`'s own unfinished WebSocket half).
+    Transport(String),
+    /// S8b-03: the page's FINAL url (after Chromium followed whatever
+    /// redirects it issued) failed the same fence `may_visit` already ran
+    /// on the url the bot asked for. Message is already what the model
+    /// should see, unwrapped.
+    Refused(String),
+}
+
 /// The part of `desk::browse` that happens once `may_visit` has already
-/// said yes - open/reuse the window, enable+navigate, settle, read. Mirrors
+/// said yes for the REQUESTED url - open/reuse the window, enable+navigate,
+/// settle, read, then (S8b-03) re-check the url actually landed on. Mirrors
 /// `desk::browse`'s own sequencing exactly (see that function's doc on why
-/// the URL is re-read from `location.href` rather than trusted as given);
-/// duplicated here rather than called because `desk::browse` needs `&Db`
-/// held across its own awaits (see `window_for_locked`'s doc).
+/// the URL is re-read from `location.href` rather than trusted as given, and
+/// on the same redirect fence); duplicated here rather than called because
+/// `desk::browse` needs `&Db` held across its own awaits (see
+/// `window_for_locked`'s doc). Both copies were patched for S8b-03 - see
+/// this ticket's Results for why fixing only one would have left the other,
+/// reachable one exploitable.
+///
+/// `raw_url` is the url the bot ASKED for (before `may_visit` parsed it) -
+/// kept only so a refusal message can say "asked for A, got sent to B".
 async fn navigate_and_read(
     db: &Arc<Mutex<Db>>,
     cdp: &dyn Cdp,
+    resolver: &dyn Resolver,
     bot_id: &str,
+    raw_url: &str,
     url: &str,
     settle_ms: Option<u64>,
-) -> Result<PageView, String> {
-    let target_id = window_for_locked(db, cdp, bot_id).await?;
-    cdp.call(&target_id, "Page.enable", json!({})).await?;
+) -> Result<PageView, NavigateOutcome> {
+    let target_id = window_for_locked(db, cdp, bot_id)
+        .await
+        .map_err(NavigateOutcome::Transport)?;
+    cdp.call(&target_id, "Page.enable", json!({}))
+        .await
+        .map_err(NavigateOutcome::Transport)?;
     cdp.call(&target_id, "Page.navigate", json!({ "url": url }))
-        .await?;
+        .await
+        .map_err(NavigateOutcome::Transport)?;
     tokio::time::sleep(std::time::Duration::from_millis(
         settle_ms.unwrap_or(desk::SETTLE_MS),
     ))
     .await;
-    desk::read_page(cdp, &target_id).await
+    let view = desk::read_page(cdp, &target_id)
+        .await
+        .map_err(NavigateOutcome::Transport)?;
+
+    // S8b-03 (`DEFERRED.md` F15a): re-run the fence on the FINAL url, reusing
+    // `may_visit` rather than a second, narrower check - see `desk::browse`'s
+    // matching comment for the DNS-cost/duplication reasoning, identical here.
+    if let Err(refusal) = desk::may_visit(&view.url, resolver).await {
+        // Best-effort blank-out: the private page is already loaded in this
+        // tab. The model never seeing its body is enforced below (`view` is
+        // never returned as `Ok`); this just stops the tab holding it for a
+        // later `read_page`/`click`/`type_text` call on the same window. Its
+        // own outcome is discarded - a failed blank-out must not turn a
+        // successful refusal into a reported transport error.
+        let _ = cdp
+            .call(&target_id, "Page.navigate", json!({ "url": "about:blank" }))
+            .await;
+        return Err(NavigateOutcome::Refused(format!(
+            "Refused: asked to browse {raw_url}, but the page redirected to {}, which is not allowed ({})",
+            view.url, refusal.error
+        )));
+    }
+
+    Ok(view)
 }
 
 /// Runs `read_page`: whatever the bot's window currently shows, no
 /// navigation - opens the window first if this bot has never browsed yet,
 /// matching TS's own `windowFor` call ahead of `readPage` (`app.ts:7092,
 /// 7106`).
+///
+/// 🔴 **S8b-03 named gap, not a fixed one.** This function has NEVER
+/// re-checked `location.href` against `may_visit` - not even for the
+/// original `browse` navigation, since `run_browse`'s new redirect check
+/// lives in `navigate_and_read`, one call up. That is fine for the
+/// `browse`-then-`read_page` sequence (the redirect check already ran),
+/// but `click` can navigate the page too (any link/button it matches), and
+/// a `read_page` called after THAT click has no fence at all - not "first
+/// hop only" the way `browse` used to, but no check whatsoever. Closing
+/// that means either giving `read_page` its own `Resolver` and running the
+/// same check here, or having `click`/`type_text` run it themselves; either
+/// is a real design decision (this function currently takes no `Resolver`
+/// at all) that deserves its own ticket and its own tests, not a fold-in
+/// here. Left open deliberately - see this ticket's Result for why.
 pub async fn run_read_page(db: &Arc<Mutex<Db>>, cdp: &dyn Cdp, bot_id: &str) -> String {
     let target_id = match window_for_locked(db, cdp, bot_id).await {
         Ok(id) => id,

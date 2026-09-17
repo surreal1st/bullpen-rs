@@ -419,7 +419,47 @@ pub async fn browse(
     // page that redirected somewhere else is a different page from the one
     // that was asked for, and a bot that does not notice will describe the
     // wrong thing with confidence.
-    read_page(cdp, &target_id).await
+    let view = read_page(cdp, &target_id).await?;
+
+    // S8b-03 (`DEFERRED.md` F15a): `may_visit` above only validated the url
+    // the bot ASKED for. Chromium follows redirects on its own between
+    // `Page.navigate` and here, and nothing re-checked where it actually
+    // landed - an attacker-controlled public url that 302s to
+    // `169.254.169.254`/`127.0.0.1`/a LAN address would otherwise hand that
+    // private page's content back with an honest, correct final url
+    // attached. Re-run the SAME fence on the FINAL url, reusing `may_visit`
+    // rather than a second, narrower check: `may_visit` already re-parses
+    // and re-resolves (one extra DNS round trip), which is negligible next
+    // to the page load/settle this function already just paid for, and a
+    // hand-rolled duplicate of `decide_connect`'s private-address/
+    // DNS-rebinding logic is exactly the trap this module's own header
+    // already warns about for `may_visit` itself (see that function's doc,
+    // "Judgment call, not silently absorbed").
+    if let Err(refusal) = may_visit(&view.url, resolver).await {
+        // The VM's Chromium already fetched the private page into this tab
+        // before this check ever ran - the model never seeing its BODY is
+        // the actual security boundary, and that is enforced by returning
+        // `Err` below instead of `Ok(view)` (the caller never gets `view`,
+        // let alone `view.text`). But leaving the tab parked on a private
+        // page is a smaller, real exposure of its own: a later `read_page`
+        // (or `click`/`type_text`, which reuse this same window) would see
+        // it with no redirect involved at all. Best-effort only - a second
+        // navigation failing here must not turn a successful REFUSAL into a
+        // reported error, so its own result is discarded.
+        let _ = cdp
+            .call(
+                &target_id,
+                "Page.navigate",
+                serde_json::json!({ "url": "about:blank" }),
+            )
+            .await;
+        return Err(format!(
+            "Refused: asked to browse {raw_url}, but the page redirected to {}, which is not allowed ({})",
+            view.url, refusal.error
+        ));
+    }
+
+    Ok(view)
 }
 
 /// Clicks the first link or button whose visible text contains `text`.
