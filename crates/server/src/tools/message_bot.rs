@@ -21,7 +21,7 @@ use serde_json::json;
 use store::{Db, NewMessage};
 
 use crate::prompt::{self, HistoryTurn};
-use crate::tools::{RoomHook, lock_db};
+use crate::tools::{RoomHook, fence_tool_output, lock_db};
 
 pub fn spec() -> ToolSpec {
     ToolSpec {
@@ -134,6 +134,13 @@ pub async fn run(
                 None,
             );
         }
+        // S8b-06 Decision: not fenced. `question` here is an ECHO of what
+        // the CALLING bot itself just typed as this same tool call's own
+        // argument, not a second party's output - the model already holds
+        // every byte of it in its own context before this call returns.
+        // Confirming what you just said back to you introduces nothing new
+        // to launder, unlike the bot-reply branch below where a DIFFERENT
+        // model's text arrives for the first time.
         return (
             format!(
                 "Posted to the {} room. {said_by} said: {question}",
@@ -219,6 +226,19 @@ briefly. If it is not your area, say whose it is rather than guessing."
     if text.trim().is_empty() {
         (format!("{} had nothing to say.", bot.name), usage)
     } else {
-        (format!("{}: {}", bot.name, text.trim()), usage)
+        // F5(b): `text` is a SECOND model's own generated output - the
+        // colleague answered from its own context, which may itself hold a
+        // page it just browsed (fenced to IT, not to the caller). Nothing
+        // marks that answer as data once it lands here, so it would read to
+        // the calling model as ordinary trusted narration - the exact relay
+        // this ticket exists to close. `bot.name` stays OUTSIDE the fence:
+        // it is server-generated (looked up by id/name against the roster,
+        // never chosen by either model) and is how the caller knows who
+        // answered; only the reply body the colleague actually wrote is
+        // untrusted.
+        (
+            format!("{}: {}", bot.name, fence_tool_output(text.trim())),
+            usage,
+        )
     }
 }

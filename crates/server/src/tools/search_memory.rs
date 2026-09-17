@@ -9,7 +9,7 @@ use serde::Deserialize;
 use serde_json::json;
 use store::{Db, Scope};
 
-use super::lock_db;
+use super::{fence_tool_output, lock_db};
 
 pub fn spec() -> ToolSpec {
     ToolSpec {
@@ -86,5 +86,20 @@ pub fn run(db: &Arc<std::sync::Mutex<Db>>, bot_id: &str, args: &str) -> String {
     )
     .expect("search_log");
 
-    format_hits(&hits)
+    // S8b-06 Decision: fenced when there is a hit. Every row here was
+    // written by `remember`/`note`/`remember_shared`/`project_remember`
+    // (`tools/remember.rs` etc.) taking a `fact` STRING FROM THE MODEL, not
+    // literally typed by Josh - `Scope::Shared`/`Scope::Project` rows can be
+    // another bot's own words, and even an `Own`-scope row can be this same
+    // bot's summary of a page it browsed earlier and chose to keep. That is
+    // exactly the "a model's own generated text, read back later with
+    // nothing marking it as data" shape this ticket's `message_bot` gap has -
+    // memory is just a slower relay than a live tool call. The empty-result
+    // sentence stays unfenced: it is server-generated, not a fact anyone
+    // wrote (same reasoning as `desk_shell`'s "(no output)").
+    if hits.is_empty() {
+        format_hits(&hits)
+    } else {
+        fence_tool_output(&format_hits(&hits))
+    }
 }
