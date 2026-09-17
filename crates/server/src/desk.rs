@@ -201,6 +201,21 @@ pub trait Cdp: Send + Sync {
     /// here (`.catch(() => undefined)`, `desk.ts:200-202`), so the trait
     /// carries no failure at all.
     async fn close_target(&self, target_id: &str);
+
+    /// S8b-01: whether the endpoint is answering AT ALL right now - a
+    /// cheap, side-effect-free probe (no window, no target, no
+    /// navigation). Deliberately NOT `has_target`: that method's own
+    /// contract already swallows a transport failure into `false` to mean
+    /// "no such target" (see its own doc) - indistinguishable from "nobody
+    /// is home yet", which is exactly the distinction `wait_for_ready`
+    /// needs. Defaults to `true` so every fake `Cdp` already written for
+    /// this crate's tests (all of them modelling an ALREADY-RUNNING desk)
+    /// keeps compiling and behaving unchanged; only `HttpCdp` (a real
+    /// transport, checked for real) and `UnavailableCdp` (never ready -
+    /// there is nothing behind it) override this.
+    async fn ready(&self) -> bool {
+        true
+    }
 }
 
 /* ------------------------------------------------------ one window per bot */
@@ -503,6 +518,12 @@ impl Cdp for UnavailableCdp {
         Err(self.reason.clone())
     }
     async fn close_target(&self, _target_id: &str) {}
+    /// Never ready - there is no browser behind this at all, only a fixed
+    /// refusal reason. Never `true`, or `wait_for_ready` would report a
+    /// desk that will never answer as having woken up.
+    async fn ready(&self) -> bool {
+        false
+    }
 }
 
 /// S6-W-03 ported the HTTP half of TS `httpCdp` (`desk.ts:149-204`) for
@@ -773,7 +794,112 @@ impl Cdp for HttpCdp {
             .send()
             .await;
     }
+
+    /// S8b-01: the SAME `GET /json/version` `create_window` itself makes
+    /// (`desk.ts` has no equivalent - see this file's S8b-01 doc below),
+    /// used here only as a liveness probe: "did anything answer", not "was
+    /// the body a valid `VersionInfo`". A container whose Chromium has not
+    /// finished booting refuses the TCP connection outright (`send()`
+    /// returns `Err`); once the port is accepting, this returns `true`
+    /// even before the JSON is well-formed, matching what `wait_for_ready`
+    /// actually needs to know.
+    async fn ready(&self) -> bool {
+        self.http
+            .get(format!("{}/json/version", self.config.cdp))
+            .send()
+            .await
+            .is_ok()
+    }
 }
+
+/* ---------------------------------------------------- S8b-01: wake polling */
+//
+// The defect (reproduced on meridian 2026-09-17, not reasoned about): the
+// reaper (`start_vm_reaper`, `b010c30`) hibernates an idle bot's VM with
+// `docker stop`. That bot's NEXT `browse` correctly wakes it
+// (`ensure_vm_in`'s `!state.running` branch issues `docker start`), but the
+// container coming up is not the same thing as Chromium inside it
+// finishing its own boot - `docker start` returning does not mean
+// `/json/version` will answer yet. `cdp_for_bot` used to hand back a
+// freshly built `HttpCdp` the instant `docker start` succeeded, so the
+// bot's very next tool call (`browse`/`read_page`/`click`/`type_text`) hit
+// a bare connection error a model cannot act on
+// ("error sending request for url (http://127.0.0.1:9300/json/version)").
+// A retry minutes later worked - not because minutes were needed, but
+// because nobody asked again sooner.
+//
+// **Decision 1 - where the wait lives: here (`cdp_for_bot`), not
+// `vm::ensure_vm_in`.** `ensure_vm_in` is shared by `routes/vms.rs`'s
+// route handlers (VM status/refresh), which have no reason to block a
+// request on Chromium's own readiness - they only care about the DOCKER
+// CONTAINER's state, which `docker start`/`docker inspect` already answer
+// correctly and fast. `cdp_for_bot` is the one function only the four
+// desk TOOLS call (`tools/mod.rs`'s `browse`/`read_page`/`click`/
+// `type_text` dispatch arms) - the path that actually needs a real,
+// answering CDP endpoint before doing anything with it. Blocking
+// `ensure_vm_in` would also block every OTHER caller for a browser that
+// caller never asked about.
+//
+// **Decision 2 - the budget.** `runs.rs`'s `MAX_STEPS = 24` and a run's own
+// wall clock are real: a tool call cannot block for minutes without
+// burning a large share of one bot turn on a single wait. `WAKE_POLL_BUDGET`
+// (6s, polled every `WAKE_POLL_INTERVAL` = 500ms) is UNMEASURED against a
+// real meridian wake - this workstation has no Docker and no route to
+// meridian's `bullpen-desk`/VM containers (this file's own header), so the
+// actual "docker start done" to "Chromium answering /json/version" gap on
+// meridian could not be timed for this ticket. 6 seconds is chosen because
+// the container itself is already warm (no image pull, this is a
+// `docker start` of an existing container, not `docker run` of a fresh
+// one) - a LinuxServer webtop's Xorg + Chromium coming up from an already
+// materialised filesystem is a low-single-digit-seconds operation on
+// ordinary hardware, and 6s is comfortably inside that while still being a
+// small fraction of one of 24 steps. If meridian's real wake turns out to
+// need longer, this constant is the one place to raise it - the poll
+// itself is unaffected by any particular value.
+//
+// **Decision 3 - what the model sees on timeout.** Never the raw transport
+// error (useless: "did not answer" reads like a broken machine, not "wait
+// a moment") and never anything that could read as the browse having
+// succeeded. `cdp_for_bot` on a poll timeout returns an `UnavailableCdp`
+// carrying an actionable sentence in the same voice as this file's other
+// `UnavailableCdp` reasons ("Per-bot machines are off here. There is
+// nothing to browse with.") - short, states the real cause, tells the
+// model what to do next, and cannot be mistaken for a page having loaded.
+
+/// S8b-01: how long `cdp_for_bot` waits for a just-woken machine's
+/// Chromium to start answering before giving up - see this section's
+/// header doc (Decision 2) for the reasoning and the explicit "unmeasured"
+/// admission.
+pub const WAKE_POLL_BUDGET: Duration = Duration::from_secs(6);
+
+/// S8b-01: how often `wait_for_ready` re-checks within `WAKE_POLL_BUDGET`.
+pub const WAKE_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// S8b-01: polls `cdp.ready()` until it answers `true` or `budget` elapses.
+/// Generic over `&dyn Cdp` (not `HttpCdp` directly) so a scripted fake
+/// exercises the IDENTICAL loop `cdp_for_bot`'s real caller runs - the only
+/// production caller is `cdp_for_bot`, right after resolving this bot's own
+/// machine (see this section's header doc, Decision 1). Returns `false`,
+/// never panics or hangs past `budget`, when nothing ever answers -
+/// covered by this ticket's timeout bite.
+pub async fn wait_for_ready(cdp: &dyn Cdp, budget: Duration, interval: Duration) -> bool {
+    let deadline = std::time::Instant::now() + budget;
+    loop {
+        if cdp.ready().await {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(interval).await;
+    }
+}
+
+/// S8b-01: the sentence `cdp_for_bot` hands back when `wait_for_ready`
+/// times out - see this section's header doc, Decision 3, for why this
+/// exact wording and not the raw transport error.
+const WAKING_UP_REASON: &str = "This bot's shared computer just woke up and is still starting its browser. \
+Try again in a few seconds.";
 
 /// The `Cdp` a bot's `browse`/`read_page` call should use - S8a-02.
 ///
@@ -810,6 +936,12 @@ impl Cdp for HttpCdp {
 /// machine of this bot's own exists yet - and this refuses with that
 /// reason rather than inventing a stand-in desk.
 ///
+/// 🔴 **S8b-01 note** (a LATER ticket than the three decisions above, do
+/// not confuse the numbering): `docker start` succeeding is not the same
+/// as Chromium inside the container answering yet - see this file's
+/// "wake polling" section for the defect this closes and its own three
+/// decisions.
+///
 /// **Decision 3 (`build_cdp`/`BULLPEN_DESK`):** deleted. Keeping it as a
 /// fallback would mean a misconfiguration (this function reached with a
 /// bad `vm_docker`/`vm_config`, or a future caller that forgets to check
@@ -845,7 +977,20 @@ pub async fn cdp_for_bot(
     .unwrap_or_else(|| bot_id.to_string());
 
     match crate::vm::desk_for_in(db, vm_docker, bot_id, &bot_name, vm_config).await {
-        Ok(crate::vm::DeskResolution::Own(config)) => Arc::new(HttpCdp::new(config)),
+        Ok(crate::vm::DeskResolution::Own(config)) => {
+            let cdp = HttpCdp::new(config);
+            // S8b-01: see this file's "wake polling" section above for the
+            // full defect and all three decisions. `ensure_vm_in` (inside
+            // `desk_for_in`, just above) only proves the CONTAINER is
+            // running - this is what proves Chromium INSIDE it is actually
+            // answering before a tool is handed a `Cdp` it will try to use
+            // immediately.
+            if wait_for_ready(&cdp, WAKE_POLL_BUDGET, WAKE_POLL_INTERVAL).await {
+                Arc::new(cdp)
+            } else {
+                Arc::new(UnavailableCdp::new(WAKING_UP_REASON))
+            }
+        }
         Ok(crate::vm::DeskResolution::Unavailable(reason)) => Arc::new(UnavailableCdp::new(reason)),
         Err(err) => Arc::new(UnavailableCdp::new(format!(
             "Could not read this bot's machine: {err}"

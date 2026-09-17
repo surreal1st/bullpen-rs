@@ -9,22 +9,34 @@
 //! instructions call out, `b010c30`), against a real `HttpCdp` with nothing
 //! listening on either resolved port.
 //!
-//! **The observable that tells the two worlds apart:** nothing is
-//! listening on either port, so `HttpCdp::create_window`'s first request
-//! fails, and `reqwest::Error`'s own `Display` names the exact host:port it
-//! tried. Bot A's result and bot B's result therefore differ by PORT ALONE:
-//! same tool, same args, two different machines. This is a stronger
-//! observable than a fake `Cdp` would give: it is the REAL transport,
-//! reaching the REAL resolved endpoint, with no seam removed between the
-//! dispatch arm and the socket.
+//! **The observable that tells the two worlds apart:** which CONTAINER each
+//! bot's `docker inspect`/`docker start` actually named - recorded by the
+//! fake `DockerRun` below, one list per bot. Bot A's calls must only ever
+//! name `bullpen-vm-bot-a`; bot B's, only `bullpen-vm-bot-b`. Same tool,
+//! same args, two different machines resolved from two different rows.
 //!
 //! Guard-present world: this file's own dispatch arm
 //! (`crate::desk::cdp_for_bot`, `tools/mod.rs`) reaches two DIFFERENT
 //! ports, one per bot. Guard-removed world: the arm reverted to the
 //! deleted `desk::build_cdp()`, ONE shared, env-gated desk for every bot,
-//! so both results collapse to the SAME string. Restoring `cdp_for_bot` is
-//! what tells them apart again - see this ticket's Result for the literal
-//! red/green.
+//! so both bots would drive docker against the SAME container. Restoring
+//! `cdp_for_bot` is what tells them apart again - see this ticket's Result
+//! for the literal red/green.
+//!
+//! 🔴 **S8b-01 update:** this file originally asserted the two bots'
+//! FINAL result strings differed, because before S8b-01 nothing polled for
+//! readiness - `HttpCdp::create_window`'s raw `reqwest` error surfaced
+//! straight to the model, and that error's own `Display` happened to name
+//! the host:port it tried, so the two bots' strings differed by port alone.
+//! S8b-01 closes exactly that: `cdp_for_bot` now polls `/json/version`
+//! (`desk::wait_for_ready`) before ever handing back a working `Cdp`, and
+//! since nothing is listening on EITHER port in this test, both bots now
+//! correctly produce the SAME actionable "just woke up" message
+//! (`desk::WAKING_UP_REASON`) instead of a raw, port-leaking connection
+//! error - the intended fix, not a regression. The per-bot-routing proof
+//! this file exists for moved to the DOCKER call log instead (below),
+//! which is unaffected by S8b-01 and a strictly more direct proof of
+//! "never the same container" than a string comparison ever was.
 
 use std::sync::{Arc, Mutex};
 
@@ -51,14 +63,33 @@ impl ModelPort for NeverCalledPort {
 /// running - the reaper's own `hibernate_idle`/`start_vm_reaper` leave a
 /// row in exactly this shape, `b010c30`) and every `docker start` with ok -
 /// `ensure_vm_in`'s wake-a-stopped-machine branch, never the
-/// create-a-new-one branch. Records nothing: which port a call reaches is
-/// already provable from the row's own `cdp_port`, so a call log would add
-/// nothing this test checks.
-struct StoppedThenWakes;
+/// create-a-new-one branch.
+///
+/// S8b-01: now RECORDS every container name it was asked about (the last
+/// arg of both `inspect -f ... <container>` and `start <container>`) -
+/// this is the "which bot's own machine did this actually touch" proof the
+/// test's own header doc moved here once the final result STRING stopped
+/// differing per bot (see that doc).
+#[derive(Default)]
+struct StoppedThenWakes {
+    containers_seen: Mutex<Vec<String>>,
+}
+
+impl StoppedThenWakes {
+    fn containers_seen(&self) -> Vec<String> {
+        self.containers_seen.lock().unwrap().clone()
+    }
+}
 
 #[async_trait]
 impl DockerRun for StoppedThenWakes {
     async fn call(&self, args: &[&str], _timeout_ms: u64) -> DockerResult {
+        if let Some(container) = args.last() {
+            self.containers_seen
+                .lock()
+                .unwrap()
+                .push(container.to_string());
+        }
         if args.first() == Some(&"inspect") {
             DockerResult {
                 ok: true,
@@ -117,7 +148,8 @@ async fn browse_reaches_two_different_bots_own_machines() {
     insert_stopped_vm(&db, "bot-b", "bullpen-vm-bot-b", 9402, 6402);
     let db = Arc::new(Mutex::new(db));
 
-    let docker: Arc<dyn DockerRun> = Arc::new(StoppedThenWakes);
+    let docker_fake = Arc::new(StoppedThenWakes::default());
+    let docker: Arc<dyn DockerRun> = Arc::clone(&docker_fake) as Arc<dyn DockerRun>;
     let manager = Arc::new(RunManager::with_sandbox_and_vm(
         Arc::clone(&db),
         Arc::new(NeverCalledPort) as Arc<dyn ModelPort>,
@@ -137,21 +169,38 @@ async fn browse_reaches_two_different_bots_own_machines() {
         .run("browse", r#"{"url":"https://example.com/"}"#)
         .await;
 
-    assert_ne!(
+    // S8b-01: nothing is listening on either port, and `cdp_for_bot` now
+    // polls for readiness before ever handing back a working `Cdp` (see
+    // this file's header doc) - both bots correctly time out the SAME way,
+    // with the actionable "just woke up" message, never the raw
+    // port-leaking connection error S8a-02's own test used to check for.
+    // That is the FIX, not a loosened assertion: a raw transport error is
+    // exactly what this ticket exists to stop a model from seeing.
+    assert_eq!(
+        result_a,
+        "The shared computer did not answer: This bot's shared computer just woke up and is \
+still starting its browser. Try again in a few seconds."
+    );
+    assert_eq!(
         result_a, result_b,
-        "two bots' own machines must not collide: {result_a:?} / {result_b:?}"
+        "both bots hit the identical wake timeout here"
+    );
+
+    // The routing proof S8a-02 exists for: each bot's docker calls only
+    // ever named ITS OWN container, never the other bot's.
+    let seen = docker_fake.containers_seen();
+    assert!(
+        seen.iter()
+            .all(|c| c == "bullpen-vm-bot-a" || c == "bullpen-vm-bot-b"),
+        "unexpected container name seen: {seen:?}"
     );
     assert!(
-        result_a.contains("9401"),
-        "expected bot-a's OWN port 9401 in its result, got {result_a:?}"
+        seen.iter().any(|c| c == "bullpen-vm-bot-a"),
+        "bot-a's own container must have been touched: {seen:?}"
     );
     assert!(
-        result_b.contains("9402"),
-        "expected bot-b's OWN port 9402 in its result, got {result_b:?}"
-    );
-    assert!(
-        !result_a.contains("9402") && !result_b.contains("9401"),
-        "a bot's result must never name the OTHER bot's port: {result_a:?} / {result_b:?}"
+        seen.iter().any(|c| c == "bullpen-vm-bot-b"),
+        "bot-b's own container must have been touched: {seen:?}"
     );
 }
 
