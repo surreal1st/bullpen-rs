@@ -88,7 +88,7 @@ impl WorkerState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct Worker {
     pub id: String,
     pub label: String,
@@ -108,6 +108,35 @@ pub struct Worker {
     pub last_arch: Option<String>,
     pub last_version: Option<String>,
     pub last_error: Option<String>,
+}
+
+/// Hand-written so `ca_encrypted`/`cert_encrypted`/`key_encrypted` (S8b-05,
+/// F13) never reach a `{:?}` - this is "the row" the doc comment on
+/// `WorkerInput` below points at: same material, encrypted at rest rather
+/// than plaintext, but logging ciphertext is still handing an attacker a
+/// fixed target and this file has no legitimate reason to ever print it.
+/// Every other field is ordinary metadata and prints normally.
+impl std::fmt::Debug for Worker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Worker")
+            .field("id", &self.id)
+            .field("label", &self.label)
+            .field("kind", &self.kind)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("ca_encrypted", &"[redacted]")
+            .field("cert_encrypted", &"[redacted]")
+            .field("key_encrypted", &"[redacted]")
+            .field("ssh_user", &self.ssh_user)
+            .field("ssh_host", &self.ssh_host)
+            .field("last_state", &self.last_state)
+            .field("last_checked_at", &self.last_checked_at)
+            .field("last_os", &self.last_os)
+            .field("last_arch", &self.last_arch)
+            .field("last_version", &self.last_version)
+            .field("last_error", &self.last_error)
+            .finish()
+    }
 }
 
 /// What the client ever sees. No cert, key or CA field exists here at all.
@@ -244,7 +273,7 @@ pub fn get_worker(db: &Db, id: &str) -> Option<Worker> {
     read_all(db).into_iter().find(|w| w.id == id)
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct WorkerInput {
     pub id: Option<String>,
     pub label: String,
@@ -258,6 +287,30 @@ pub struct WorkerInput {
     pub key: Option<String>,
     pub ssh_user: Option<String>,
     pub ssh_host: Option<String>,
+}
+
+/// Hand-written (S8b-05, F13): a derived `Debug` here would write a
+/// plaintext PEM private key wherever `{:?}` output goes - `RUST_LOG=debug`
+/// in `deploy/bullpen-rs.service` since 2026-09-16 means that is journald,
+/// not nowhere. `ca`/`cert`/`key` always print the same fixed placeholder
+/// regardless of whether they are `Some` or `None`, so the output reveals
+/// neither the secret, its length, its prefix, nor even whether a cert is
+/// present at all. Every other field is non-secret and prints normally.
+impl std::fmt::Debug for WorkerInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorkerInput")
+            .field("id", &self.id)
+            .field("label", &self.label)
+            .field("kind", &self.kind)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("ca", &"[redacted]")
+            .field("cert", &"[redacted]")
+            .field("key", &"[redacted]")
+            .field("ssh_user", &self.ssh_user)
+            .field("ssh_host", &self.ssh_host)
+            .finish()
+    }
 }
 
 /// `WorkerInput` derives `Default` for tests that only care about a couple
@@ -1532,5 +1585,66 @@ mod tests {
         let p = parse_probe("false 3");
         assert!(!p.running);
         assert_eq!(p.exit_code, Some(3));
+    }
+
+    /// **S8b-05 F13 bite.** With the hand-written `Debug`, formatting a
+    /// `WorkerInput` whose `key` is a real-shaped PEM never puts the key's
+    /// bytes into the output - proven by asserting the secret's absence AND
+    /// a non-secret field's presence, so this cannot pass by formatting
+    /// nothing at all. See this ticket's Result for the guard-removed
+    /// (`#[derive(Debug)]` restored) literal output.
+    #[test]
+    fn worker_input_debug_never_prints_the_private_key_or_cert_or_ca() {
+        let input = WorkerInput {
+            label: "Meridian".to_string(),
+            host: Some("100.1.1.1".to_string()),
+            ca: Some("-----BEGIN CERTIFICATE-----AAAA".to_string()),
+            cert: Some("-----BEGIN CERTIFICATE-----BBBB".to_string()),
+            key: Some("-----BEGIN PRIVATE KEY-----AAAA".to_string()),
+            ..Default::default()
+        };
+        let out = format!("{input:?}");
+        assert!(
+            !out.contains("AAAA") && !out.contains("BBBB") && !out.contains("BEGIN PRIVATE KEY"),
+            "Debug output must not contain any secret material, got: {out}"
+        );
+        assert!(
+            out.contains("Meridian") && out.contains("100.1.1.1"),
+            "Debug output must still contain non-secret fields, got: {out}"
+        );
+    }
+
+    /// **S8b-05 F13, the row beside it.** `Worker` carries the same material
+    /// encrypted at rest (`ca_encrypted`/`cert_encrypted`/`key_encrypted`);
+    /// its hand-written `Debug` must not print the ciphertext either.
+    #[test]
+    fn worker_debug_never_prints_the_encrypted_cert_material() {
+        let worker = Worker {
+            id: "w1".to_string(),
+            label: "Meridian".to_string(),
+            kind: WorkerKind::Tcp,
+            host: "100.1.1.1".to_string(),
+            port: 2376,
+            ca_encrypted: "enc:AAAA".to_string(),
+            cert_encrypted: "enc:BBBB".to_string(),
+            key_encrypted: "enc:CCCC".to_string(),
+            ssh_user: String::new(),
+            ssh_host: String::new(),
+            last_state: WorkerState::Unknown,
+            last_checked_at: None,
+            last_os: None,
+            last_arch: None,
+            last_version: None,
+            last_error: None,
+        };
+        let out = format!("{worker:?}");
+        assert!(
+            !out.contains("AAAA") && !out.contains("BBBB") && !out.contains("CCCC"),
+            "Debug output must not contain any encrypted cert material, got: {out}"
+        );
+        assert!(
+            out.contains("Meridian") && out.contains("w1"),
+            "Debug output must still contain non-secret fields, got: {out}"
+        );
     }
 }
