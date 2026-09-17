@@ -567,3 +567,79 @@ async fn attach_vm_proxy_refuses_a_raw_target_with_an_embedded_cr_before_resolvi
         "expected a 400 refusal, got: {text:?}"
     );
 }
+
+/* --------------------------------------------------------------- S8b-05 (F9): require_auth actually gates --------------------------------------------------------------- */
+
+/// **F9 bite, guard-present.** `main.rs:153` passes `require_auth = true`
+/// for the live proxy, but until this test every call in this file passed
+/// `false` - the one value that ever reaches production was the one value
+/// never exercised (`DEFERRED.md:93`). Proven the same way bite (b) above
+/// proves an unknown bot never dials upstream: a bystander recording
+/// listener's accept count stays zero, never the response text, so a bug
+/// that dials before checking auth (but still answers the client with
+/// something that looks like a refusal) has something real to catch it.
+#[tokio::test]
+async fn accept_and_route_with_require_auth_true_refuses_an_unauthenticated_request_before_resolving_anything()
+ {
+    let db = Db::open(":memory:").expect("open :memory: db");
+    let (addr, accepts) = spawn_recording_listener().await;
+    insert_vm_row(&db, &vm_row("bot-a", addr.port() as i32));
+
+    let outcome = route(
+        &db,
+        &upgrade_request("/api/bots/bot-a/vm/view/websockets"),
+        true,
+    )
+    .await;
+
+    assert!(
+        matches!(outcome, RouteOutcome::Viewer(ProxyOutcome::Unauthorized)),
+        "expected an unauthenticated request to be refused when require_auth is true, got {outcome:?}"
+    );
+
+    // A bounded wait, not an instant check - same reasoning as bite (b)'s
+    // own comment: a bug that dials from a detached task would otherwise
+    // race this assertion.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        accepts.load(Ordering::SeqCst),
+        0,
+        "an unauthenticated request must never cause any upstream dial when require_auth is true"
+    );
+}
+
+/// **F9, the other half.** The fix is "refuse an absent/invalid session",
+/// not "refuse everything under require_auth" - a request carrying a real
+/// session token (`store::auth::create_session`, the same row
+/// `session_valid` reads) must still reach the bot's own container.
+#[tokio::test]
+async fn accept_and_route_with_require_auth_true_and_a_valid_session_still_proxies() {
+    let db = Db::open(":memory:").expect("open :memory: db");
+    let token = store::auth::create_session(&db).expect("create session");
+    let (addr, accepts) = spawn_recording_listener().await;
+    insert_vm_row(&db, &vm_row("bot-a", addr.port() as i32));
+
+    let raw = format!(
+        "GET /api/bots/bot-a/vm/view/websockets HTTP/1.1\r\n\
+         Host: bullpen.example.com\r\n\
+         Authorization: Bearer {token}\r\n\
+         Upgrade: websocket\r\n\
+         Connection: Upgrade\r\n\
+         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+         \r\n"
+    )
+    .into_bytes();
+
+    let outcome = route(&db, &raw, true).await;
+
+    assert!(
+        matches!(outcome, RouteOutcome::Viewer(ProxyOutcome::Proxying)),
+        "expected a request with a valid session to proxy when require_auth is true, got {outcome:?}"
+    );
+
+    let count = wait_for_at_least_one_accept(&accepts, Duration::from_secs(2)).await;
+    assert_eq!(
+        count, 1,
+        "a valid session under require_auth = true must still reach the bot's own container"
+    );
+}
