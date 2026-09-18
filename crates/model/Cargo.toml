@@ -13,6 +13,7 @@ hyper-rustls = { workspace = true }
 http-body-util = { workspace = true }
 bytes = { workspace = true }
 tower-service = { workspace = true }
+rustls = { workspace = true, optional = true }
 tokio = { workspace = true }
 futures = { workspace = true }
 async-stream = { workspace = true }
@@ -26,4 +27,4 @@ uuid = { workspace = true }
 [features]
 # Exposes `fake` (the scripted ModelPort test double) to other crates that
 # need it outside `cfg(test)`, e.g. a later slice's own test suite.
-fake = []
+fake = ["dep:rustls"]

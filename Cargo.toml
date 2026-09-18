@@ -59,6 +59,7 @@ hyper-rustls = { version = "0.27", default-features = false, features = ["http1"
 http-body-util = "0.1"
 bytes = "1"
 tower-service = "0.3"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 # S6-W-05: `HttpCdp::create_window`/`call` need a WebSocket client to open
 # DevTools' per-target and per-browser sockets - approved by the
 # orchestrator per `.scratch/bullpen-rs/tickets/S6-W-tickets.md` S6-W-03's

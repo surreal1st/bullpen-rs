@@ -270,6 +270,8 @@ pub struct OpenRouterPort {
     client: reqwest::Client,
     key_source: KeySource,
     endpoint: String,
+    #[cfg(feature = "fake")]
+    test_tls_root: Option<Vec<u8>>,
 }
 
 impl OpenRouterPort {
@@ -278,6 +280,8 @@ impl OpenRouterPort {
             client: Self::client(),
             key_source,
             endpoint: ENDPOINT.to_string(),
+            #[cfg(feature = "fake")]
+            test_tls_root: None,
         }
     }
 
@@ -290,25 +294,59 @@ impl OpenRouterPort {
     }
 
     #[cfg(feature = "fake")]
-    pub fn with_local_endpoint(
-        key_source: KeySource,
-        endpoint: impl Into<String>,
-    ) -> Result<Self, String> {
-        let endpoint = endpoint.into();
-        let parsed = reqwest::Url::parse(&endpoint).map_err(|err| err.to_string())?;
+    fn validate_local_endpoint(endpoint: &str, scheme: &str) -> Result<(), String> {
+        let parsed = reqwest::Url::parse(endpoint).map_err(|err| err.to_string())?;
         let local = parsed.host_str().is_some_and(|host| {
             host.eq_ignore_ascii_case("localhost")
                 || host
                     .parse::<std::net::IpAddr>()
                     .is_ok_and(|address| address.is_loopback())
         });
-        if parsed.scheme() != "http" || !local {
-            return Err("test model endpoint must be an http loopback address".to_string());
+        if parsed.scheme() != scheme || !local {
+            return Err(format!(
+                "test model endpoint must be an {scheme} loopback address"
+            ));
         }
+        Ok(())
+    }
+
+    #[cfg(feature = "fake")]
+    pub fn with_local_endpoint(
+        key_source: KeySource,
+        endpoint: impl Into<String>,
+    ) -> Result<Self, String> {
+        let endpoint = endpoint.into();
+        Self::validate_local_endpoint(&endpoint, "http")?;
         Ok(Self {
             client: Self::client(),
             key_source,
             endpoint,
+            test_tls_root: None,
+        })
+    }
+
+    #[cfg(feature = "fake")]
+    pub fn with_local_https_endpoint(
+        key_source: KeySource,
+        endpoint: impl Into<String>,
+        root_der: Vec<u8>,
+    ) -> Result<Self, String> {
+        let endpoint = endpoint.into();
+        Self::validate_local_endpoint(&endpoint, "https")?;
+        let certificate = reqwest::Certificate::from_der(&root_der)
+            .map_err(|_| "invalid test model trust root".to_string())?;
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(120))
+            .add_root_certificate(certificate)
+            .build()
+            .map_err(|_| "could not build test model TLS client".to_string())?;
+        Ok(Self {
+            client,
+            key_source,
+            endpoint,
+            test_tls_root: Some(root_der),
         })
     }
 }
@@ -318,14 +356,24 @@ impl ModelPort for OpenRouterPort {
         let client = self.client.clone();
         let key_source = self.key_source.clone();
         let endpoint = self.endpoint.clone();
+        #[cfg(feature = "fake")]
+        let test_tls_root = self.test_tls_root.clone();
         let image_request = carries_image(&request);
         if image_request {
-            return crate::image_transport::stream(
-                request,
-                key_source,
-                endpoint,
-                cfg!(feature = "fake"),
-            );
+            #[cfg(feature = "fake")]
+            {
+                return crate::image_transport::stream(
+                    request,
+                    key_source,
+                    endpoint,
+                    true,
+                    test_tls_root,
+                );
+            }
+            #[cfg(not(feature = "fake"))]
+            {
+                return crate::image_transport::stream(request, key_source, endpoint, false);
+            }
         }
 
         Box::pin(async_stream::stream! {

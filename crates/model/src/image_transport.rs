@@ -1,6 +1,8 @@
 use std::future::Future;
 use std::io::{self, Write};
 use std::pin::Pin;
+#[cfg(feature = "fake")]
+use std::sync::Arc;
 use std::task::Poll;
 use std::time::Duration;
 
@@ -231,6 +233,7 @@ pub(crate) fn stream(
     key_source: KeySource,
     endpoint: String,
     allow_http: bool,
+    #[cfg(feature = "fake")] test_tls_root: Option<Vec<u8>>,
 ) -> EventStream {
     Box::pin(async_stream::stream! {
         if !allow_http && proxy_is_configured() {
@@ -285,7 +288,7 @@ pub(crate) fn stream(
             }
         };
 
-        let mut connector = if allow_http {
+        let connector = if allow_http {
             HttpsConnectorBuilder::new()
                 .with_webpki_roots()
                 .https_or_http()
@@ -298,6 +301,34 @@ pub(crate) fn stream(
                 .enable_http1()
                 .build()
         };
+        #[cfg(feature = "fake")]
+        let connector = if let Some(test_tls_root) = test_tls_root {
+            let mut roots = rustls::RootCertStore::empty();
+            if roots.add(rustls::pki_types::CertificateDer::from(test_tls_root)).is_err() {
+                yield ModelEvent::Error { message: "Invalid screen observation test trust root.".to_string(), status: None };
+                return;
+            }
+            let builder = match rustls::ClientConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            {
+                Ok(builder) => builder,
+                Err(_) => {
+                    yield ModelEvent::Error { message: "Could not configure screen observation test TLS.".to_string(), status: None };
+                    return;
+                }
+            };
+            let config = builder
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            HttpsConnectorBuilder::new()
+                .with_tls_config(config)
+                .https_only()
+                .enable_http1()
+                .build()
+        } else { connector };
+        let mut connector = connector;
         let mut last_busy = None;
 
         for attempt in 0..BUSY_TRIES {
