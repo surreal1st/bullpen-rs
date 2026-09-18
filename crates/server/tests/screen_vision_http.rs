@@ -995,3 +995,52 @@ async fn real_http_exhausted_image_retries_never_switch_models() {
     );
     assert!(manager.observation_registry().metadata(&run_id).is_none());
 }
+
+// T8/S8b-F1-01: an empty SSE body over the real HTTP wire parses (at the
+// port level, unchanged here) into a `ModelEvent::Done` with no delta and
+// no tool call - the plainest empty completion, now driven through a real
+// `RunManager` rather than `ScriptedPort`. `Recorder::spawn`'s match arms
+// (this file, ~line 157) only override request 1 for `FinalResponse::
+// EmptyBody`, and `run_case` disables routing/the judge, so the run's one
+// and only request is the empty one - asserted below rather than assumed.
+#[tokio::test]
+async fn real_http_empty_completion_fails_the_run() {
+    let (db, _manager, _capture, recorder, run_id, events) =
+        run_case(FinalResponse::EmptyBody).await;
+
+    assert_eq!(
+        recorder.summaries.lock().unwrap().len(),
+        1,
+        "expected the run's only request to be the empty one"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, RunEvent::Done { .. })),
+        "expected no Done event for an empty completion, got {events:?}"
+    );
+    assert!(
+        matches!(
+            events.last(),
+            Some(RunEvent::Error { message, status: None })
+                if message == "The model provider completed without an answer."
+        ),
+        "expected the S8b-F1-01 empty-completion error over real HTTP, got {events:?}"
+    );
+
+    let stored: (String, Option<String>) = db
+        .lock()
+        .unwrap()
+        .conn()
+        .query_row(
+            "SELECT status, error FROM runs WHERE id=?1",
+            [&run_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(stored.0, "failed");
+    assert_eq!(
+        stored.1.as_deref(),
+        Some("The model provider completed without an answer.")
+    );
+}

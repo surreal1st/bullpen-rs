@@ -73,6 +73,20 @@ fn run_row(db: &Arc<Mutex<Db>>, run_id: &str) -> (String, Option<String>) {
         .expect("read run row")
 }
 
+/// S8b-F1-01: the persisted `runs.text` column - separate from `run_row`
+/// since only the empty-completion tests need it, and every other test in
+/// this file that wanted it already reads it off `store::list_messages`.
+fn run_text(db: &Arc<Mutex<Db>>, run_id: &str) -> String {
+    let db = db.lock().expect("db mutex poisoned");
+    db.conn()
+        .query_row(
+            "SELECT text FROM runs WHERE id = ?1",
+            rusqlite::params![run_id],
+            |row| row.get(0),
+        )
+        .expect("read run text")
+}
+
 /// Drains a run's events until `Done`/`Error`, returning everything seen.
 async fn drain(mut rx: tokio::sync::mpsc::UnboundedReceiver<RunEvent>) -> Vec<RunEvent> {
     let mut seen = Vec::new();
@@ -531,4 +545,454 @@ async fn stop_between_steps_fails_the_run_with_stopped_and_writes_no_message() {
         messages.iter().all(|m| m.role != "assistant"),
         "expected no assistant message for a run stopped between steps with no text, got {messages:?}"
     );
+}
+
+// S8b-F1-01: a provider that completes with no answer must fail the run
+// rather than settle it as a quiet, empty success - `runs.rs:1841-1851`
+// used to answer whatever `step_text` held, including nothing at all.
+//
+// T1: one step, `Done` and no deltas at all - the plainest empty
+// completion. Terminal `RunEvent::Error` carrying the exact contract
+// message, no `RunEvent::Done`, `runs.status='failed'`, `runs.error` set to
+// that same message, `runs.text` empty, and no assistant message written
+// (settle's F6 guard skips the message exactly because `text` is empty).
+#[tokio::test]
+async fn empty_completion_fails_the_run_with_no_answer_and_writes_no_message() {
+    let db = open_db();
+    seed_bot(&db, "arthur", "Arthur");
+    let conversation_id = own_conversation(&db, "arthur");
+    seed_user_message(&db, &conversation_id, "say something");
+
+    let port = ScriptedPort::new(vec![vec![ModelEvent::Done {
+        model: "test/model".to_string(),
+        usage: None,
+        finish_reason: None,
+    }]]);
+
+    let manager = Arc::new(RunManager::new(Arc::clone(&db), as_port(port)));
+    let run_id = manager.start(StartOptions {
+        bot_id: "arthur".to_string(),
+        conversation_id: conversation_id.clone(),
+        model: "test/model".to_string(),
+        messages: vec![ModelMessage::user("say something")],
+        trigger: Trigger::Chat,
+        room: false,
+    });
+
+    let events = drain(manager.subscribe(&run_id)).await;
+    assert!(
+        !events.iter().any(|e| matches!(e, RunEvent::Done { .. })),
+        "expected no Done event for an empty completion, got {events:?}"
+    );
+    assert!(
+        matches!(
+            events.last(),
+            Some(RunEvent::Error { message, status: None })
+                if message == "The model provider completed without an answer."
+        ),
+        "expected the S8b-F1-01 empty-completion error, got {events:?}"
+    );
+
+    let (status, error) = run_row(&db, &run_id);
+    assert_eq!(status, "failed");
+    assert_eq!(
+        error.as_deref(),
+        Some("The model provider completed without an answer.")
+    );
+    assert_eq!(run_text(&db, &run_id), "");
+
+    let messages = {
+        let db = db.lock().unwrap();
+        store::list_messages(&db, &conversation_id).unwrap()
+    };
+    assert!(
+        messages.iter().all(|m| m.role != "assistant"),
+        "expected no assistant message for an empty completion, got {messages:?}"
+    );
+}
+
+// T2: whitespace-only deltas (`"  "` then `"\n "`) then `Done` - trimmed,
+// this is still nothing, so it must classify exactly like T1: the same
+// error, `failed`, empty `runs.text`, no assistant message. Guards M2
+// (weakening `trim().is_empty()` to `is_empty()` would let this slip
+// through as an answer).
+#[tokio::test]
+async fn whitespace_only_completion_fails_the_run_the_same_as_empty() {
+    let db = open_db();
+    seed_bot(&db, "arthur", "Arthur");
+    let conversation_id = own_conversation(&db, "arthur");
+    seed_user_message(&db, &conversation_id, "say something");
+
+    let port = ScriptedPort::new(vec![vec![
+        ModelEvent::Delta {
+            text: "  ".to_string(),
+        },
+        ModelEvent::Delta {
+            text: "\n ".to_string(),
+        },
+        ModelEvent::Done {
+            model: "test/model".to_string(),
+            usage: None,
+            finish_reason: None,
+        },
+    ]]);
+
+    let manager = Arc::new(RunManager::new(Arc::clone(&db), as_port(port)));
+    let run_id = manager.start(StartOptions {
+        bot_id: "arthur".to_string(),
+        conversation_id: conversation_id.clone(),
+        model: "test/model".to_string(),
+        messages: vec![ModelMessage::user("say something")],
+        trigger: Trigger::Chat,
+        room: false,
+    });
+
+    let events = drain(manager.subscribe(&run_id)).await;
+    assert!(
+        !events.iter().any(|e| matches!(e, RunEvent::Done { .. })),
+        "expected no Done event for a whitespace-only completion, got {events:?}"
+    );
+    assert!(
+        matches!(
+            events.last(),
+            Some(RunEvent::Error { message, status: None })
+                if message == "The model provider completed without an answer."
+        ),
+        "expected the S8b-F1-01 empty-completion error, got {events:?}"
+    );
+
+    let (status, error) = run_row(&db, &run_id);
+    assert_eq!(status, "failed");
+    assert_eq!(
+        error.as_deref(),
+        Some("The model provider completed without an answer.")
+    );
+    assert_eq!(run_text(&db, &run_id), "");
+
+    let messages = {
+        let db = db.lock().unwrap();
+        store::list_messages(&db, &conversation_id).unwrap()
+    };
+    assert!(
+        messages.iter().all(|m| m.role != "assistant"),
+        "expected no assistant message for a whitespace-only completion, got {messages:?}"
+    );
+}
+
+// T3: a non-empty tool-call batch with no text must run the tool BEFORE any
+// text is classified - `step_text` is empty exactly like T1, but a real
+// tool call is waiting, and the run must still answer once the second step
+// replies with real text. Guards M4 (classifying text before honouring
+// valid tool calls would fail this at step one instead of running `say`).
+#[tokio::test]
+async fn tool_call_with_empty_text_runs_before_text_is_classified() {
+    let db = open_db();
+    seed_bot(&db, "arthur", "Arthur");
+    let conversation_id = own_conversation(&db, "arthur");
+    seed_user_message(&db, &conversation_id, "have a look at this");
+
+    let port = ScriptedPort::new(vec![
+        vec![ModelEvent::ToolCalls {
+            calls: vec![ToolCall {
+                id: "c1".to_string(),
+                name: "say".to_string(),
+                arguments: "{\"text\":\"Progress note.\"}".to_string(),
+            }],
+            usage: None,
+        }],
+        vec![
+            ModelEvent::Delta {
+                text: "Final answer.".to_string(),
+            },
+            ModelEvent::Done {
+                model: "test/model".to_string(),
+                usage: None,
+                finish_reason: None,
+            },
+        ],
+    ]);
+
+    let manager = Arc::new(RunManager::new(Arc::clone(&db), as_port(port)));
+    let run_id = manager.start(StartOptions {
+        bot_id: "arthur".to_string(),
+        conversation_id: conversation_id.clone(),
+        model: "test/model".to_string(),
+        messages: vec![ModelMessage::user("have a look at this")],
+        trigger: Trigger::Chat,
+        room: false,
+    });
+
+    let events = drain(manager.subscribe(&run_id)).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, RunEvent::ToolResult { name, .. } if name == "say")),
+        "expected the say tool to run despite empty step text, got {events:?}"
+    );
+    assert!(
+        matches!(events.last(), Some(RunEvent::Done { .. })),
+        "expected the run to reach a final answer, got {events:?}"
+    );
+
+    let (status, error) = run_row(&db, &run_id);
+    assert_eq!(status, "done");
+    assert_eq!(error, None);
+
+    let messages = {
+        let db = db.lock().unwrap();
+        store::list_messages(&db, &conversation_id).unwrap()
+    };
+    let texts: Vec<&str> = messages.iter().map(|m| m.content.as_str()).collect();
+    assert!(texts.contains(&"Final answer."), "got {texts:?}");
+}
+
+// T4: an empty tool-call batch (`calls: vec![]`) with no text is not valid
+// tool output and must not reach tool execution - it must fail exactly like
+// T1, and reach that failure on the FIRST request rather than looping
+// (`ScriptedPort` only has one script, so a second call would replay this
+// same empty batch forever up to the step ceiling if the guard did not
+// catch it promptly). Guards M3 (dropping the non-empty filter would send
+// this into the tool-call path, which pushes an empty `tool_calls` message
+// and loops).
+#[tokio::test]
+async fn empty_tool_batch_fails_promptly_without_looping_to_the_step_ceiling() {
+    let db = open_db();
+    seed_bot(&db, "arthur", "Arthur");
+    let conversation_id = own_conversation(&db, "arthur");
+    seed_user_message(&db, &conversation_id, "say something");
+
+    let port = Arc::new(ScriptedPort::new(vec![vec![ModelEvent::ToolCalls {
+        calls: vec![],
+        usage: None,
+    }]]));
+
+    let manager = Arc::new(RunManager::new(
+        Arc::clone(&db),
+        Arc::clone(&port) as Arc<dyn model::ModelPort>,
+    ));
+    let run_id = manager.start(StartOptions {
+        bot_id: "arthur".to_string(),
+        conversation_id: conversation_id.clone(),
+        model: "test/model".to_string(),
+        messages: vec![ModelMessage::user("say something")],
+        trigger: Trigger::Chat,
+        room: false,
+    });
+
+    let events = drain(manager.subscribe(&run_id)).await;
+    assert!(
+        matches!(
+            events.last(),
+            Some(RunEvent::Error { message, status: None })
+                if message == "The model provider completed without an answer."
+        ),
+        "expected the S8b-F1-01 empty-completion error, got {events:?}"
+    );
+
+    let (status, error) = run_row(&db, &run_id);
+    assert_eq!(status, "failed");
+    assert_eq!(
+        error.as_deref(),
+        Some("The model provider completed without an answer.")
+    );
+    assert_eq!(run_text(&db, &run_id), "");
+    assert_eq!(
+        port.requests().len(),
+        1,
+        "expected the failure to be reached on the first request, not by looping to the step ceiling"
+    );
+}
+
+// T5: step one produces real prose AND a tool call; step two - a fresh
+// model request - comes back completely empty. The run must still fail,
+// but `runs.text` must equal step one's prose exactly, with no trailing
+// blank line or `"\n\n"` separator left over from the empty step's own
+// (never-taken) delta branch, and the assistant message settle() writes on
+// failure must carry both that prose and the error. Guards M5 (removing
+// `text.truncate(step_start_text_len)` would leave the separator or any
+// stray whitespace from the empty step behind).
+#[tokio::test]
+async fn empty_request_after_prior_prose_truncates_only_its_own_step() {
+    let db = open_db();
+    seed_bot(&db, "arthur", "Arthur");
+    let conversation_id = own_conversation(&db, "arthur");
+    seed_user_message(&db, &conversation_id, "have a look at this");
+
+    let port = ScriptedPort::new(vec![
+        vec![
+            ModelEvent::Delta {
+                text: "Prose.".to_string(),
+            },
+            ModelEvent::ToolCalls {
+                calls: vec![ToolCall {
+                    id: "c1".to_string(),
+                    name: "say".to_string(),
+                    arguments: "{\"text\":\"Progress note.\"}".to_string(),
+                }],
+                usage: None,
+            },
+        ],
+        // Step two is "empty" in the same trimmed-to-nothing sense as T1/T2,
+        // but MUST carry an actual delta (even a whitespace one) rather than
+        // zero events - only a delta triggers the `"\n\n"` separator
+        // injection (`runs.rs:1788-1797`) this truncation exists to undo. A
+        // step with zero events never appends anything to `text` in the
+        // first place, so it cannot tell a truncate from a no-op.
+        vec![
+            ModelEvent::Delta {
+                text: "  ".to_string(),
+            },
+            ModelEvent::Done {
+                model: "test/model".to_string(),
+                usage: None,
+                finish_reason: None,
+            },
+        ],
+    ]);
+
+    let manager = Arc::new(RunManager::new(Arc::clone(&db), as_port(port)));
+    let run_id = manager.start(StartOptions {
+        bot_id: "arthur".to_string(),
+        conversation_id: conversation_id.clone(),
+        model: "test/model".to_string(),
+        messages: vec![ModelMessage::user("have a look at this")],
+        trigger: Trigger::Chat,
+        room: false,
+    });
+
+    let events = drain(manager.subscribe(&run_id)).await;
+    assert!(
+        matches!(
+            events.last(),
+            Some(RunEvent::Error { message, status: None })
+                if message == "The model provider completed without an answer."
+        ),
+        "expected the S8b-F1-01 empty-completion error, got {events:?}"
+    );
+
+    let (status, error) = run_row(&db, &run_id);
+    assert_eq!(status, "failed");
+    assert_eq!(
+        error.as_deref(),
+        Some("The model provider completed without an answer.")
+    );
+    assert_eq!(
+        run_text(&db, &run_id),
+        "Prose.",
+        "expected only the empty step's own contribution (its whitespace delta and the \"\\n\\n\" separator) to be truncated"
+    );
+
+    let messages = {
+        let db = db.lock().unwrap();
+        store::list_messages(&db, &conversation_id).unwrap()
+    };
+    let final_message = messages
+        .iter()
+        .find(|m| m.content == "Prose.")
+        .expect("expected the settled failure message to carry step one's prose");
+    assert_eq!(final_message.role, "assistant");
+    assert_eq!(
+        final_message.error.as_deref(),
+        Some("The model provider completed without an answer.")
+    );
+}
+
+// T6: a single non-whitespace delta then `Done` is a real, if short,
+// answer - it must stay `Outcome::Answered`. A plain regression guard on
+// the ordinary path above the new one.
+#[tokio::test]
+async fn single_non_whitespace_delta_still_answers() {
+    let db = open_db();
+    seed_bot(&db, "arthur", "Arthur");
+    let conversation_id = own_conversation(&db, "arthur");
+    seed_user_message(&db, &conversation_id, "say something");
+
+    let port = ScriptedPort::new(vec![vec![
+        ModelEvent::Delta {
+            text: "ok".to_string(),
+        },
+        ModelEvent::Done {
+            model: "test/model".to_string(),
+            usage: None,
+            finish_reason: None,
+        },
+    ]]);
+
+    let manager = Arc::new(RunManager::new(Arc::clone(&db), as_port(port)));
+    let run_id = manager.start(StartOptions {
+        bot_id: "arthur".to_string(),
+        conversation_id: conversation_id.clone(),
+        model: "test/model".to_string(),
+        messages: vec![ModelMessage::user("say something")],
+        trigger: Trigger::Chat,
+        room: false,
+    });
+
+    let events = drain(manager.subscribe(&run_id)).await;
+    assert!(
+        matches!(events.last(), Some(RunEvent::Done { .. })),
+        "expected the run to answer, got {events:?}"
+    );
+
+    let (status, error) = run_row(&db, &run_id);
+    assert_eq!(status, "done");
+    assert_eq!(error, None);
+    assert_eq!(run_text(&db, &run_id), "ok");
+}
+
+// T7: a transport error after real partial text is unchanged behaviour -
+// `ModelEvent::Error` returns immediately, above the new emptiness guard,
+// and never truncates anything. A regression guard on the branch directly
+// above the one this ticket adds.
+#[tokio::test]
+async fn transport_error_after_partial_text_preserves_the_text_unchanged() {
+    let db = open_db();
+    seed_bot(&db, "arthur", "Arthur");
+    let conversation_id = own_conversation(&db, "arthur");
+    seed_user_message(&db, &conversation_id, "say something");
+
+    let port = ScriptedPort::new(vec![vec![
+        ModelEvent::Delta {
+            text: "partial answer".to_string(),
+        },
+        ModelEvent::Error {
+            message: "transport exploded".to_string(),
+            status: Some(502),
+        },
+    ]]);
+
+    let manager = Arc::new(RunManager::new(Arc::clone(&db), as_port(port)));
+    let run_id = manager.start(StartOptions {
+        bot_id: "arthur".to_string(),
+        conversation_id: conversation_id.clone(),
+        model: "test/model".to_string(),
+        messages: vec![ModelMessage::user("say something")],
+        trigger: Trigger::Chat,
+        room: false,
+    });
+
+    let events = drain(manager.subscribe(&run_id)).await;
+    assert!(
+        matches!(
+            events.last(),
+            Some(RunEvent::Error { message, status: Some(502) }) if message == "transport exploded"
+        ),
+        "expected the transport error to reach the client with its status, got {events:?}"
+    );
+
+    let (status, error) = run_row(&db, &run_id);
+    assert_eq!(status, "failed");
+    assert_eq!(error.as_deref(), Some("transport exploded"));
+    assert_eq!(run_text(&db, &run_id), "partial answer");
+
+    let messages = {
+        let db = db.lock().unwrap();
+        store::list_messages(&db, &conversation_id).unwrap()
+    };
+    let final_message = messages
+        .iter()
+        .find(|m| m.content == "partial answer")
+        .expect("expected the failure message to carry the partial text");
+    assert_eq!(final_message.role, "assistant");
+    assert_eq!(final_message.error.as_deref(), Some("transport exploded"));
 }

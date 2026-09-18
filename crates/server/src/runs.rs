@@ -1750,6 +1750,11 @@ were doing unless he changed it."
 
             let mut calls: Option<Vec<ToolCall>> = None;
             let mut step_text = String::new();
+            // S8b-F1-01: this step's own contribution to `text`, so a
+            // failure classified below can truncate back to it - undoing the
+            // whitespace deltas and the `"\n\n"` separator the delta branch
+            // injects, without touching any earlier step's real prose.
+            let step_start_text_len = text.len();
             let mut request_usage_reported = false;
             let had_image_dispatch = image_dispatch.is_some();
             let mut request_owner =
@@ -1839,7 +1844,33 @@ were doing unless he changed it."
                 dispatch.complete();
             }
 
-            let Some(calls) = calls else {
+            // S8b-F1-01: a tool-call batch counts as semantic output only
+            // when it is non-empty - `Some(vec![])` is not valid tool output
+            // and must not reach the tool execution path below (it would
+            // push an assistant message with an empty `tool_calls` list and
+            // loop again until the step ceiling). With no semantic tool
+            // batch, an empty or whitespace-only `step_text` is a failure,
+            // not a quiet success: the provider said nothing, and settle's
+            // F6 guard only skips writing a blank assistant bubble because
+            // `text` is truncated back to what this step started with,
+            // below.
+            let has_tool_batch = calls.as_ref().is_some_and(|c| !c.is_empty());
+            if !has_tool_batch {
+                if step_text.trim().is_empty() {
+                    text.truncate(step_start_text_len);
+                    return Outcome::Failed {
+                        state: RunState {
+                            messages,
+                            text,
+                            effective_requested_model,
+                            responding_model,
+                            usage,
+                            steps,
+                        },
+                        failure: "The model provider completed without an answer.".to_string(),
+                        status: None,
+                    };
+                }
                 return Outcome::Answered(RunState {
                     messages,
                     text,
@@ -1848,7 +1879,8 @@ were doing unless he changed it."
                     usage,
                     steps,
                 });
-            };
+            }
+            let calls = calls.expect("has_tool_batch is true only when calls is Some");
 
             // The assistant turn that asked for the tools has to go back
             // verbatim, or the provider rejects the tool results as
