@@ -63,6 +63,9 @@ png = "0.17.16"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 tempfile = "3"
+# S8d-05b: constrains the external recorder receive window so upload cancellation
+# is observed before the production request body has fully entered the socket.
+socket2 = "0.6.5"
 # S1-05: `model::fake::FakePort` for the run-manager tests. `fake` is behind
 # a feature because it is only `cfg(test)` inside the `model` crate itself;
 # an integration test in `tests/` compiles `model` as an ordinary

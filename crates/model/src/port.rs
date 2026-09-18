@@ -205,7 +205,7 @@ pub const CHEAP_FALLBACK_MODELS: [&str; 2] =
 const ENDPOINT: &str = "https://openrouter.ai/api/v1/chat/completions";
 
 /// Tries on the requested model before the fallback gets one.
-const BUSY_TRIES: usize = 3;
+pub(crate) const BUSY_TRIES: usize = 3;
 /// The longest a single wait may be, whatever the provider asks.
 const BUSY_WAIT_CAP_MS: u64 = 5_000;
 
@@ -319,6 +319,14 @@ impl ModelPort for OpenRouterPort {
         let key_source = self.key_source.clone();
         let endpoint = self.endpoint.clone();
         let image_request = carries_image(&request);
+        if image_request {
+            return crate::image_transport::stream(
+                request,
+                key_source,
+                endpoint,
+                cfg!(feature = "fake"),
+            );
+        }
 
         Box::pin(async_stream::stream! {
             let mut attempts: Vec<String> = std::iter::repeat_n(request.model.clone(), BUSY_TRIES).collect();
@@ -345,14 +353,12 @@ impl ModelPort for OpenRouterPort {
                 };
 
                 let body = build_body(&request, model);
-                let send = client
+                let request_builder = client
                     .post(&endpoint)
                     .bearer_auth(&key)
                     .header("HTTP-Referer", "https://rainmade.io")
-                    .header("X-Title", "Bullpen")
-                    .json(&body)
-                    .send()
-                    .await;
+                    .header("X-Title", "Bullpen");
+                let send = request_builder.json(&body).send().await;
 
                 let res = match send {
                     Ok(r) => r,
@@ -405,6 +411,7 @@ impl ModelPort for OpenRouterPort {
                     Some(key),
                     None,
                     image_request,
+                    false,
                 );
                 while let Some(event) = inner.next().await {
                     yield event;
@@ -438,7 +445,7 @@ impl ModelPort for OpenRouterPort {
     }
 }
 
-fn build_body(request: &ModelRequest, model: &str) -> serde_json::Value {
+pub(crate) fn build_body(request: &ModelRequest, model: &str) -> serde_json::Value {
     let mut body = serde_json::json!({
         "model": model,
         "messages": request.messages,
@@ -468,6 +475,10 @@ fn build_body(request: &ModelRequest, model: &str) -> serde_json::Value {
     body
 }
 
+const IMAGE_PENDING_LINE_LIMIT: usize = 256 * 1024;
+const IMAGE_DECODED_OUTPUT_LIMIT: usize = 1024 * 1024;
+const IMAGE_PARTIAL_CALL_LIMIT: usize = 128;
+
 #[derive(Default, Clone)]
 struct PartialCall {
     id: String,
@@ -489,10 +500,10 @@ pub fn parse_sse_stream(
     key: Option<String>,
     idle_timeout: Option<Duration>,
 ) -> EventStream {
-    parse_sse_stream_inner(body, model, key, idle_timeout, false)
+    parse_sse_stream_inner(body, model, key, idle_timeout, false, false)
 }
 
-fn provider_error(raw: &str, key: Option<&str>, image_request: bool) -> String {
+pub(crate) fn provider_error(raw: &str, key: Option<&str>, image_request: bool) -> String {
     if image_request {
         return "The model provider rejected the screen observation without exposing its payload."
             .to_string();
@@ -500,13 +511,17 @@ fn provider_error(raw: &str, key: Option<&str>, image_request: bool) -> String {
     redact(raw, key).chars().take(2000).collect()
 }
 
-fn parse_sse_stream_inner(
-    body: impl Stream<Item = Result<Vec<u8>, String>> + Send + 'static,
+pub(crate) fn parse_sse_stream_inner<T>(
+    body: impl Stream<Item = Result<T, String>> + Send + 'static,
     model: String,
     key: Option<String>,
     idle_timeout: Option<Duration>,
     redact_image_errors: bool,
-) -> EventStream {
+    image_limits: bool,
+) -> EventStream
+where
+    T: AsRef<[u8]> + Send + 'static,
+{
     Box::pin(async_stream::stream! {
         let mut body = Box::pin(body);
         let mut buffer: Vec<u8> = Vec::new();
@@ -526,6 +541,7 @@ fn parse_sse_stream_inner(
         // finishing empty with no record of which of those two happened.
         let mut delta_count: u32 = 0;
         let mut frame_count: u32 = 0;
+        let mut emitted_bytes: usize = 0;
         let timeout_duration = idle_timeout.unwrap_or(Duration::from_secs(60));
 
         macro_rules! final_event {
@@ -584,11 +600,30 @@ fn parse_sse_stream_inner(
                     return;
                 }
             };
-            buffer.extend_from_slice(&chunk);
+            let chunk = chunk.as_ref();
+            if image_limits && chunk.len() > crate::image_transport::RESPONSE_FRAME_LIMIT {
+                yield ModelEvent::Error {
+                    message: "The model provider returned an oversized screen observation response.".to_string(),
+                    status: None,
+                };
+                return;
+            }
 
-            while let Some(pos) = buffer.iter().position(|&b| b == b'\n') {
-                let line_bytes: Vec<u8> = buffer.drain(..=pos).collect();
-                let mut line = String::from_utf8_lossy(&line_bytes[..line_bytes.len() - 1]).into_owned();
+            for segment in chunk.split_inclusive(|byte| *byte == b'\n') {
+                if image_limits
+                    && buffer.len().saturating_add(segment.len()) > IMAGE_PENDING_LINE_LIMIT
+                {
+                    yield ModelEvent::Error {
+                        message: "The model provider returned an oversized screen observation response.".to_string(),
+                        status: None,
+                    };
+                    return;
+                }
+                buffer.extend_from_slice(segment);
+                if !segment.ends_with(b"\n") {
+                    continue;
+                }
+                let line_bytes = std::mem::take(&mut buffer);                let mut line = String::from_utf8_lossy(&line_bytes[..line_bytes.len() - 1]).into_owned();
                 if line.ends_with('\r') {
                     line.pop();
                 }
@@ -607,7 +642,14 @@ fn parse_sse_stream_inner(
 
                 let frame: OpenRouterFrame = match serde_json::from_str(payload) {
                     Ok(f) => f,
-                    Err(_) => continue,
+                    Err(_) if !image_limits => continue,
+                    Err(_) => {
+                        yield ModelEvent::Error {
+                            message: "The model provider returned a malformed screen observation response.".to_string(),
+                            status: None,
+                        };
+                        return;
+                    }
                 };
 
                 frame_count += 1;
@@ -658,6 +700,38 @@ fn parse_sse_stream_inner(
                     if let Some(delta) = &choice.delta {
                         for fragment in delta.tool_calls.iter().flatten() {
                             let index = fragment.index.unwrap_or(0);
+                            if image_limits
+                                && !partial.contains_key(&index)
+                                && partial.len() >= IMAGE_PARTIAL_CALL_LIMIT
+                            {
+                                yield ModelEvent::Error {
+                                    message: "The model provider returned too many screen observation tool calls.".to_string(),
+                                    status: None,
+                                };
+                                return;
+                            }
+                            let added = fragment.id.as_ref().map_or(0, String::len)
+                                + fragment
+                                    .function
+                                    .as_ref()
+                                    .and_then(|function| function.name.as_ref())
+                                    .map_or(0, String::len)
+                                + fragment
+                                    .function
+                                    .as_ref()
+                                    .and_then(|function| function.arguments.as_ref())
+                                    .map_or(0, String::len);
+                            if image_limits
+                                && emitted_bytes.saturating_add(added)
+                                    > IMAGE_DECODED_OUTPUT_LIMIT
+                            {
+                                yield ModelEvent::Error {
+                                    message: "The model provider returned too much screen observation output.".to_string(),
+                                    status: None,
+                                };
+                                return;
+                            }
+                            emitted_bytes += added;
                             let slot = partial.entry(index).or_default();
                             if let Some(id) = &fragment.id
                                 && !id.is_empty()
@@ -678,6 +752,17 @@ fn parse_sse_stream_inner(
                         if let Some(text) = &delta.content
                             && !text.is_empty()
                         {
+                            if image_limits
+                                && emitted_bytes.saturating_add(text.len())
+                                    > IMAGE_DECODED_OUTPUT_LIMIT
+                            {
+                                yield ModelEvent::Error {
+                                    message: "The model provider returned too much screen observation output.".to_string(),
+                                    status: None,
+                                };
+                                return;
+                            }
+                            emitted_bytes += text.len();
                             delta_count += 1;
                             yield ModelEvent::Delta { text: text.clone() };
                         }

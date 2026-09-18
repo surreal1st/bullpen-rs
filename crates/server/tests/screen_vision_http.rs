@@ -6,9 +6,13 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use base64::Engine;
 use common::{own_conversation, seed_bot};
+use futures::StreamExt;
 use model::ladder::Trigger;
 use model::secrets::KeySource;
-use model::{ModelMessage, OpenRouterPort};
+use model::{
+    ContentPart, ImageUrl, MessageContent, ModelEvent, ModelMessage, ModelPort, ModelRequest,
+    OpenRouterPort,
+};
 use server::observations::ObservationAdmission;
 use server::runs::{RunEvent, RunManager, StartOptions};
 use server::sandbox;
@@ -25,6 +29,8 @@ enum FinalResponse {
     ProviderHttpError,
     ProviderSseError,
     BusyExhausted,
+    EofWithoutDone,
+    EmptyBody,
 }
 
 #[derive(Debug, Clone)]
@@ -38,25 +44,27 @@ struct WireSummary {
     provenance: Option<String>,
     image_hash: Option<String>,
     dispatch_in_use: usize,
+    request_target: String,
+    host: Option<String>,
 }
 
 struct Recorder {
     summaries: Arc<Mutex<Vec<WireSummary>>>,
     admission: Arc<Mutex<Option<Arc<ObservationAdmission>>>>,
     final_response: FinalResponse,
+    expected_host: String,
 }
 
 impl Recorder {
     async fn spawn(final_response: FinalResponse) -> (String, Arc<Self>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let endpoint = format!(
-            "http://127.0.0.1:{}/api/v1/chat/completions",
-            listener.local_addr().unwrap().port()
-        );
+        let expected_host = format!("127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let endpoint = format!("http://{expected_host}/api/v1/chat/completions",);
         let recorder = Arc::new(Self {
             summaries: Arc::new(Mutex::new(Vec::new())),
             admission: Arc::new(Mutex::new(None)),
             final_response,
+            expected_host,
         });
         let state = Arc::clone(&recorder);
         tokio::spawn(async move {
@@ -77,6 +85,18 @@ impl Recorder {
                     }
                 };
                 let headers = String::from_utf8_lossy(&bytes[..header_end]);
+                let request_target = headers
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or("")
+                    .to_string();
+                let host = headers.lines().find_map(|line| {
+                    line.split_once(':').and_then(|(name, value)| {
+                        name.eq_ignore_ascii_case("host")
+                            .then(|| value.trim().to_string())
+                    })
+                });
                 let content_length = headers
                     .lines()
                     .find_map(|line| {
@@ -102,7 +122,7 @@ impl Recorder {
                     .unwrap()
                     .as_ref()
                     .map_or(0, |admission| admission.snapshot().dispatch_in_use);
-                let summary = summarize(body, dispatch_in_use);
+                let summary = summarize(body, dispatch_in_use, request_target, host);
                 let request_number = {
                     let mut summaries = state.summaries.lock().unwrap();
                     summaries.push(summary);
@@ -110,6 +130,12 @@ impl Recorder {
                 };
 
                 let response = match request_number {
+                    1 if matches!(state.final_response, FinalResponse::EmptyBody) => {
+                        http_response("200 OK", "text/event-stream", "", &[])
+                    }
+                    1 if matches!(state.final_response, FinalResponse::EofWithoutDone) => {
+                        sse_response(done_sse_without_done())
+                    }
                     1 => sse_response(tool_call_sse()),
                     _ if matches!(state.final_response, FinalResponse::BusyExhausted)
                         || (matches!(state.final_response, FinalResponse::Success)
@@ -143,7 +169,12 @@ impl Recorder {
     }
 }
 
-fn summarize(body: &[u8], dispatch_in_use: usize) -> WireSummary {
+fn summarize(
+    body: &[u8],
+    dispatch_in_use: usize,
+    request_target: String,
+    host: Option<String>,
+) -> WireSummary {
     let value: serde_json::Value = serde_json::from_slice(body).expect("request JSON");
     let messages = value["messages"].as_array().expect("messages array");
     let roles = messages
@@ -197,6 +228,8 @@ fn summarize(body: &[u8], dispatch_in_use: usize) -> WireSummary {
         provenance,
         image_hash,
         dispatch_in_use,
+        request_target,
+        host,
     }
 }
 
@@ -217,7 +250,14 @@ fn http_response(
 }
 
 fn sse_response(body: String) -> String {
-    http_response("200 OK", "text/event-stream", &body, &[])
+    // One write carries headers, body, trailers and peer-close. The image
+    // connection may therefore become Ready in the same poll that makes the
+    // response available; a completed connection future must never be polled again.
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nTrailer: X-Fixture-Done\r\nConnection: close\r\n\r\n{:X}\r\n{}\r\n0\r\nX-Fixture-Done: yes\r\n\r\n",
+        body.len(),
+        body
+    )
 }
 
 fn tool_call_sse() -> String {
@@ -250,6 +290,10 @@ data: [DONE]
 
 "
     )
+}
+
+fn done_sse_without_done() -> String {
+    done_sse().replace("data: [DONE]\\n\\n", "")
 }
 
 fn done_sse() -> String {
@@ -394,7 +438,7 @@ async fn real_http_runmanager_image_request_retries_identical_wire_body() {
     let (db, manager, capture, recorder, run_id, events) = run_case(FinalResponse::Success).await;
     assert_eq!(capture.0.load(Ordering::SeqCst), 1);
     let summaries = recorder.summaries.lock().unwrap().clone();
-    assert_eq!(summaries.len(), 4);
+    assert_eq!(summaries.len(), 4, "events: {events:?}");
     let image_attempts = &summaries[1..];
     assert!(
         image_attempts
@@ -415,6 +459,16 @@ async fn real_http_runmanager_image_request_retries_identical_wire_body() {
         image_attempts
             .iter()
             .all(|request| request.dispatch_in_use == 1)
+    );
+    assert!(
+        image_attempts
+            .iter()
+            .all(|request| request.request_target == "/api/v1/chat/completions")
+    );
+    assert!(
+        image_attempts
+            .iter()
+            .all(|request| request.host.as_deref() == Some(&recorder.expected_host))
     );
 
     let wire = &image_attempts[0];
@@ -508,6 +562,84 @@ async fn real_http_provider_error_redacts_image_and_never_falls_back() {
     }
 }
 
+#[tokio::test]
+async fn real_http_sse_eof_without_done_drains_trailers_and_peer_close() {
+    let (endpoint, recorder) = Recorder::spawn(FinalResponse::EofWithoutDone).await;
+    let port =
+        OpenRouterPort::with_local_endpoint(KeySource::Inline("fixture-key".into()), endpoint)
+            .unwrap();
+    let events = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        port.stream(ModelRequest {
+            model: "vision/model".into(),
+            messages: vec![ModelMessage {
+                role: "user".into(),
+                content: MessageContent::Parts(vec![ContentPart::ImageUrl {
+                    image_url: ImageUrl {
+                        url: "data:image/png;base64,AA==".into(),
+                    },
+                }]),
+                tool_calls: None,
+                tool_call_id: None,
+            }],
+            ..Default::default()
+        })
+        .collect::<Vec<_>>(),
+    )
+    .await
+    .expect("peer-close SSE stream settled");
+
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, ModelEvent::Delta { text } if text == "screen seen"))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, ModelEvent::Done { .. }))
+    );
+    assert_eq!(recorder.summaries.lock().unwrap().len(), 1);
+}
+#[tokio::test]
+async fn real_http_empty_sse_body_closes_without_done() {
+    let (endpoint, recorder) = Recorder::spawn(FinalResponse::EmptyBody).await;
+    let port =
+        OpenRouterPort::with_local_endpoint(KeySource::Inline("fixture-key".into()), endpoint)
+            .unwrap();
+    let events = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        port.stream(ModelRequest {
+            model: "vision/model".into(),
+            messages: vec![ModelMessage {
+                role: "user".into(),
+                content: MessageContent::Parts(vec![ContentPart::ImageUrl {
+                    image_url: ImageUrl {
+                        url: "data:image/png;base64,AA==".into(),
+                    },
+                }]),
+                tool_calls: None,
+                tool_call_id: None,
+            }],
+            ..Default::default()
+        })
+        .collect::<Vec<_>>(),
+    )
+    .await
+    .expect("empty peer-close SSE stream settled");
+
+    assert_eq!(recorder.summaries.lock().unwrap().len(), 1);
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, ModelEvent::Done { .. }))
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, ModelEvent::Error { .. }))
+    );
+}
 #[test]
 fn local_endpoint_constructor_refuses_external_destinations() {
     assert!(

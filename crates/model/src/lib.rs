@@ -8,6 +8,7 @@
 //! and the run loop are later tickets.
 
 pub mod catalog;
+mod image_transport;
 pub mod ladder;
 pub mod port;
 pub mod routing;

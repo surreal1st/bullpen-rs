@@ -3404,7 +3404,12 @@ version = "0.1.0"
 dependencies = [
  "async-stream",
  "async-trait",
+ "bytes",
  "futures",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
  "reqwest",
  "serde",
  "serde_json",
@@ -3412,6 +3417,7 @@ dependencies = [
  "store",
  "thiserror 2.0.20",
  "tokio",
+ "tower-service",
  "tracing",
  "uuid",
 ]
@@ -5131,6 +5137,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "shared",
+ "socket2",
  "store",
  "subtle",
  "tempfile",

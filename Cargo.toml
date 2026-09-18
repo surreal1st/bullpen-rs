@@ -53,8 +53,12 @@ rand = "0.8"
 # rather than adding a stack. Approved by the orchestrator per
 # `.scratch/bullpen-rs/tickets/S6-tickets.md` S6-07 - do not add a third
 # HTTP/websocket crate without the same sign-off.
-hyper = { version = "1", features = ["http1", "server"] }
-hyper-util = { version = "0.1", features = ["http1", "server", "tokio", "service"] }
+hyper = { version = "1", features = ["client", "http1", "server"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "server", "tokio", "service"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "ring", "tls12", "webpki-tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+tower-service = "0.3"
 # S6-W-05: `HttpCdp::create_window`/`call` need a WebSocket client to open
 # DevTools' per-target and per-browser sockets - approved by the
 # orchestrator per `.scratch/bullpen-rs/tickets/S6-W-tickets.md` S6-W-03's
