@@ -18,7 +18,7 @@ use crate::model_chip::ModelChip;
 use crate::permissions_editor::PermissionsModal;
 use crate::questions::Questions;
 use crate::routines_editor::RoutinesModal;
-use crate::types::{Bot, Message, Role};
+use crate::types::{Bot, Message, Role, Section};
 use crate::vm_card::VmCard;
 use crate::working_bar::WorkingBar;
 use dioxus::prelude::*;
@@ -47,6 +47,13 @@ pub fn ChatPane(
     bot_name: String,
     #[props(default)] thread_id: Option<String>,
     #[props(default)] section_ids: Vec<String>,
+    // RAIL-02: the full section list (id + name) for the header's "Move to"
+    // picker - `section_ids` above only ever carries bare ids (`Avatar`'s
+    // colour hashing, `WorkingBar`'s own use), never names a `<select>`
+    // could show. `#[props(default)]` so the room branch of `app.rs`'s
+    // `ChatPane` call (which never renders `pane-head` at all - see this
+    // component's own doc on `bot: Option<Bot>`) does not have to pass one.
+    #[props(default)] sections: Vec<Section>,
     // S2-09b: the full roster row for the open bot, when this pane is a
     // bot's own conversation (not a room - `app.rs` only ever has one bot
     // object to hand over there). Carries the model pin/effort the header's
@@ -240,6 +247,11 @@ pub fn ChatPane(
     let mut rail_error = use_signal(|| None::<String>);
     let mut pin_busy = use_signal(|| false);
     let mut hide_busy = use_signal(|| false);
+    // RAIL-02: the "Move to" picker - a direct action, not a modal, same
+    // "no confirm" posture `toggle_pinned`/`toggle_hidden` already take
+    // (`rail_error` above is shared by all three, only one of them is ever
+    // busy at a time).
+    let mut move_busy = use_signal(|| false);
 
     rsx! {
         div { class: "pane",
@@ -309,6 +321,42 @@ pub fn ChatPane(
                         });
                     };
 
+                    // RAIL-02: moves the bot to the picked section, or to
+                    // Unassigned (`""`, the picker's own first option) -
+                    // same "seed a local copy, patch it on success" posture
+                    // as `toggle_pinned`/`toggle_hidden` above, except the
+                    // new value comes from the change event itself (a
+                    // `<select>`'s current choice) rather than a fixed
+                    // "next" computed ahead of time.
+                    let move_current = current.clone();
+                    let move_bot_id = bot_id.clone();
+                    let on_move_section = move |evt: FormEvent| {
+                        if *move_busy.read() {
+                            return;
+                        }
+                        let value = evt.value();
+                        let target = if value.is_empty() { None } else { Some(value) };
+                        move_busy.set(true);
+                        rail_error.set(None);
+                        let bot_id = move_bot_id.clone();
+                        let mut updated = move_current.clone();
+                        spawn(async move {
+                            match api::set_bot_section(&bot_id, target.as_deref()).await {
+                                Ok(()) => {
+                                    move_busy.set(false);
+                                    updated.section_id = target;
+                                    local_bot.set(Some(updated));
+                                    on_rail_changed.call(());
+                                }
+                                Err(err) => {
+                                    move_busy.set(false);
+                                    rail_error.set(Some(err));
+                                }
+                            }
+                        });
+                    };
+                    let current_section = current.section_id.clone().unwrap_or_default();
+
                     rsx! {
                         div { class: "pane-head",
                             div { class: "pane-head-who",
@@ -334,6 +382,17 @@ pub fn ChatPane(
                                     class: "pane-perms-btn",
                                     onclick: move |_| goals_open.set(true),
                                     "Goals"
+                                }
+                                select {
+                                    class: "pane-perms-btn",
+                                    "aria-label": "Move to section",
+                                    disabled: *move_busy.read(),
+                                    value: "{current_section}",
+                                    onchange: on_move_section,
+                                    option { value: "", "Unassigned" }
+                                    for section in sections.iter() {
+                                        option { key: "{section.id}", value: "{section.id}", "{section.name}" }
+                                    }
                                 }
                                 button {
                                     class: "pane-perms-btn",

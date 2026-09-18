@@ -12,7 +12,9 @@ use crate::message_time::format_time;
 use crate::model_chip::short_model;
 use crate::slack_card::SlackCard;
 use crate::transport::sleep;
-use crate::types::{AutoReviewLogEntry, AutoReviewState, CatalogEntry, RoutingState, SpendView};
+use crate::types::{
+    AutoReviewLogEntry, AutoReviewState, CatalogEntry, RoutingState, Section, SpendView,
+};
 use dioxus::prelude::*;
 use std::cell::Cell;
 use std::rc::Rc;
@@ -24,7 +26,14 @@ pub fn SettingsModal(
     // so `app.rs` can refresh the roster the same way `thread.rs`'s
     // `on_archived` already does for the other direction - this modal has
     // no roster of its own either, only the ability to ask for a refresh.
+    // RAIL-02's `SectionsSection` below reuses the same handler after a
+    // create/rename/delete, for the same reason.
     #[props(default)] on_restored: Option<EventHandler<()>>,
+    // RAIL-02: the live section list, same source `rail.rs` itself draws
+    // from (`app.rs`'s `data.sections`) - this modal has no roster fetch of
+    // its own (see `on_restored`'s doc above), so the list has to arrive as
+    // a prop rather than a second `/api/roster` call.
+    #[props(default)] sections: Vec<Section>,
 ) -> Element {
     rsx! {
         div {
@@ -51,7 +60,7 @@ pub fn SettingsModal(
                         button { class: "stg-nav-item is-on", "aria-current": "true", "General" }
                     }
                     div { class: "stg-panel",
-                        GeneralSettings { on_restored }
+                        GeneralSettings { on_restored, sections }
                     }
                 }
             }
@@ -60,7 +69,10 @@ pub fn SettingsModal(
 }
 
 #[component]
-fn GeneralSettings(#[props(default)] on_restored: Option<EventHandler<()>>) -> Element {
+fn GeneralSettings(
+    #[props(default)] on_restored: Option<EventHandler<()>>,
+    #[props(default)] sections: Vec<Section>,
+) -> Element {
     rsx! {
         section { class: "stg-group",
             h3 { class: "stg-group-h", "Bot" }
@@ -69,6 +81,7 @@ fn GeneralSettings(#[props(default)] on_restored: Option<EventHandler<()>>) -> E
                 RulesSection {}
                 RoutingSection {}
                 AutoReviewSection {}
+                SectionsManagerSection { sections, on_changed: on_restored }
                 ArchivedBotsSection { on_restored }
                 HiddenBotsSection { on_restored }
             }
@@ -1030,6 +1043,283 @@ fn ArchivedBotsSection(#[props(default)] on_restored: Option<EventHandler<()>>) 
                                 }
                             },
                             if busy_id.as_deref() == Some(bot.id.as_str()) { "Restoring…" } else { "Restore" }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/* ------------------------------------------------------------- RAIL-02 */
+
+/// RAIL-02: create, rename, and delete a section - the rail's settings
+/// affordance the ticket asks for, rather than a new top-level surface
+/// (same "tucked into Settings" placement `ArchivedBotsSection`/
+/// `HiddenBotsSection` below already take for the rest of the rail's
+/// context-menu actions). `sections` arrives as a prop (`app.rs`'s own
+/// `data.sections`, the same list `rail.rs` renders headers from) rather
+/// than a second fetch - there is no `GET /api/sections` route at all
+/// (`crates/server/src/routes/sections.rs`'s own doc: `/api/roster` already
+/// carries the list, and creating/renaming/deleting a section is visible
+/// there on the very next fetch). `on_changed` fires after every successful
+/// create/rename/delete so `app.rs` can re-fetch the roster - reusing
+/// `SettingsModal`'s existing `on_restored` handler rather than adding a
+/// third differently-named "please refresh" prop for the same thing
+/// `ArchivedBotsSection`/`HiddenBotsSection` already ask for.
+#[component]
+fn SectionsManagerSection(
+    sections: Vec<Section>,
+    #[props(default)] on_changed: Option<EventHandler<()>>,
+) -> Element {
+    let mut new_name = use_signal(String::new);
+    let mut create_busy = use_signal(|| false);
+    let mut create_error = use_signal(|| None::<String>);
+
+    let do_create = move |evt: FormEvent| {
+        evt.prevent_default();
+        if *create_busy.read() {
+            return;
+        }
+        let name = new_name.read().trim().to_string();
+        if name.is_empty() {
+            return;
+        }
+        create_busy.set(true);
+        create_error.set(None);
+        spawn(async move {
+            match api::create_section(&name).await {
+                Ok(_) => {
+                    create_busy.set(false);
+                    new_name.set(String::new());
+                    if let Some(handler) = on_changed.as_ref() {
+                        handler.call(());
+                    }
+                }
+                Err(err) => {
+                    create_busy.set(false);
+                    create_error.set(Some(err));
+                }
+            }
+        });
+    };
+
+    rsx! {
+        div { class: "stg-sub",
+            h4 { class: "stg-sub-h", "Sections" }
+            p { class: "set-note",
+                "Groups the rail. Deleting a section never deletes its bots - they fall back to Unassigned."
+            }
+
+            if let Some(err) = create_error.read().clone() {
+                div { class: "refusal",
+                    b { "Could not create." }
+                    p { "{err}" }
+                }
+            }
+
+            form { class: "stg-row", onsubmit: do_create,
+                input {
+                    class: "sec-name-input",
+                    value: "{new_name.read()}",
+                    placeholder: "New section name",
+                    "aria-label": "New section name",
+                    oninput: move |evt| new_name.set(evt.value()),
+                }
+                button {
+                    class: "stg-btn",
+                    r#type: "submit",
+                    disabled: *create_busy.read() || new_name.read().trim().is_empty(),
+                    if *create_busy.read() { "Adding…" } else { "Add" }
+                }
+            }
+
+            if sections.is_empty() {
+                p { class: "muted", "No sections yet - every bot shows under Unassigned." }
+            } else {
+                for section in sections.iter() {
+                    SectionRow {
+                        key: "{section.id}",
+                        section: section.clone(),
+                        on_changed,
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One row of `SectionsManagerSection`: an editable name (Rename, no
+/// confirm - the ticket's own "Renaming and moving do not ask") and a
+/// Delete button that opens `DeleteSectionConfirmModal` below (the ticket's
+/// own "Deleting a section asks first").
+#[component]
+fn SectionRow(section: Section, #[props(default)] on_changed: Option<EventHandler<()>>) -> Element {
+    let mut draft = use_signal(|| section.name.clone());
+    let mut busy = use_signal(|| false);
+    let mut error = use_signal(|| None::<String>);
+    let mut confirm_delete = use_signal(|| false);
+
+    let current_name = section.name.clone();
+    let changed = {
+        let trimmed = draft.read().trim().to_string();
+        !trimmed.is_empty() && trimmed != current_name
+    };
+
+    let rename_id = section.id.clone();
+    let do_rename = move |evt: FormEvent| {
+        evt.prevent_default();
+        if *busy.read() || !changed {
+            return;
+        }
+        busy.set(true);
+        error.set(None);
+        let id = rename_id.clone();
+        let name = draft.read().trim().to_string();
+        spawn(async move {
+            match api::rename_section(&id, &name).await {
+                Ok(_) => {
+                    busy.set(false);
+                    if let Some(handler) = on_changed.as_ref() {
+                        handler.call(());
+                    }
+                }
+                Err(err) => {
+                    busy.set(false);
+                    error.set(Some(err));
+                }
+            }
+        });
+    };
+
+    rsx! {
+        div { class: "stg-row",
+            form {
+                style: "display: flex; align-items: center; gap: 0.5rem; flex: 1; min-width: 0;",
+                onsubmit: do_rename,
+                input {
+                    class: "sec-name-input",
+                    value: "{draft.read()}",
+                    "aria-label": "Section name",
+                    oninput: move |evt| draft.set(evt.value()),
+                }
+                button {
+                    class: "stg-btn",
+                    r#type: "submit",
+                    disabled: *busy.read() || !changed,
+                    if *busy.read() { "Saving…" } else { "Rename" }
+                }
+            }
+            button {
+                class: "stg-btn danger",
+                r#type: "button",
+                onclick: move |_| confirm_delete.set(true),
+                "Delete"
+            }
+        }
+        if let Some(err) = error.read().clone() {
+            div { class: "refusal",
+                b { "Could not rename." }
+                p { "{err}" }
+            }
+        }
+        if *confirm_delete.read() {
+            DeleteSectionConfirmModal {
+                section: section.clone(),
+                on_close: move |_| confirm_delete.set(false),
+                on_deleted: move |_| {
+                    confirm_delete.set(false);
+                    if let Some(handler) = on_changed.as_ref() {
+                        handler.call(());
+                    }
+                },
+            }
+        }
+    }
+}
+
+/// RAIL-02: "Deleting a section asks first, and the confirm says its bots
+/// move to Unassigned rather than disappearing" - the ticket's own text,
+/// same `.modal-scrim`/`.modal`/`.rules-foot`/`.stg-btn`/`.stg-btn.danger`
+/// shape `thread.rs`'s `ArchiveConfirmModal` already establishes for
+/// exactly this "explain what actually happens, then a Cancel/danger-button
+/// pair" posture (see that component's own doc for the class list).
+#[component]
+fn DeleteSectionConfirmModal(
+    section: Section,
+    on_close: EventHandler<()>,
+    on_deleted: EventHandler<()>,
+) -> Element {
+    let mut busy = use_signal(|| false);
+    let mut error = use_signal(|| None::<String>);
+
+    let confirm_id = section.id.clone();
+    let confirm = move |_| {
+        if *busy.read() {
+            return;
+        }
+        busy.set(true);
+        error.set(None);
+        let id = confirm_id.clone();
+        spawn(async move {
+            match api::delete_section(&id).await {
+                Ok(()) => {
+                    busy.set(false);
+                    on_deleted.call(());
+                }
+                Err(err) => {
+                    busy.set(false);
+                    error.set(Some(err));
+                }
+            }
+        });
+    };
+
+    let is_busy = *busy.read();
+    let name = section.name.clone();
+
+    rsx! {
+        div {
+            class: "modal-scrim",
+            role: "presentation",
+            onclick: move |_| on_close.call(()),
+            div {
+                class: "modal archive-confirm-modal",
+                onclick: move |evt| evt.stop_propagation(),
+                role: "dialog",
+                "aria-modal": "true",
+                "aria-label": "Delete {name}",
+                div { class: "modal-head",
+                    h2 { "Delete {name}?" }
+                    button {
+                        class: "modal-x",
+                        "aria-label": "Close",
+                        onclick: move |_| on_close.call(()),
+                        "×"
+                    }
+                }
+                div { class: "modal-body",
+                    p { class: "set-note",
+                        "Its bots move to Unassigned - nothing is deleted but the grouping itself."
+                    }
+                    if let Some(err) = error.read().clone() {
+                        div { class: "refusal",
+                            b { "Could not delete." }
+                            p { "{err}" }
+                        }
+                    }
+                    div { class: "rules-foot",
+                        button {
+                            class: "stg-btn",
+                            disabled: is_busy,
+                            onclick: move |_| on_close.call(()),
+                            "Cancel"
+                        }
+                        button {
+                            class: "stg-btn danger",
+                            disabled: is_busy,
+                            onclick: confirm,
+                            if is_busy { "Deleting…" } else { "Delete" }
                         }
                     }
                 }

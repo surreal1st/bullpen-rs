@@ -22,6 +22,7 @@ mod questions;
 mod rooms;
 mod routines;
 mod runs;
+mod sections;
 mod settings;
 mod slack;
 mod spend;
@@ -60,6 +61,7 @@ pub fn router() -> Router<AppState> {
         .merge(questions::router())
         .merge(rooms::router())
         .merge(routines::router())
+        .merge(sections::router())
         .merge(messages::router())
         .merge(events::router())
         .merge(runs::router())

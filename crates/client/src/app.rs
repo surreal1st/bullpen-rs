@@ -332,6 +332,11 @@ fn AppShell() -> Element {
                             bot_id: bot.id.clone(),
                             bot_name: bot.name.clone(),
                             section_ids: section_ids.clone(),
+                            // RAIL-02: the full section list (id + name), for
+                            // the header's "Move to" picker - `section_ids`
+                            // above only ever carried ids (avatar hashing),
+                            // never names a picker could show.
+                            sections: data.sections.clone(),
                             bot: Some(bot.clone()),
                             on_seen: move |_| {
                                 spawn(async move {
@@ -427,10 +432,19 @@ fn AppShell() -> Element {
                 // ARCH-01: a restore from `ArchivedBotsSection` should bring
                 // the bot back into the rail right away, same refresh
                 // `ChatPane`'s own `on_seen`/`on_archived` already trigger.
+                // RAIL-02's `SectionsManagerSection` reuses this same
+                // handler after a create/rename/delete.
                 on_restored: move |_| {
                     spawn(async move {
                         roster.set(Some(fetch_roster().await));
                     });
+                },
+                // RAIL-02: same source `Rail` itself reads sections from
+                // (`data.sections`, above) - the modal has no roster fetch
+                // of its own, see `SettingsModal`'s own doc on `sections`.
+                sections: match roster.read().as_ref() {
+                    Some(Ok(data)) => data.sections.clone(),
+                    _ => Vec::new(),
                 },
             }
         }

@@ -47,6 +47,24 @@ pub struct Section {
     pub name: String,
 }
 
+/// RAIL-02: `POST /api/sections`'s success shape.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SectionField {
+    pub section: Section,
+}
+
+/// RAIL-02: `PATCH`/`DELETE /api/sections/:id`'s success shape. `DELETE`
+/// also carries `bots` (the ticket's own "one call refreshes the rail"), but
+/// `settings.rs`'s section manager does not read it - the very next
+/// `on_restored` refetch of `/api/roster` is what actually updates the rail,
+/// same posture `set_bot_pinned`/`set_bot_hidden` in `api.rs` already take
+/// with `patch_rail`'s own echoed roster.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SectionsField {
+    #[serde(default)]
+    pub sections: Vec<Section>,
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Bot {
     pub id: String,

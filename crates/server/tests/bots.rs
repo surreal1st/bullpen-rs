@@ -993,3 +993,112 @@ async fn hidden_and_archived_are_independent() {
         "restoring an archived bot must not clear its hidden flag: {hidden_bots:?}"
     );
 }
+
+/* --------------------------------------------------------------- RAIL-02 */
+//
+// `sectionId` on the same `PATCH /api/bots/:id/rail` route these RAIL-01
+// tests above already exercise - kept in this file rather than the new
+// `tests/sections.rs` (which owns the `POST`/`PATCH`/`DELETE /api/sections`
+// routes) because these tests drive the SAME route/handler as
+// `pinning_moves_the_bot_to_the_front...` and the rest above, and reuse
+// their local helpers (`seed_bot`, `patch_route`, `get_route`) directly.
+
+fn seed_section(db: &Db, id: &str, name: &str, position: i32) {
+    db.conn()
+        .execute(
+            "INSERT INTO sections (id, name, position) VALUES (?1, ?2, ?3)",
+            rusqlite::params![id, name, position],
+        )
+        .expect("seed section");
+}
+
+/// Bite: `sectionId` moves the bot - checked via `sectionId` on the PATCH's
+/// own echoed roster row AND a fresh `/api/roster` fetch (same "not just the
+/// echo" posture the pinning test above already takes). `null` and `""`
+/// both fall back to Unassigned (`sectionId: null`), matching the TS guard
+/// `typeof section === "string" && section !== "" ? section : null` exactly -
+/// a mutation that only special-cased `null` (and let `""` slip through as
+/// a literal empty-string section id) would still pass a narrower test than
+/// this one.
+#[tokio::test]
+async fn rail_section_id_moves_the_bot_null_and_empty_string_unassign() {
+    let db = open_db();
+    seed_bot(&db, "test-bot", "Test Bot");
+    seed_section(&db, "shoot", "SHOOT", 1);
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let (status, response) = patch_route(
+        &app,
+        "/api/bots/test-bot/rail",
+        &session,
+        json!({ "sectionId": "shoot" }),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let bots = response["bots"].as_array().unwrap();
+    let bot = bots.iter().find(|b| b["id"] == "test-bot").unwrap();
+    assert_eq!(bot["sectionId"], "shoot");
+
+    let (_status, roster) = get_route(&app, "/api/roster", &session).await;
+    let bots = roster["bots"].as_array().unwrap();
+    let bot = bots.iter().find(|b| b["id"] == "test-bot").unwrap();
+    assert_eq!(
+        bot["sectionId"], "shoot",
+        "the move must hold on a fresh fetch too, not just the PATCH's own echo"
+    );
+
+    for unassign in [json!(null), json!("")] {
+        let (status, response) = patch_route(
+            &app,
+            "/api/bots/test-bot/rail",
+            &session,
+            json!({ "sectionId": unassign }),
+        )
+        .await;
+        assert_eq!(status, 200, "sectionId={unassign:?}");
+        let bots = response["bots"].as_array().unwrap();
+        let bot = bots.iter().find(|b| b["id"] == "test-bot").unwrap();
+        assert!(
+            bot["sectionId"].is_null(),
+            "sectionId={unassign:?} must unassign: {bot:?}"
+        );
+    }
+}
+
+/// Bite: an unknown `sectionId` is 400 with the ticket's exact message, and
+/// nothing else in the SAME request lands - `pinned` is sent alongside it
+/// and must NOT be applied. Checked against a fresh roster fetch afterward,
+/// not just the 400 status: a mutation that dropped the existence check
+/// would move the bot to a section id that does not exist (still visible as
+/// a `sectionId` the roster query never filters on) and this test would
+/// catch the pin leaking through even if that half were somehow missed.
+#[tokio::test]
+async fn rail_unknown_section_id_is_400_and_nothing_in_the_request_applies() {
+    let db = open_db();
+    seed_bot(&db, "test-bot", "Test Bot");
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let (status, response) = patch_route(
+        &app,
+        "/api/bots/test-bot/rail",
+        &session,
+        json!({ "sectionId": "does-not-exist", "pinned": true }),
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(response["error"], "no such section");
+
+    let (_status, roster) = get_route(&app, "/api/roster", &session).await;
+    let bots = roster["bots"].as_array().unwrap();
+    let bot = bots.iter().find(|b| b["id"] == "test-bot").unwrap();
+    assert!(
+        bot["sectionId"].is_null(),
+        "an unknown section must not have moved the bot: {bot:?}"
+    );
+    assert_eq!(
+        bot["pinned"], false,
+        "pinned must not apply when sectionId in the same request is refused: {bot:?}"
+    );
+}

@@ -43,6 +43,14 @@
 //! `sectionId`/`avatar`/`shape` later is one more `if let Some(raw) =
 //! obj.get("...")` block beside these two, not a rewrite of how the body is
 //! read or how the route answers.
+//!
+//! RAIL-02 adds that `sectionId` block - sections now have their own CRUD
+//! (`routes/sections.rs`), so the room RAIL-01 left is filled in. Checked
+//! and applied FIRST, before `pinned`/`hidden`, matching the TS route's own
+//! ordering: an unknown section id fails the WHOLE request (400, nothing
+//! else applied) rather than moving on to pin/hide with the bot left in its
+//! old section - a partial write here (wrong section, but now also pinned)
+//! would be worse than a flat refusal. `avatar`/`shape` remain out of scope.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -280,21 +288,34 @@ async fn list_archived_bots(State(state): State<AppState>) -> Result<Response, c
     Ok(Json(json!({ "bots": bots })).into_response())
 }
 
-/// RAIL-01: `PATCH /api/bots/:id/rail` - port of `app.ts:2340-2362`'s route,
-/// narrowed to `pinned`/`hidden` (see this file's top doc comment on the
-/// `sectionId`/`avatar`/`shape` room left for later).
+/// RAIL-01/RAIL-02: `PATCH /api/bots/:id/rail` - port of `app.ts:2340-2362`'s
+/// route, narrowed to `pinned`/`hidden`/`sectionId` (see this file's top doc
+/// comment on the `avatar`/`shape` room left for later).
 ///
 /// The 404 check runs FIRST, before the body is even read - matching the
 /// TS's own `const bot = getBot(...); if (!bot) return ...404` ahead of its
 /// `c.req.json()` call, and the ticket's own "checked first."
 ///
-/// Each field is applied only when present AND a JSON boolean, matching the
-/// TS `typeof body["pinned"] === "boolean"` guard exactly: a string `"false"`,
-/// a number, or `null` for either key is silently ignored rather than
-/// coerced or refused - the same "ignore the wrong shape" posture as a
-/// missing key, not an error. A body with neither key (including `{}`, or a
-/// body that fails to parse at all - read the same forgiving way
-/// `create_bot`/`archive_bot` above do) is therefore a no-op 200, not a 400.
+/// `sectionId` is checked and applied next, BEFORE `pinned`/`hidden` -
+/// again matching the TS route's own order. `"sectionId" in body` in the TS
+/// means "the key is present at all", not "present and a string": any
+/// non-empty string moves the bot there, and EVERYTHING else present under
+/// that key (`null`, `""`, a number, an object) collapses to Unassigned,
+/// same as the TS `typeof section === "string" && section !== "" ? section
+/// : null`. An unknown target - checked by `store::move_bot`'s own existence
+/// query - fails the WHOLE request with `400 {"error": "no such section"}`
+/// and returns immediately, before `pinned`/`hidden` are even looked at: a
+/// partial write (wrong section, but now also pinned) would be worse than a
+/// flat refusal.
+///
+/// `pinned`/`hidden` are each applied only when present AND a JSON boolean,
+/// matching the TS `typeof body["pinned"] === "boolean"` guard exactly: a
+/// string `"false"`, a number, or `null` for either key is silently ignored
+/// rather than coerced or refused - the same "ignore the wrong shape"
+/// posture as a missing key, not an error. A body with none of the three
+/// keys (including `{}`, or a body that fails to parse at all - read the
+/// same forgiving way `create_bot`/`archive_bot` above do) is therefore a
+/// no-op 200, not a 400.
 async fn patch_rail(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -307,6 +328,16 @@ async fn patch_rail(
 
     let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap_or_else(|_| json!({}));
     let obj = parsed.as_object().cloned().unwrap_or_default();
+
+    if let Some(raw) = obj.get("sectionId") {
+        let target: Option<&str> = match raw {
+            serde_json::Value::String(s) if !s.is_empty() => Some(s.as_str()),
+            _ => None,
+        };
+        if !store::move_bot(&db, &id, target)? {
+            return Err(crate::AppError::bad_request("no such section"));
+        }
+    }
 
     if let Some(serde_json::Value::Bool(pinned)) = obj.get("pinned") {
         store::set_pinned(&db, &id, *pinned)?;

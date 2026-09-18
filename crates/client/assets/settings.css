@@ -683,6 +683,25 @@
   border-color: color-mix(in srgb, var(--danger) 42%, var(--line));
 }
 
+/* RAIL-02: the Sections manager's name field (create row + each section's
+   inline rename), inside settings.rs's `SectionsManagerSection`/`SectionRow`.
+   Same bordered-box look `.mem-add-note input` already establishes for a
+   name field beside a submit button, just not nested in that class's own
+   flex/gap layout - both call sites here already sit inside `.stg-row`
+   (create) or a bare inline-flex form (rename), so only the input itself
+   needs its own rule. */
+.sec-name-input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--ink);
+  padding: 0.4rem 0.6rem;
+  font: inherit;
+  font-size: 0.85rem;
+}
+
 .stg-toggle {
   flex: none;
   width: 2.4rem;

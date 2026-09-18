@@ -10,8 +10,9 @@ use crate::types::{
     HiddenBotsResponse, MadeTool, MemoryEntry, MemoryEntryField, MemoryView, ModelError,
     ModelField, ModelsResponse, OpenQuestion, PendingApproval, PermissionsField, ProjectField,
     ProjectSummary, ProjectsField, QuestionsResponse, RoomResponse, RoomSummary, RoomsResponse,
-    Routine, RoutineRun, RoutingState, RulesField, SharedCoreField, SharedLogField, SpendView,
-    Tier1Models, Tier1Response, VmState, WorkingBot, WorkingResponse,
+    Routine, RoutineRun, RoutingState, RulesField, Section, SectionField, SectionsField,
+    SharedCoreField, SharedLogField, SpendView, Tier1Models, Tier1Response, VmState, WorkingBot,
+    WorkingResponse,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -1039,6 +1040,89 @@ pub async fn fetch_hidden_bots() -> Result<Vec<Bot>, String> {
         .await
         .map(|b| b.bots)
         .map_err(|e| e.to_string())
+}
+
+/* --------------------------------------------------------------- RAIL-02 */
+
+/// `POST /api/sections` - `settings.rs`'s section manager. A refused name
+/// (empty/whitespace) surfaces the server's own message, same posture as
+/// `create_bot` above.
+pub async fn create_section(name: &str) -> Result<Section, String> {
+    let resp = Request::post("/api/sections")
+        .json(&serde_json::json!({ "name": name }))
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if resp.ok() {
+        return resp
+            .json::<SectionField>()
+            .await
+            .map(|b| b.section)
+            .map_err(|e| e.to_string());
+    }
+    let status = resp.status();
+    match resp.json::<ModelError>().await {
+        Ok(err) => Err(err.error),
+        Err(_) => Err(format!("/api/sections -> {status}")),
+    }
+}
+
+/// `PATCH /api/sections/:id` - renames a section. Returns the fresh section
+/// list on success (the route's own "one call refreshes the rail" shape),
+/// though `settings.rs`'s manager re-fetches the whole roster afterward via
+/// its `on_restored` handler anyway, same posture `patch_rail` below already
+/// takes with ITS echoed roster.
+pub async fn rename_section(id: &str, name: &str) -> Result<Vec<Section>, String> {
+    let url = format!("/api/sections/{id}");
+    let resp = Request::patch(&url)
+        .json(&serde_json::json!({ "name": name }))
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if resp.ok() {
+        return resp
+            .json::<SectionsField>()
+            .await
+            .map(|b| b.sections)
+            .map_err(|e| e.to_string());
+    }
+    let status = resp.status();
+    match resp.json::<ModelError>().await {
+        Ok(err) => Err(err.error),
+        Err(_) => Err(format!("{url} -> {status}")),
+    }
+}
+
+/// `DELETE /api/sections/:id` - the ticket's own "deleting a section asks
+/// first" confirm lives in `settings.rs`, not here; this is the call that
+/// confirm's "Delete" button fires. The bots that were in the section are
+/// NOT deleted (`crates/server/src/routes/sections.rs::delete_section`'s own
+/// doc) - they fall back to Unassigned, which is why the confirm text says
+/// exactly that rather than "and everything in it".
+pub async fn delete_section(id: &str) -> Result<(), String> {
+    let url = format!("/api/sections/{id}");
+    let resp = Request::delete(&url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if resp.ok() {
+        return Ok(());
+    }
+    let status = resp.status();
+    match resp.json::<ModelError>().await {
+        Ok(err) => Err(err.error),
+        Err(_) => Err(format!("{url} -> {status}")),
+    }
+}
+
+/// Moves a bot to a section, or to Unassigned (`target: None`) - `thread.rs`'s
+/// header "Move to" picker. Reuses `patch_rail`'s own explicit-single-key
+/// posture (see its doc above `set_bot_pinned`): a call from this client
+/// sends `sectionId` alone, never bundled with `pinned`/`hidden`.
+pub async fn set_bot_section(bot_id: &str, target: Option<&str>) -> Result<(), String> {
+    patch_rail(bot_id, serde_json::json!({ "sectionId": target })).await
 }
 
 /* --------------------------------------------------------------- S3-05: memory */
