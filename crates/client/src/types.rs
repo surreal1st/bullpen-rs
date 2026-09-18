@@ -87,6 +87,15 @@ pub struct Bot {
     pub model: Option<String>,
     #[serde(default = "default_effort")]
     pub effort: String,
+    // ARCH-01: `false` for every bot the roster (`GET /api/roster`) ever
+    // carries - `store::list_roster` filters `archived_at IS NULL`, so this
+    // only ever reads `true` on a row from `GET /api/bots/archived`
+    // (`api::fetch_archived_bots`, `settings.rs`'s restore section).
+    // `#[serde(default)]` rather than required: the field exists on every
+    // real server response, but keeps this struct decoding a hand-built
+    // fixture that omits it, same posture as every other field here.
+    #[serde(default)]
+    pub archived: bool,
 }
 
 fn default_effort() -> String {
@@ -97,6 +106,17 @@ fn default_effort() -> String {
 pub struct Roster {
     #[serde(default)]
     pub sections: Vec<Section>,
+    #[serde(default)]
+    pub bots: Vec<Bot>,
+}
+
+/// `GET /api/bots/archived`'s response shape - the restore surface's only
+/// fetch. Reuses `Bot` rather than a narrower type: every field on it is
+/// still meaningful for an archived row (a pinned model, a purpose to show
+/// beside the name), and `settings.rs`'s list has no reason to throw any of
+/// it away.
+#[derive(Debug, Clone, PartialEq, Deserialize, Default)]
+pub struct ArchivedBotsResponse {
     #[serde(default)]
     pub bots: Vec<Bot>,
 }

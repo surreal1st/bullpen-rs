@@ -18,7 +18,14 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 #[component]
-pub fn SettingsModal(on_close: EventHandler<()>) -> Element {
+pub fn SettingsModal(
+    on_close: EventHandler<()>,
+    // ARCH-01: fires once a restore in `ArchivedBotsSection` below succeeds,
+    // so `app.rs` can refresh the roster the same way `thread.rs`'s
+    // `on_archived` already does for the other direction - this modal has
+    // no roster of its own either, only the ability to ask for a refresh.
+    #[props(default)] on_restored: Option<EventHandler<()>>,
+) -> Element {
     rsx! {
         div {
             class: "modal-scrim",
@@ -44,7 +51,7 @@ pub fn SettingsModal(on_close: EventHandler<()>) -> Element {
                         button { class: "stg-nav-item is-on", "aria-current": "true", "General" }
                     }
                     div { class: "stg-panel",
-                        GeneralSettings {}
+                        GeneralSettings { on_restored }
                     }
                 }
             }
@@ -53,7 +60,7 @@ pub fn SettingsModal(on_close: EventHandler<()>) -> Element {
 }
 
 #[component]
-fn GeneralSettings() -> Element {
+fn GeneralSettings(#[props(default)] on_restored: Option<EventHandler<()>>) -> Element {
     rsx! {
         section { class: "stg-group",
             h3 { class: "stg-group-h", "Bot" }
@@ -62,6 +69,7 @@ fn GeneralSettings() -> Element {
                 RulesSection {}
                 RoutingSection {}
                 AutoReviewSection {}
+                ArchivedBotsSection { on_restored }
             }
         }
         section { class: "stg-group",
@@ -931,6 +939,96 @@ fn AutoReviewSection() -> Element {
                                     td { "{entry.decision}" }
                                 }
                             }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/* ------------------------------------------------------------- ARCH-01 */
+
+/// ARCH-01: the only place an archived bot is still reachable - deliberately
+/// quiet (the ticket's own word), tucked at the bottom of the "Bot" group
+/// rather than a primary rail/header surface, but it has to exist somewhere
+/// or archiving is a one-way door. Same fetch-on-mount, plain-list shape as
+/// `SpendUsage`'s per-bot rows above; "Restore" is one click, no confirm -
+/// unlike `thread.rs`'s `ArchiveConfirmModal`, restoring only ever ADDS a
+/// bot back to the roster, so there is nothing here a mis-click could lose.
+#[component]
+fn ArchivedBotsSection(#[props(default)] on_restored: Option<EventHandler<()>>) -> Element {
+    let mut bots = use_signal(Vec::<crate::types::Bot>::new);
+    let mut load_error = use_signal(|| None::<String>);
+    let mut restore_error = use_signal(|| None::<String>);
+    let mut restoring = use_signal(|| None::<String>);
+
+    use_effect(move || {
+        spawn(async move {
+            match api::fetch_archived_bots().await {
+                Ok(list) => bots.set(list),
+                Err(err) => load_error.set(Some(err)),
+            }
+        });
+    });
+
+    let list = bots.read().clone();
+    let busy_id = restoring.read().clone();
+
+    rsx! {
+        div { class: "stg-sub",
+            h4 { class: "stg-sub-h", "Archived bots" }
+            p { class: "set-note",
+                "Hidden from the roster, not deleted - conversations, memory and spend history are all still there. Restore one to bring it back."
+            }
+
+            if let Some(err) = load_error.read().clone() {
+                div { class: "refusal",
+                    b { "Could not load archived bots." }
+                    p { "{err}" }
+                }
+            }
+
+            if let Some(err) = restore_error.read().clone() {
+                div { class: "refusal",
+                    b { "Could not restore." }
+                    p { "{err}" }
+                }
+            }
+
+            if list.is_empty() && load_error.read().is_none() {
+                p { class: "muted", "No archived bots." }
+            } else {
+                for bot in list.iter() {
+                    div { key: "{bot.id}", class: "stg-row",
+                        span { "{bot.name}" }
+                        button {
+                            class: "stg-btn",
+                            disabled: busy_id.as_deref() == Some(bot.id.as_str()),
+                            onclick: {
+                                let id = bot.id.clone();
+                                move |_| {
+                                    let id = id.clone();
+                                    restoring.set(Some(id.clone()));
+                                    restore_error.set(None);
+                                    spawn(async move {
+                                        match api::archive_bot(&id, false).await {
+                                            Ok(_) => {
+                                                bots.write().retain(|b| b.id != id);
+                                                restoring.set(None);
+                                                if let Some(handler) = on_restored.as_ref() {
+                                                    handler.call(());
+                                                }
+                                            }
+                                            Err(err) => {
+                                                restoring.set(None);
+                                                restore_error.set(Some(err));
+                                            }
+                                        }
+                                    });
+                                }
+                            },
+                            if busy_id.as_deref() == Some(bot.id.as_str()) { "Restoring…" } else { "Restore" }
                         }
                     }
                 }

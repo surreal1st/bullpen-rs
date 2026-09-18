@@ -46,7 +46,7 @@ pub fn run(db: &Arc<std::sync::Mutex<Db>>, args: &str) -> String {
         return format!("No such room: {}", parsed.room);
     };
 
-    let bots = store::list_bots(&db).expect("list_bots");
+    let bots = store::list_bots(&db, false).expect("list_bots");
     let Some(bot) = bots
         .into_iter()
         .find(|b| b.id == parsed.bot || b.name.eq_ignore_ascii_case(&parsed.bot))

@@ -46,16 +46,23 @@ fn row_to_bot(row: BotRow) -> Bot {
     }
 }
 
-/// List all non-archived bots, ordered by name.
-pub fn list_bots(db: &Db) -> rusqlite::Result<Vec<Bot>> {
+/// List bots, ordered by name - port shape of `store.ts:521-528`'s
+/// `listAllBots`, narrowed to the one axis this ticket needs (no `scope`
+/// support here, same narrowing `create_bot`'s own doc already calls out for
+/// this schema). ARCH-01: the filter lives in the CALLER's hands (`archived`
+/// picks which side of `archived_at IS NULL` this returns) rather than a
+/// second, near-duplicate query function - every existing call site wants
+/// `false` (the roster's own bots), and the new archived-bot listing route
+/// is the one caller that wants `true`.
+pub fn list_bots(db: &Db, archived: bool) -> rusqlite::Result<Vec<Bot>> {
     let mut stmt = db.conn().prepare(
         "SELECT id, name, purpose, instructions, model, archived_at, has_routine,
                 section_id, pinned_at, hidden_at, avatar, shape, effort, is_template, voice
-         FROM bots WHERE archived_at IS NULL ORDER BY name",
+         FROM bots WHERE (archived_at IS NOT NULL) = ?1 ORDER BY name",
     )?;
 
     let bots = stmt
-        .query_map([], |row| {
+        .query_map(params![archived as i64], |row| {
             Ok(BotRow {
                 id: row.get(0)?,
                 name: row.get(1)?,
@@ -221,6 +228,25 @@ fn slug_for(db: &Db, name: &str) -> rusqlite::Result<String> {
         candidate = format!("{base}-{n}");
         n += 1;
     }
+}
+
+/// ARCH-01: archives or restores a bot - port of `store.ts:511-519`'s
+/// `setArchived`. `None` when no such bot exists, so the route can answer
+/// 404 rather than silently writing nothing. Archiving stamps `archived_at`
+/// with the current ISO timestamp; restoring sets it back to `NULL` -
+/// nothing else on the row changes, and nothing referencing this bot
+/// (conversations, messages, memory) is touched at all: archiving hides a
+/// bot from the roster, it does not delete anything.
+pub fn set_archived(db: &Db, id: &str, archived: bool) -> rusqlite::Result<Option<Bot>> {
+    if get_bot(db, id)?.is_none() {
+        return Ok(None);
+    }
+    let archived_at = archived.then(now_iso);
+    db.conn().execute(
+        "UPDATE bots SET archived_at = ?1 WHERE id = ?2",
+        params![archived_at, id],
+    )?;
+    get_bot(db, id)
 }
 
 /// F7b-01: adds a bot to the roster - port of `store.ts:411-426`'s

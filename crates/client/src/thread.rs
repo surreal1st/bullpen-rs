@@ -56,6 +56,15 @@ pub fn ChatPane(
     // component's own `## Result` note on the gap).
     #[props(default)] bot: Option<Bot>,
     on_seen: EventHandler<()>,
+    // ARCH-01: fires once the confirm modal's archive call resolves, so
+    // `app.rs` can refresh the roster the same way `on_seen` already does -
+    // this component has no roster/selection state of its own (see this
+    // component's own doc on `on_seen`), only the ability to ask for a
+    // refresh. Once the roster no longer carries this bot, `app.rs`'s own
+    // `selected_bot` lookup (`data.bots.iter().find(...)`) comes back
+    // `None` on its own, which is what actually moves the pane off the
+    // archived bot - nothing here has to clear a selection directly.
+    on_archived: EventHandler<()>,
 ) -> Element {
     let mut messages = use_signal(Vec::<Message>::new);
     let mut streaming = use_signal(|| None::<String>);
@@ -205,6 +214,12 @@ pub fn ChatPane(
     // S5b-07: the goals pane, same placement again - see
     // `goals_editor.rs`'s `GoalsModal`.
     let mut goals_open = use_signal(|| false);
+    // ARCH-01: the archive confirm, same placement again - see
+    // `ArchiveConfirmModal` below. A confirm rather than a one-click action
+    // (unlike e.g. `routines_editor.rs`'s "Delete" button): archiving hides
+    // a bot from the roster, and a mis-click that makes a bot vanish is
+    // exactly the kind of thing Josh would have to come asking about.
+    let mut archive_open = use_signal(|| false);
 
     rsx! {
         div { class: "pane",
@@ -233,6 +248,11 @@ pub fn ChatPane(
                             class: "pane-perms-btn",
                             onclick: move |_| goals_open.set(true),
                             "Goals"
+                        }
+                        button {
+                            class: "pane-perms-btn",
+                            onclick: move |_| archive_open.set(true),
+                            "Archive"
                         }
                         ModelChip {
                             bot: current,
@@ -278,6 +298,17 @@ pub fn ChatPane(
                     bot_id: bot_id.clone(),
                     bot_name: bot_name.clone(),
                     on_close: move |_| goals_open.set(false),
+                }
+            }
+            if *archive_open.read() {
+                ArchiveConfirmModal {
+                    bot_id: bot_id.clone(),
+                    bot_name: bot_name.clone(),
+                    on_close: move |_| archive_open.set(false),
+                    on_archived: move |_| {
+                        archive_open.set(false);
+                        on_archived.call(());
+                    },
                 }
             }
             if let Some(err) = load_error.read().clone() {
@@ -398,6 +429,98 @@ fn Thread(
             // placement from `App.tsx:1276-1286`.
             WorkingBar { conversation_id, section_ids: section_ids.clone() }
             div { onmounted: move |evt| anchor.set(Some(evt.data())) }
+        }
+    }
+}
+
+/// ARCH-01: the confirm step in front of `api::archive_bot`. Reuses the same
+/// `.modal-scrim`/`.modal`/`.modal-head`/`.modal-x`/`.rules-foot`/`.stg-btn`/
+/// `.refusal` shell every other modal in this client already does (see
+/// `goals_editor.rs`'s `GoalsModal` doc on why that reuse is deliberate) -
+/// the one new class is `.danger` on the confirm button itself
+/// (`assets/settings.css`'s `.stg-btn.danger`, the same red `.routine-acts
+/// button.danger` already uses elsewhere, just not scoped to that
+/// container).
+#[component]
+fn ArchiveConfirmModal(
+    bot_id: String,
+    bot_name: String,
+    on_close: EventHandler<()>,
+    on_archived: EventHandler<()>,
+) -> Element {
+    let mut busy = use_signal(|| false);
+    let mut error = use_signal(|| None::<String>);
+
+    let confirm_bot_id = bot_id.clone();
+    let confirm = move |_| {
+        if *busy.read() {
+            return;
+        }
+        busy.set(true);
+        error.set(None);
+        let bot_id = confirm_bot_id.clone();
+        spawn(async move {
+            match api::archive_bot(&bot_id, true).await {
+                Ok(_) => {
+                    busy.set(false);
+                    on_archived.call(());
+                }
+                Err(err) => {
+                    busy.set(false);
+                    error.set(Some(err));
+                }
+            }
+        });
+    };
+
+    let is_busy = *busy.read();
+
+    rsx! {
+        div {
+            class: "modal-scrim",
+            role: "presentation",
+            onclick: move |_| on_close.call(()),
+            div {
+                class: "modal archive-confirm-modal",
+                onclick: move |evt| evt.stop_propagation(),
+                role: "dialog",
+                "aria-modal": "true",
+                "aria-label": "Archive {bot_name}",
+                div { class: "modal-head",
+                    h2 { "Archive {bot_name}?" }
+                    button {
+                        class: "modal-x",
+                        "aria-label": "Close",
+                        onclick: move |_| on_close.call(()),
+                        "×"
+                    }
+                }
+                div { class: "modal-body",
+                    p { class: "set-note",
+                        "Leaves the roster, but nothing is deleted - conversations, memory and spend history stay put. Restore it later from Settings."
+                    }
+                    if let Some(err) = error.read().clone() {
+                        div { class: "refusal",
+                            b { "Could not archive." }
+                            p { "{err}" }
+                        }
+                    }
+                    div { class: "rules-foot",
+                        button {
+                            class: "stg-btn",
+                            disabled: is_busy,
+                            onclick: move |_| on_close.call(()),
+                            "Cancel"
+                        }
+                        button {
+                            class: "stg-btn danger",
+                            disabled: is_busy,
+                            onclick: confirm,
+                            if is_busy { "Archiving…" } else { "Archive" }
+                        }
+                    }
+                }
+            }
         }
     }
 }

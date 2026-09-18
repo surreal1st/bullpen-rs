@@ -673,6 +673,16 @@
   cursor: not-allowed;
 }
 
+/* ARCH-01: the archive-confirm modal's destructive-looking button
+   (`thread.rs`'s `ArchiveConfirmModal`) and the restore row's own Restore
+   button both start from `.stg-btn`; this is only the color swap, same
+   values `.routine-acts button.danger` already uses below, just not scoped
+   to that one container. */
+.stg-btn.danger {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 42%, var(--line));
+}
+
 .stg-toggle {
   flex: none;
   width: 2.4rem;

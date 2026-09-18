@@ -5,10 +5,10 @@
 
 use crate::transport::{Request, Response};
 use crate::types::{
-    ApprovalsResponse, AuthStatus, AutoReviewLogEntry, AutoReviewLogResponse, AutoReviewState, Bot,
-    BotPatchResponse, BotToolsField, ConversationView, CoreStatus, Goal, MadeTool, MemoryEntry,
-    MemoryEntryField, MemoryView, ModelError, ModelField, ModelsResponse, OpenQuestion,
-    PendingApproval, PermissionsField, ProjectField, ProjectSummary, ProjectsField,
+    ApprovalsResponse, ArchivedBotsResponse, AuthStatus, AutoReviewLogEntry, AutoReviewLogResponse,
+    AutoReviewState, Bot, BotPatchResponse, BotToolsField, ConversationView, CoreStatus, Goal,
+    MadeTool, MemoryEntry, MemoryEntryField, MemoryView, ModelError, ModelField, ModelsResponse,
+    OpenQuestion, PendingApproval, PermissionsField, ProjectField, ProjectSummary, ProjectsField,
     QuestionsResponse, RoomResponse, RoomSummary, RoomsResponse, Routine, RoutineRun, RoutingState,
     RulesField, SharedCoreField, SharedLogField, SpendView, Tier1Models, Tier1Response, VmState,
     WorkingBot, WorkingResponse,
@@ -919,6 +919,59 @@ pub async fn patch_bot(bot_id: &str, body: serde_json::Value) -> Result<Bot, Str
         Ok(err) => Err(err.error),
         Err(_) => Err(format!("{url} -> {status}")),
     }
+}
+
+/* --------------------------------------------------------------- ARCH-01 */
+
+/// `POST /api/bots/:id/archive` - always sends an explicit `{"archived":
+/// bool}` body rather than leaning on the route's own "missing body
+/// archives" TS-parity fallback (`crates/server/src/routes/bots.rs::
+/// archive_bot`'s own doc on that surprising default, kept for the iOS
+/// client and old scripts) - a call from THIS client should say exactly
+/// what it means. `archived: true` archives (`thread.rs`'s confirm modal);
+/// `archived: false` restores (`settings.rs`'s archived-bots section).
+pub async fn archive_bot(bot_id: &str, archived: bool) -> Result<Bot, String> {
+    let url = format!("/api/bots/{bot_id}/archive");
+    let resp = Request::post(&url)
+        .json(&serde_json::json!({ "archived": archived }))
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if resp.ok() {
+        return resp
+            .json::<BotPatchResponse>()
+            .await
+            .map(|b| b.bot)
+            .map_err(|e| e.to_string());
+    }
+    // S13a-01: see `put_model_field`'s comment on why `status` must be
+    // captured before `.json()`.
+    let status = resp.status();
+    match resp.json::<ModelError>().await {
+        Ok(err) => Err(err.error),
+        Err(_) => Err(format!("{url} -> {status}")),
+    }
+}
+
+/// `GET /api/bots/archived` - the only way an archived bot is reachable
+/// again, backing `settings.rs`'s restore section. This route never
+/// refuses anything (`crates/server/src/routes/bots.rs::
+/// list_archived_bots`), so unlike most fetches above there is no error
+/// body shape to try parsing on a non-2xx - a network failure or a 5xx both
+/// just become the plain `{url} -> {status}` string.
+pub async fn fetch_archived_bots() -> Result<Vec<Bot>, String> {
+    let resp = Request::get("/api/bots/archived")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("/api/bots/archived -> {}", resp.status()));
+    }
+    resp.json::<ArchivedBotsResponse>()
+        .await
+        .map(|b| b.bots)
+        .map_err(|e| e.to_string())
 }
 
 /* --------------------------------------------------------------- S3-05: memory */

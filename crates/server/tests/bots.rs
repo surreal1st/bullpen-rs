@@ -448,3 +448,268 @@ async fn create_bot_without_model_key_has_null_pin() {
     assert_eq!(status, 201);
     assert!(response["bot"]["model"].is_null());
 }
+
+/* ------------------------------------------------------ ARCH-01: archive */
+
+/// Bite: archiving answers 200 with the bot (now `archived: true`), and the
+/// live roster - the thing the rail actually renders from - no longer
+/// carries it. Without `set_archived` stamping `archived_at`, or without
+/// `list_roster`'s own `WHERE archived_at IS NULL`, this bot would still
+/// show up here.
+#[tokio::test]
+async fn archive_returns_200_and_roster_drops_the_bot() {
+    let db = open_db();
+    seed_bot(&db, "test-bot", "Test Bot");
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let (status, response) = post_route(
+        &app,
+        "/api/bots/test-bot/archive",
+        &session,
+        json!({ "archived": true }),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(response["bot"]["archived"], true);
+
+    let (_status, roster) = get_route(&app, "/api/roster", &session).await;
+    let bots = roster["bots"].as_array().unwrap();
+    assert!(
+        !bots.iter().any(|b| b["id"] == "test-bot"),
+        "an archived bot must not appear in the live roster: {bots:?}"
+    );
+}
+
+/// Bite: the archived-bot listing is the only place an archived bot is
+/// still reachable - without `GET /api/bots/archived` (or if it read the
+/// same `WHERE archived_at IS NULL` the roster does), this bot would be
+/// unlisted anywhere and therefore unrestorable.
+#[tokio::test]
+async fn archived_listing_carries_the_archived_bot() {
+    let db = open_db();
+    seed_bot(&db, "test-bot", "Test Bot");
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let (status, _response) = post_route(
+        &app,
+        "/api/bots/test-bot/archive",
+        &session,
+        json!({ "archived": true }),
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    let (status, archived) = get_route(&app, "/api/bots/archived", &session).await;
+    assert_eq!(status, 200);
+    let bots = archived["bots"].as_array().unwrap();
+    let bot = bots
+        .iter()
+        .find(|b| b["id"] == "test-bot")
+        .expect("archived bot must be in the archived listing");
+    assert_eq!(bot["archived"], true);
+}
+
+/// Bite: restoring answers 200, and the bot is back in the live roster -
+/// proves `set_archived(..., false)` actually NULLs `archived_at` rather
+/// than, say, doing nothing on the "un-archive" branch.
+#[tokio::test]
+async fn restore_returns_200_and_roster_carries_the_bot_again() {
+    let db = open_db();
+    seed_bot(&db, "test-bot", "Test Bot");
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let (status, _response) = post_route(
+        &app,
+        "/api/bots/test-bot/archive",
+        &session,
+        json!({ "archived": true }),
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    let (status, response) = post_route(
+        &app,
+        "/api/bots/test-bot/archive",
+        &session,
+        json!({ "archived": false }),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(response["bot"]["archived"], false);
+
+    let (_status, roster) = get_route(&app, "/api/roster", &session).await;
+    let bots = roster["bots"].as_array().unwrap();
+    assert!(
+        bots.iter().any(|b| b["id"] == "test-bot"),
+        "a restored bot must be back in the live roster: {bots:?}"
+    );
+}
+
+/// Bite: `{"archived": false}` on a bot that is not archived is a no-op
+/// success (200, `archived: false`), not an error - the route must not
+/// assume "restore" implies "was archived".
+#[tokio::test]
+async fn restore_on_an_unarchived_bot_is_a_noop_success() {
+    let db = open_db();
+    seed_bot(&db, "test-bot", "Test Bot");
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let (status, response) = post_route(
+        &app,
+        "/api/bots/test-bot/archive",
+        &session,
+        json!({ "archived": false }),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(response["bot"]["archived"], false);
+
+    let (_status, roster) = get_route(&app, "/api/roster", &session).await;
+    let bots = roster["bots"].as_array().unwrap();
+    assert!(bots.iter().any(|b| b["id"] == "test-bot"));
+}
+
+/// Bite: a missing body archives - matching the TS's `body.archived !==
+/// false` exactly. This is the surprising branch the ticket calls out by
+/// name: tighten the route to "only `true` archives" (the mutation the
+/// coordinator will try) and this goes red, since an empty body has no
+/// `archived` key at all to be `true`.
+#[tokio::test]
+async fn missing_body_archives() {
+    let db = open_db();
+    seed_bot(&db, "test-bot", "Test Bot");
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let request = axum::http::Request::post("/api/bots/test-bot/archive")
+        .header("cookie", session.clone())
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let response = tower::ServiceExt::oneshot(app.clone(), request)
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+    assert_eq!(status, 200);
+    assert_eq!(value["bot"]["archived"], true);
+
+    let (_status, roster) = get_route(&app, "/api/roster", &session).await;
+    let bots = roster["bots"].as_array().unwrap();
+    assert!(
+        !bots.iter().any(|b| b["id"] == "test-bot"),
+        "a missing body must archive, same as the TS: {bots:?}"
+    );
+}
+
+/// Bite: an unknown id is 404 for both directions, and nothing is written -
+/// checked by re-reading the (empty) roster and the (empty) archived
+/// listing afterward, not just the status code.
+#[tokio::test]
+async fn archive_and_restore_unknown_id_is_404_and_writes_nothing() {
+    let db = open_db();
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    for archived in [true, false] {
+        let (status, response) = post_route(
+            &app,
+            "/api/bots/does-not-exist/archive",
+            &session,
+            json!({ "archived": archived }),
+        )
+        .await;
+        assert_eq!(status, 404, "archived={archived}");
+        assert_eq!(response["error"], "no such bot");
+    }
+
+    let (_status, roster) = get_route(&app, "/api/roster", &session).await;
+    assert!(roster["bots"].as_array().unwrap().is_empty());
+    let (_status, archived) = get_route(&app, "/api/bots/archived", &session).await;
+    assert!(archived["bots"].as_array().unwrap().is_empty());
+}
+
+/// Bite: archiving is not deletion. A bot's conversation, its messages, and
+/// its memory (core + log entry) all still exist, unchanged, after
+/// archiving - read directly through the store, not just "the route did not
+/// 500", since a 200 alone proves nothing about what else got touched.
+#[tokio::test]
+async fn archived_bots_conversations_messages_and_memory_survive() {
+    let db = open_db();
+    seed_bot(&db, "test-bot", "Test Bot");
+    let session = seed_session(&db);
+
+    let conversation_id =
+        store::get_or_create_conversation(&db, "test-bot").expect("get_or_create_conversation");
+    store::append_message(
+        &db,
+        &conversation_id,
+        "user",
+        "Remember this.",
+        store::NewMessage::default(),
+    )
+    .expect("append message");
+    store::set_core(&db, "test-bot", "Core fact about this bot.").expect("set_core");
+    store::remember(&db, "test-bot", "A logged memory entry.", "josh").expect("remember");
+
+    let app = app_for(db);
+
+    let (status, response) = post_route(
+        &app,
+        "/api/bots/test-bot/archive",
+        &session,
+        json!({ "archived": true }),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(response["bot"]["archived"], true);
+
+    // Re-fetch the conversation through the same route a live bot uses -
+    // `get_bot` (which `store::get_conversation`/`get_or_create_conversation`
+    // sit beside) is deliberately not filtered by `archived_at`, so an
+    // archived bot's own data must still be reachable through it.
+    let conv_url = format!("/api/bots/test-bot/conversation?thread={conversation_id}");
+    let request = axum::http::Request::get(&conv_url)
+        .header("cookie", session.clone())
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let conv_response = tower::ServiceExt::oneshot(app.clone(), request)
+        .await
+        .unwrap();
+    assert_eq!(conv_response.status().as_u16(), 200);
+    let body = axum::body::to_bytes(conv_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let conv: Value = serde_json::from_slice(&body).unwrap();
+    let messages = conv["messages"].as_array().unwrap();
+    assert!(
+        messages.iter().any(|m| m["content"] == "Remember this."),
+        "an archived bot's messages must survive: {messages:?}"
+    );
+
+    let mem_url = "/api/bots/test-bot/memory";
+    let request = axum::http::Request::get(mem_url)
+        .header("cookie", session.clone())
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let mem_response = tower::ServiceExt::oneshot(app.clone(), request)
+        .await
+        .unwrap();
+    assert_eq!(mem_response.status().as_u16(), 200);
+    let body = axum::body::to_bytes(mem_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let mem: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(mem["core"], "Core fact about this bot.");
+    let log = mem["log"].as_array().unwrap();
+    assert!(
+        log.iter().any(|e| e["content"] == "A logged memory entry."),
+        "an archived bot's memory log must survive: {log:?}"
+    );
+}

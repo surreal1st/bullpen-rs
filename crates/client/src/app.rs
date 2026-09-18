@@ -304,6 +304,17 @@ fn AppShell() -> Element {
                                     }
                                 });
                             },
+                            // ARCH-01: `thread.rs` never renders the Archive
+                            // button/modal for a room (`bot` is `None`
+                            // there - see `ChatPane`'s own doc), so this
+                            // never actually fires; still a required prop,
+                            // wired the same as the bot branch below for
+                            // when it ever could.
+                            on_archived: move |_| {
+                                spawn(async move {
+                                    roster.set(Some(fetch_roster().await));
+                                });
+                            },
                         }
                     } else if let Some(bot) = selected_bot {
                         ChatPane {
@@ -313,6 +324,17 @@ fn AppShell() -> Element {
                             section_ids: section_ids.clone(),
                             bot: Some(bot.clone()),
                             on_seen: move |_| {
+                                spawn(async move {
+                                    roster.set(Some(fetch_roster().await));
+                                });
+                            },
+                            // ARCH-01: same refresh `on_seen` already
+                            // triggers - once the roster no longer carries
+                            // this bot, the `selected_bot` lookup above
+                            // comes back `None` on the next render, which is
+                            // what actually moves the pane off it (see
+                            // `thread.rs`'s `on_archived` doc).
+                            on_archived: move |_| {
                                 spawn(async move {
                                     roster.set(Some(fetch_roster().await));
                                 });
@@ -377,7 +399,17 @@ fn AppShell() -> Element {
     rsx! {
         {body}
         if *settings_open.read() {
-            SettingsModal { on_close: move |_| settings_open.set(false) }
+            SettingsModal {
+                on_close: move |_| settings_open.set(false),
+                // ARCH-01: a restore from `ArchivedBotsSection` should bring
+                // the bot back into the rail right away, same refresh
+                // `ChatPane`'s own `on_seen`/`on_archived` already trigger.
+                on_restored: move |_| {
+                    spawn(async move {
+                        roster.set(Some(fetch_roster().await));
+                    });
+                },
+            }
         }
     }
 }

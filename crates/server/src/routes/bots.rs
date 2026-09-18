@@ -15,11 +15,26 @@
 //! `projects/bullpen-night/src/server/app.ts:1162-1188`. Unlike `PATCH`
 //! above, the TS create route runs `judgePin` alone (no separate premium
 //! check), so this does the same rather than reusing `refuse_if_premium`.
+//!
+//! ARCH-01 adds `POST /api/bots/:id/archive` (port of `app.ts:1246-1251`)
+//! and `GET /api/bots/archived`, which has no TS equivalent - the TS client
+//! reaches `listAllBots(db, true)` through a different route this ticket's
+//! own contract does not name, so the path is this ticket's own pick. It
+//! sits beside `POST /api/bots` (create) and `PATCH /api/bots/:id` (this
+//! same file) as a third view onto the `bots` collection, distinguished from
+//! both by HTTP method (`GET`, where neither of the others is) rather than
+//! by colliding with `PATCH /api/bots/:id`'s own `{id}` segment - there is
+//! no bot literally named `archived`, and even if there were, `GET
+//! /api/bots/:id` does not exist for it to collide with (see `routes/mod.rs`'s
+//! own callout on that gap). Without this route an archived bot is
+//! unreachable and unrestorable - the roster query at `crates/store/src/
+//! roster.rs` deliberately hides it - so archiving would otherwise be a
+//! one-way door.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{patch, post};
+use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use model::judge_pin;
 use serde_json::json;
@@ -30,7 +45,9 @@ use crate::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/bots", post(create_bot))
+        .route("/api/bots/archived", get(list_archived_bots))
         .route("/api/bots/{id}", patch(patch_bot))
+        .route("/api/bots/{id}/archive", post(archive_bot))
 }
 
 /// F7b-01: `POST /api/bots`. The body is read as a raw JSON object, same
@@ -206,4 +223,44 @@ async fn patch_bot(
     let bot = store::get_bot(&db, &id)?
         .ok_or_else(|| crate::AppError::bad_request("bot vanished mid-request"))?;
     Ok(Json(json!({ "bot": bot })).into_response())
+}
+
+/// ARCH-01: `POST /api/bots/:id/archive` - port of `app.ts:1246-1251`'s
+/// route (which itself just calls `setArchived`, this file's `store::
+/// set_archived`). The body is read the same forgiving way `create_bot`
+/// above does (`c.req.json().catch(() => ({}))` in the TS): anything that
+/// fails to parse, or is empty, becomes `{}`.
+///
+/// The archived flag itself is **`body.archived !== false`** - matching the
+/// TS exactly, including its surprising shape: a missing body, a missing
+/// key, `null`, a number, a string, all mean "archive". The ONLY value that
+/// means "restore" is the JSON literal `false`. This is surprising enough to
+/// spell out because the iOS client and existing scripts already rely on
+/// it - tightening this to "only `true` archives" would flip every one of
+/// those callers' missing-body archive calls into silent no-ops.
+async fn archive_bot(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    body: axum::body::Bytes,
+) -> Result<Response, crate::AppError> {
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap_or_else(|_| json!({}));
+    let archived = parsed.get("archived") != Some(&serde_json::Value::Bool(false));
+
+    let db = state.db();
+    match store::set_archived(&db, &id, archived)? {
+        Some(bot) => Ok(Json(json!({ "bot": bot })).into_response()),
+        None => Ok(no_such_bot()),
+    }
+}
+
+/// ARCH-01: `GET /api/bots/archived` - the archived-bot listing an
+/// otherwise-unreachable archived bot needs to ever be restored. See this
+/// file's top doc comment for why this path was picked. Same envelope shape
+/// (`{"bots": [...]}`) `mark_bot_seen`/`mark_bot_unseen` in `routes/mod.rs`
+/// already answer with, rather than inventing a third shape for "a list of
+/// bots".
+async fn list_archived_bots(State(state): State<AppState>) -> Result<Response, crate::AppError> {
+    let db = state.db();
+    let bots = store::list_bots(&db, true)?;
+    Ok(Json(json!({ "bots": bots })).into_response())
 }

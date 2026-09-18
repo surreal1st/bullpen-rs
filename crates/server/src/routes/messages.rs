@@ -59,7 +59,7 @@ fn find_bot(db: &Db, name_or_id: &str) -> Option<shared::Bot> {
         return None;
     }
     let needle = raw.to_lowercase();
-    let all = store::list_bots(db).ok()?;
+    let all = store::list_bots(db, false).ok()?;
 
     if let Some(direct) = all.iter().find(|b| b.id == raw)
         && !direct.archived
