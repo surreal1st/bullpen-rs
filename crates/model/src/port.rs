@@ -269,18 +269,47 @@ fn fallback_for(request: &ModelRequest) -> Option<&'static str> {
 pub struct OpenRouterPort {
     client: reqwest::Client,
     key_source: KeySource,
+    endpoint: String,
 }
 
 impl OpenRouterPort {
     pub fn new(key_source: KeySource) -> Self {
         Self {
-            client: reqwest::Client::builder()
-                .connect_timeout(Duration::from_secs(10))
-                .timeout(Duration::from_secs(120))
-                .build()
-                .expect("Client builder failed"),
+            client: Self::client(),
             key_source,
+            endpoint: ENDPOINT.to_string(),
         }
+    }
+
+    fn client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(120))
+            .build()
+            .expect("Client builder failed")
+    }
+
+    #[cfg(feature = "fake")]
+    pub fn with_local_endpoint(
+        key_source: KeySource,
+        endpoint: impl Into<String>,
+    ) -> Result<Self, String> {
+        let endpoint = endpoint.into();
+        let parsed = reqwest::Url::parse(&endpoint).map_err(|err| err.to_string())?;
+        let local = parsed.host_str().is_some_and(|host| {
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|address| address.is_loopback())
+        });
+        if parsed.scheme() != "http" || !local {
+            return Err("test model endpoint must be an http loopback address".to_string());
+        }
+        Ok(Self {
+            client: Self::client(),
+            key_source,
+            endpoint,
+        })
     }
 }
 
@@ -288,6 +317,7 @@ impl ModelPort for OpenRouterPort {
     fn stream(&self, request: ModelRequest) -> EventStream {
         let client = self.client.clone();
         let key_source = self.key_source.clone();
+        let endpoint = self.endpoint.clone();
         let image_request = carries_image(&request);
 
         Box::pin(async_stream::stream! {
@@ -316,7 +346,7 @@ impl ModelPort for OpenRouterPort {
 
                 let body = build_body(&request, model);
                 let send = client
-                    .post(ENDPOINT)
+                    .post(&endpoint)
                     .bearer_auth(&key)
                     .header("HTTP-Referer", "https://rainmade.io")
                     .header("X-Title", "Bullpen")
