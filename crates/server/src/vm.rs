@@ -32,6 +32,53 @@ pub trait DockerRun: Send + Sync {
     /// Runs a docker command with the given arguments and optional timeout.
     /// Returns the result with ok flag, stdout, and stderr.
     async fn call(&self, args: &[&str], timeout_ms: u64) -> DockerResult;
+
+    /// Runs a docker command with `stdin` piped to the child, then closed -
+    /// the one thing `call` above cannot do, and the whole reason this
+    /// method exists. TS's `deskShellStdin` (`bullpen-night/src/server/
+    /// desk.ts:527-565`) has no `DockerRun`-equivalent seam at all - it
+    /// shells out to `execFile` directly - so there is no TS signature to
+    /// port; this is this Rust port's own seam for the capability TS's
+    /// function needs (`docker exec -i` with `child.stdin?.end(stdin)`).
+    ///
+    /// S8c-02 decision, following that ticket's own recommendation:
+    /// DEFAULTED, not required. `DockerRun` has ELEVEN implementors today (2
+    /// production in this file, 1 in `tools::desk_shell`'s own test module,
+    /// 8 across `tests/desk_routing.rs`, `tests/desk_shell_routing.rs`,
+    /// `tests/desk_wake.rs`, `tests/vm.rs`, `tests/vm_routes.rs`,
+    /// `tests/workers.rs`) and exactly ONE caller will ever need this
+    /// (`deskAction`'s `type` branch, S8c-03) - a required method would mean
+    /// editing all eleven for a capability ten of them never exercise.
+    ///
+    /// The default does NOT forward to `call`. A default that silently
+    /// dropped `stdin` and returned whatever `call` gives back for the same
+    /// argv would hand a bot's typed text nowhere, then report the ordinary
+    /// success `call` happens to return - a bot told its keystrokes landed
+    /// when nothing was typed, the exact class of defect this project keeps
+    /// paying for (see `RealCdpVersion`'s own doc, S8c-01, for the last
+    /// lying default). So the default FAILS LOUDLY: `ok: false`, with
+    /// `std::any::type_name::<Self>()` naming the concrete runner that
+    /// cannot pipe, so any fake a future test drives through the `type`
+    /// path fails with a sentence that says why, instead of a silent
+    /// false-positive `ok: true`. Only `RealDockerRun` (below) overrides
+    /// this; every one of the ten other implementors keeps its current,
+    /// completely unmodified `impl DockerRun` block and inherits this
+    /// default as-is.
+    async fn call_with_stdin(
+        &self,
+        _args: &[&str],
+        _stdin: &str,
+        _timeout_ms: u64,
+    ) -> DockerResult {
+        DockerResult {
+            ok: false,
+            stdout: String::new(),
+            stderr: format!(
+                "{} cannot pipe data to a command's stdin.",
+                std::any::type_name::<Self>()
+            ),
+        }
+    }
 }
 
 /// The production `DockerRun`: shells out to the real `docker` CLI through
@@ -56,11 +103,15 @@ impl RealDockerRun {
     pub fn new(runner: Arc<dyn crate::sandbox::CommandRunner>) -> Self {
         Self { runner }
     }
-}
 
-#[async_trait::async_trait]
-impl DockerRun for RealDockerRun {
-    async fn call(&self, args: &[&str], timeout_ms: u64) -> DockerResult {
+    /// The body shared by `call` and `call_with_stdin`: prefix `docker`,
+    /// hand `args` and `stdin` to the same `CommandRunner::run`, shape the
+    /// result the same way. S8c-02 split this out so "the timeout handling
+    /// must match what `call` already does, not a second scheme" (the
+    /// ticket's own words) is true by construction - one function, one
+    /// `match` on `RunError` - rather than two copies a later edit could
+    /// drift apart.
+    async fn run_docker(&self, args: &[&str], stdin: Vec<u8>, timeout_ms: u64) -> DockerResult {
         let mut argv = Vec::with_capacity(args.len() + 1);
         argv.push("docker".to_string());
         argv.extend(args.iter().map(|s| s.to_string()));
@@ -74,7 +125,7 @@ impl DockerRun for RealDockerRun {
             .runner
             .run(
                 argv,
-                Vec::new(),
+                stdin,
                 Duration::from_millis(timeout_ms),
                 4 * 1024 * 1024,
             )
@@ -96,6 +147,31 @@ impl DockerRun for RealDockerRun {
                 stderr: e,
             },
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl DockerRun for RealDockerRun {
+    async fn call(&self, args: &[&str], timeout_ms: u64) -> DockerResult {
+        self.run_docker(args, Vec::new(), timeout_ms).await
+    }
+
+    /// `-i` + a piped, then-closed, stdin - see `DockerRun::call_with_stdin`'s
+    /// own doc for why this exists and why it is the only override. `args`
+    /// is expected to already contain `-i` (`tools::desk_shell::
+    /// desk_shell_stdin` puts it right after `"exec"`, mirroring TS's own
+    /// argv at `desk.ts:536-549`): this method does not insert it, the same
+    /// way `call` never inserts `-u`/`-w`/`-e` for ITS callers - the caller
+    /// assembles the full argv, this method only prefixes `docker` and
+    /// threads `stdin`/`timeout_ms` through to `CommandRunner::run`
+    /// (`sandbox.rs`), which does the actual `Stdio::piped()` + write +
+    /// drop-to-close (see that impl's own doc for why the close lives there
+    /// and not here - there is exactly one place in this crate that spawns
+    /// a real child process for a docker command, and it should be the only
+    /// place that owns its stdin pipe).
+    async fn call_with_stdin(&self, args: &[&str], stdin: &str, timeout_ms: u64) -> DockerResult {
+        self.run_docker(args, stdin.as_bytes().to_vec(), timeout_ms)
+            .await
     }
 }
 

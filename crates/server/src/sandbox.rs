@@ -259,10 +259,28 @@ async fn read_capped(mut reader: impl tokio::io::AsyncRead + Unpin, cap: usize) 
 
 #[async_trait::async_trait]
 impl CommandRunner for TokioRunner {
+    /// S8c-02: `stdin` was accepted by this trait's signature from the
+    /// start but silently ignored here (`_stdin`) - nothing before
+    /// `vm::RealDockerRun::call_with_stdin` ever needed a docker command to
+    /// read anything, so the gap never showed. Non-empty `stdin` now gets
+    /// `Stdio::piped()`, is written to the child, and the pipe is DROPPED
+    /// to close it - `docker exec -i ... xdotool ... --file -` blocks
+    /// forever on a stdin nobody closes, which is the whole reason TS's own
+    /// `deskShellStdin` (`desk.ts:563`) calls `child.stdin?.end(stdin)`
+    /// rather than just `child.stdin?.write(stdin)`. That TS call is a step
+    /// that could be forgotten; here the close is not a step at all, it is
+    /// what happens when the `pipe` binding below goes out of scope at the
+    /// end of `write_stdin`'s block - there is no code path that leaves it
+    /// open (see this method's `write_stdin` for exactly where). Empty
+    /// `stdin` gets `Stdio::null()` instead of the previous implicit
+    /// inherit-from-parent - harmless for every existing caller (none of
+    /// them pass `-i`, so docker never reads stdin at all today regardless
+    /// of what it is connected to), and an explicit decision beats an
+    /// accidental one.
     async fn run(
         &self,
         argv: Vec<String>,
-        _stdin: Vec<u8>,
+        stdin: Vec<u8>,
         timeout: Duration,
         max_output_bytes: usize,
     ) -> Result<(String, String, i32), RunError> {
@@ -273,6 +291,11 @@ impl CommandRunner for TokioRunner {
         let mut cmd = tokio::process::Command::new(&argv[0]);
         cmd.args(&argv[1..])
             .env("DOCKER_HOST", &self.env_docker_host)
+            .stdin(if stdin.is_empty() {
+                std::process::Stdio::null()
+            } else {
+                std::process::Stdio::piped()
+            })
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             // F6: a dropped `Command` future (e.g. our own timeout branch
@@ -285,6 +308,7 @@ impl CommandRunner for TokioRunner {
             Err(e) => return Err(RunError::Other(format!("command failed to start: {e}"))),
         };
 
+        let mut stdin_pipe = child.stdin.take();
         let stdout = child.stdout.take().expect("stdout was piped");
         let stderr = child.stderr.take().expect("stderr was piped");
         // 4x the caller's cap, same margin `sandbox.ts:245-250` uses for
@@ -293,7 +317,28 @@ impl CommandRunner for TokioRunner {
         let cap = max_output_bytes.saturating_mul(4).max(1);
 
         let work = async {
-            let (out, err) = tokio::join!(read_capped(stdout, cap), read_capped(stderr, cap));
+            // The write side of the stdin close this method's own doc
+            // promises: writes the payload, then drops `pipe` (end of this
+            // block) to close the child's stdin. Runs concurrently with the
+            // stdout/stderr reads below via the same `tokio::join!`, not
+            // before them - a command that writes to stdout before it has
+            // finished reading stdin would otherwise deadlock against a
+            // reader that has not started yet.
+            let write_stdin = async {
+                if let Some(mut pipe) = stdin_pipe.take() {
+                    use tokio::io::AsyncWriteExt;
+                    // A write error here (e.g. the child exited early) is
+                    // not this call's problem to report - `read_capped` on
+                    // stdout/stderr below already carries whatever the
+                    // child actually produced either way.
+                    let _ = pipe.write_all(&stdin).await;
+                }
+            };
+            let (out, err, ()) = tokio::join!(
+                read_capped(stdout, cap),
+                read_capped(stderr, cap),
+                write_stdin
+            );
             if out.1 || err.1 {
                 // The child was still writing past our host-side bound;
                 // reading stopped, but the process itself has not - kill it
@@ -326,6 +371,15 @@ impl CommandRunner for TokioRunner {
 #[derive(Clone)]
 pub struct FakeRunner {
     commands: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+    /// S8c-02: recorded alongside `commands`, one entry per `run()` call, so
+    /// a test can prove `vm::RealDockerRun::call_with_stdin` actually
+    /// threads its `stdin: &str` through to `CommandRunner::run` as bytes -
+    /// never into `commands`' own argv - without a real docker binary on
+    /// this workstation. `FakeRunner` never spawns anything, so it cannot
+    /// prove the pipe is CLOSED (that is `TokioRunner::run`'s own job, and
+    /// this workstation has no way to prove it against a real `docker exec
+    /// -i`); it only proves the argument reached this seam intact.
+    stdins: std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
     responses: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<FakeOutcome>>>,
 }
 
@@ -345,6 +399,7 @@ impl FakeRunner {
     pub fn new() -> Self {
         Self {
             commands: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            stdins: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             responses: std::sync::Arc::new(
                 std::sync::Mutex::new(std::collections::VecDeque::new()),
             ),
@@ -373,6 +428,12 @@ impl FakeRunner {
     pub fn commands(&self) -> Vec<Vec<String>> {
         self.commands.lock().unwrap().clone()
     }
+
+    /// S8c-02: one entry per `run()` call, same order as `commands()` - see
+    /// the `stdins` field's own doc for why this exists.
+    pub fn stdins(&self) -> Vec<Vec<u8>> {
+        self.stdins.lock().unwrap().clone()
+    }
 }
 
 #[async_trait::async_trait]
@@ -380,12 +441,13 @@ impl CommandRunner for FakeRunner {
     async fn run(
         &self,
         argv: Vec<String>,
-        _stdin: Vec<u8>,
+        stdin: Vec<u8>,
         _timeout: Duration,
         _max_output_bytes: usize,
     ) -> Result<(String, String, i32), RunError> {
         let mut commands = self.commands.lock().unwrap();
         commands.push(argv.clone());
+        self.stdins.lock().unwrap().push(stdin);
 
         // F18: FIFO (scripted in call order), not LIFO - and an exhausted
         // queue panics with the argv that had nothing to answer it, rather

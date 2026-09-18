@@ -959,3 +959,71 @@ async fn attach_vm_proxy_relays_bytes_between_client_and_the_bots_upstream() {
         .expect("read relayed bytes");
     assert_eq!(relayed.as_slice(), expected.as_slice());
 }
+
+/* --------------------------------------------------- S8c-02: call_with_stdin */
+
+/// NOT one of S8c-02's three required bites (those live in
+/// `server::tools::desk_shell`'s own test module, against the `DockerRun`
+/// trait level). Extra coverage for `RealDockerRun::call_with_stdin`
+/// itself: `RealDockerRun`'s own doc (`vm.rs`) says every test drives a
+/// `DockerRun`-level fake instead of this struct, because there is no
+/// Docker on this workstation to prove a real `docker exec -i` against -
+/// but `RealDockerRun` wraps a `sandbox::CommandRunner`, and
+/// `sandbox::FakeRunner` (already `pub`, already used by
+/// `DockerSandbox`'s own tests one layer up) is a `CommandRunner` fake that
+/// spawns nothing real either. Constructing `RealDockerRun` over a
+/// `FakeRunner` proves the Rust-level plumbing this ticket added - `docker`
+/// prefixed onto the given argv, `stdin` threaded through as bytes rather
+/// than folded into argv, the SAME `timeout_ms` `call` would get - without
+/// claiming anything about a real child process's stdin actually closing.
+/// That last part is `sandbox::TokioRunner::run`'s own job, and per this
+/// ticket's own bite (c), the only thing that can prove THAT for real is
+/// the meridian smoke test in S8c-03.
+#[tokio::test]
+async fn real_docker_run_call_with_stdin_threads_the_payload_through_as_bytes_not_argv() {
+    let runner = Arc::new(server::sandbox::FakeRunner::new());
+    runner.push_response("typed ok", "", 0);
+    let docker = server::vm::RealDockerRun::new(runner.clone());
+
+    let result = docker
+        .call_with_stdin(
+            &[
+                "exec",
+                "-i",
+                "-u",
+                "abc",
+                "some-container",
+                "bash",
+                "-lc",
+                "xdotool type --file -",
+            ],
+            "; rm -rf / `echo pwned`",
+            45_000,
+        )
+        .await;
+
+    assert!(result.ok);
+    assert_eq!(result.stdout, "typed ok");
+
+    let commands = runner.commands();
+    assert_eq!(commands.len(), 1);
+    assert_eq!(
+        commands[0][0], "docker",
+        "call_with_stdin must prefix docker, same as call"
+    );
+    assert!(
+        !commands[0]
+            .iter()
+            .any(|a| a.contains("rm -rf") || a.contains("pwned")),
+        "the payload must never appear in argv, got {:?}",
+        commands[0]
+    );
+
+    let stdins = runner.stdins();
+    assert_eq!(stdins.len(), 1);
+    assert_eq!(
+        stdins[0],
+        "; rm -rf / `echo pwned`".as_bytes(),
+        "the payload must reach CommandRunner::run's own stdin parameter, as bytes"
+    );
+}
