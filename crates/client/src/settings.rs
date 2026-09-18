@@ -672,6 +672,11 @@ fn SpendUsage(view: SpendView) -> Element {
     } else {
         format!("width: {pct}%")
     };
+    // COST-01: a bot row whose calls came back unpriced used to read as a
+    // bot that cost nothing - `cost_usd` on each row is the sum of only
+    // what was priced, so a quiet count rides beside it and the note below
+    // points back at the account total as the figure to trust.
+    let any_unpriced = view.bots.iter().any(|bot| bot.unpriced_count > 0);
 
     rsx! {
         if view.account_readable {
@@ -701,7 +706,19 @@ fn SpendUsage(view: SpendView) -> Element {
                 for bot in view.bots.iter() {
                     div { key: "{bot.bot_id}", class: "stg-row",
                         span { "{bot.bot_name}" }
-                        span { class: "mono", "${bot.cost_usd:.2}" }
+                        span { class: "spend-bot-fig",
+                            span { class: "mono", "${bot.cost_usd:.2}" }
+                            if bot.unpriced_count > 0 {
+                                span { class: "spend-unpriced",
+                                    "{bot.unpriced_count} unpriced"
+                                }
+                            }
+                        }
+                    }
+                }
+                if any_unpriced {
+                    p { class: "spend-unpriced-note",
+                        "The account total above is the figure to trust - some calls below came back with no reported cost, so these rows undercount."
                     }
                 }
             }

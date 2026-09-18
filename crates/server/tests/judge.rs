@@ -389,12 +389,12 @@ fn test_migration_20_opens_fixture() {
     {
         let db = store::Db::open(temp_path.to_str().unwrap()).expect("open db");
 
-        // Check PRAGMA user_version = 20
+        // Check PRAGMA user_version = 21 (COST-01's migration 21)
         let version: i32 = db
             .conn()
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("query user_version");
-        assert_eq!(version, 20);
+        assert_eq!(version, 21);
         // db is dropped here, releasing the lock
     }
 

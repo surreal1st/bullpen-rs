@@ -102,12 +102,14 @@ async fn routed_chat_turn_carries_the_notice_and_the_classifiers_cost() {
         input_tokens: 120,
         output_tokens: 1,
         cached_tokens: 0,
+        cost_known: true,
     };
     let reply_usage = ModelUsage {
         cost_usd: 0.0421,
         input_tokens: 900,
         output_tokens: 220,
         cached_tokens: 0,
+        cost_known: true,
     };
 
     let port = ScriptedPort::new(vec![
@@ -170,6 +172,7 @@ async fn a_routed_chat_turn_leaves_a_routing_log_row() {
                 input_tokens: 120,
                 output_tokens: 1,
                 cached_tokens: 0,
+                cost_known: true,
             },
         ),
         text_script_with_usage(
@@ -180,6 +183,7 @@ async fn a_routed_chat_turn_leaves_a_routing_log_row() {
                 input_tokens: 900,
                 output_tokens: 220,
                 cached_tokens: 0,
+                cost_known: true,
             },
         ),
     ]);
@@ -235,6 +239,7 @@ async fn escalate_climbs_from_cheap_to_the_kinds_tier1_model() {
                 input_tokens: 500,
                 output_tokens: 60,
                 cached_tokens: 0,
+                cost_known: true,
             },
         ),
     ]);
@@ -294,6 +299,7 @@ async fn escalate_refuses_on_a_routine_trigger() {
                 input_tokens: 40,
                 output_tokens: 8,
                 cached_tokens: 0,
+                cost_known: true,
             },
         ),
     ]);

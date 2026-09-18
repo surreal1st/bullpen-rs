@@ -87,6 +87,7 @@ async fn a_usage_frame_without_a_cost_still_reports_its_token_counts() {
                     cost_usd,
                     input_tokens,
                     output_tokens,
+                    cost_known,
                     ..
                 }),
             ..
@@ -100,6 +101,10 @@ async fn a_usage_frame_without_a_cost_still_reports_its_token_counts() {
                 "token counts must survive a missing cost"
             );
             assert_eq!(*cost_usd, 0.0, "an absent cost is 0.0, never an estimate");
+            assert!(
+                !*cost_known,
+                "COST-01: a usage frame with no cost must not claim to be priced"
+            );
         }
         other => panic!("expected Done WITH usage despite no cost, got {other:?}"),
     }
@@ -128,6 +133,7 @@ async fn carries_the_providers_own_cost_out_of_the_stream() {
                     input_tokens,
                     output_tokens,
                     cached_tokens,
+                    cost_known,
                 }),
             ..
         }) => {
@@ -135,6 +141,10 @@ async fn carries_the_providers_own_cost_out_of_the_stream() {
             assert_eq!(*input_tokens, 82);
             assert_eq!(*output_tokens, 45);
             assert_eq!(*cached_tokens, 0);
+            assert!(
+                *cost_known,
+                "COST-01: a usage frame WITH a cost must be reported as priced"
+            );
         }
         other => panic!("expected a Done event with usage, got {other:?}"),
     }

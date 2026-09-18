@@ -61,6 +61,7 @@ pub fn billed_port(text: &str, cost_usd: f64, model: &str) -> FakePort {
             input_tokens: 100,
             output_tokens: 20,
             cached_tokens: 64,
+            cost_known: true,
         }),
         finish_reason: None,
     });

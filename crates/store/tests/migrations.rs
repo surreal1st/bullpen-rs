@@ -37,11 +37,11 @@ fn copy_fixture_to_temp() -> std::path::PathBuf {
 }
 
 /// Test 1: `Db::open(":memory:")` leaves `user_version` at the full
-/// migration count (20, after S4-01's auto_review_log migration).
+/// migration count (21, after COST-01's `messages.cost_unknown` migration).
 #[test]
 fn memory_db_migrates_to_latest_version() {
     let db = Db::open(":memory:").expect("open :memory:");
-    assert_eq!(user_version(db.conn()), 20);
+    assert_eq!(user_version(db.conn()), 21);
 }
 
 #[test]
@@ -58,13 +58,15 @@ fn run_image_counters_are_self_created_without_bumping_schema_version() {
 
     assert!(columns.contains("screen_capture_attempts"));
     assert!(columns.contains("screen_image_dispatches"));
-    assert_eq!(user_version(db.conn()), 20);
+    assert_eq!(user_version(db.conn()), 21);
 }
 
 /// Test 2: opening a copy of the TS-made fixture (checked in at
-/// user_version 16) brings it forward to 20 and leaves the `sqlite_master`
-/// object set the same names as before - migrations 17-20 add tables/columns/indexes
-/// but keep existing table and index names.
+/// user_version 16) brings it forward to 21 and leaves the `sqlite_master`
+/// object set the same names as before - migrations 17-21 add tables/columns/indexes
+/// but keep existing table and index names. Migration 21 (COST-01) only adds
+/// a column to the existing `messages` table, so it contributes no new
+/// schema object name here.
 #[test]
 fn fixture_db_opens_unchanged() {
     let temp = copy_fixture_to_temp();
@@ -84,8 +86,8 @@ fn fixture_db_opens_unchanged() {
 
     assert_eq!(
         user_version(db.conn()),
-        20,
-        "user_version must reach 20 after open"
+        21,
+        "user_version must reach 21 after open"
     );
 
     let after = schema_names(db.conn());

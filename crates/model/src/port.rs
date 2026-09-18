@@ -135,12 +135,20 @@ pub struct ModelRequest {
 /// Provider-reported usage. Never computed here.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelUsage {
-    /// Exact dollars for this request, as OpenRouter billed it.
+    /// Exact dollars for this request, as OpenRouter billed it. `0.0` is the
+    /// legacy numeric placeholder when `cost_known` is `false` - it does NOT
+    /// mean the call was free. See `cost_known`.
     pub cost_usd: f64,
     pub input_tokens: u32,
     pub output_tokens: u32,
     /// Prompt tokens served from the provider's cache.
     pub cached_tokens: u32,
+    /// `true` when the provider's usage frame carried an actual `cost`;
+    /// `false` when a usage frame arrived with token counts but no `cost` at
+    /// all - COST-01. `cost_usd` stays `0.0` either way; this is the only
+    /// place "we don't know" can live. Never set `true` from a guess -
+    /// Bullpen does not estimate cost.
+    pub cost_known: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -731,6 +739,7 @@ where
                         input_tokens: u.prompt_tokens.unwrap_or(0),
                         output_tokens: u.completion_tokens.unwrap_or(0),
                         cached_tokens: u.prompt_tokens_details.as_ref().and_then(|d| d.cached_tokens).unwrap_or(0),
+                        cost_known: u.cost.is_some(),
                     });
                 }
                 if let Some(err) = &frame.error {

@@ -64,6 +64,34 @@ fn seed_assistant_message(db: &Db, bot_id: &str, created_at: &str, cost_usd: f64
         .expect("seed assistant message");
 }
 
+/// COST-01: same as `seed_assistant_message`, but for the case its own name
+/// does not cover - a usage frame that carried token counts but no cost.
+/// `cost_usd` is still `0.0` (the legacy placeholder), and `cost_unknown` is
+/// the column that says NOT to read that zero as "this call was free"
+/// (`crates/store/src/migrations.rs` migration 21).
+fn seed_unpriced_assistant_message(db: &Db, bot_id: &str, created_at: &str) {
+    let conversation_id =
+        store::get_or_create_conversation(db, bot_id).expect("get_or_create_conversation");
+    let seq: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COALESCE(MAX(seq), 0) + 1 FROM messages WHERE conversation_id = ?1",
+            rusqlite::params![conversation_id],
+            |row| row.get(0),
+        )
+        .expect("next seq");
+    let id = format!("{bot_id}-{created_at}-unpriced");
+    db.conn()
+        .execute(
+            "INSERT INTO messages (id, conversation_id, seq, role, content, model, error, created_at,
+                                    attachment_id, bot_id, cost_usd, input_tokens, output_tokens, cached_tokens,
+                                    cost_unknown)
+             VALUES (?1, ?2, ?3, 'assistant', 'done', NULL, NULL, ?4, NULL, NULL, 0.0, 50, 10, 0, 1)",
+            rusqlite::params![id, conversation_id, seq, created_at],
+        )
+        .expect("seed unpriced assistant message");
+}
+
 fn post_req(uri: &str, body: Value, cookie: &str) -> Request<Body> {
     Request::post(uri)
         .header("content-type", "application/json")
@@ -624,4 +652,75 @@ async fn get_spend_when_credits_unreadable_leaves_bots_intact() {
     );
     assert_eq!(bots[0]["botId"], "arthur");
     assert_eq!(bots[0]["costUsd"], 4.0);
+}
+
+// ---------------------------------------------------------------------
+// COST-01: `spend_by_bot` must count unpriced assistant messages
+// per-bot, and the priced sum must not absorb them. Bite: drop the
+// `COALESCE(SUM(m.cost_unknown), 0)` column from `spend::spend_by_bot`'s
+// query and this goes red - `unpriced_count` reads back `0` for arthur
+// instead of `2`.
+// ---------------------------------------------------------------------
+
+#[test]
+fn spend_by_bot_counts_unpriced_messages_without_touching_the_priced_sum() {
+    let db = store::Db::open(":memory:").expect("open test db");
+    seed_bot(&db, "arthur", "Arthur");
+    seed_bot(&db, "riley", "Riley");
+
+    seed_assistant_message(&db, "arthur", "2026-09-05T00:00:00Z", 3.0);
+    seed_unpriced_assistant_message(&db, "arthur", "2026-09-06T00:00:00Z");
+    seed_unpriced_assistant_message(&db, "arthur", "2026-09-07T00:00:00Z");
+    seed_assistant_message(&db, "riley", "2026-09-08T00:00:00Z", 2.0);
+
+    let september = spend::spend_by_bot(&db, "2026-09").expect("query spend by bot");
+    let arthur = september
+        .iter()
+        .find(|row| row.bot_id == "arthur")
+        .expect("arthur row present");
+    let riley = september
+        .iter()
+        .find(|row| row.bot_id == "riley")
+        .expect("riley row present");
+
+    assert_eq!(
+        arthur.cost_usd, 3.0,
+        "the priced sum must stay exactly what was priced - the two unpriced \
+         $0.0 rows must not be read as arthur costing less than he did"
+    );
+    assert_eq!(
+        arthur.unpriced_count, 2,
+        "both of arthur's unpriced messages must be counted"
+    );
+    assert_eq!(riley.unpriced_count, 0, "riley has no unpriced messages");
+}
+
+// ---------------------------------------------------------------------
+// COST-01: `GET /api/spend` must carry the unpriced count in the per-bot
+// rows, camelCase like every other field on this response.
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn get_spend_carries_the_unpriced_count_in_bot_rows() {
+    let db = open_db();
+    let cookie = seed_session(&db);
+    seed_bot(&db, "arthur", "Arthur");
+    seed_assistant_message(&db, "arthur", "2026-09-05T00:00:00Z", 3.04);
+    seed_unpriced_assistant_message(&db, "arthur", "2026-09-06T00:00:00Z");
+    seed_unpriced_assistant_message(&db, "arthur", "2026-09-07T00:00:00Z");
+
+    let port: Arc<dyn ModelPort> = as_port(model::fake::text_port("hi", "test/model"));
+    let credits = Arc::new(spend::FakeCredits::usage(0.0));
+    let app = build_app(AppState::with_port_and_credits(db, port, credits));
+
+    let (status, body) = get_json(app, "/api/spend?month=2026-09", &cookie).await;
+    assert_eq!(status, StatusCode::OK);
+    let bots = body["bots"].as_array().expect("bots array");
+    assert_eq!(bots.len(), 1);
+    assert_eq!(bots[0]["botId"], "arthur");
+    assert_eq!(
+        bots[0]["costUsd"], 3.04,
+        "priced sum, untouched by the unpriced rows"
+    );
+    assert_eq!(bots[0]["unpricedCount"], 2);
 }

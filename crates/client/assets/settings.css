@@ -755,6 +755,29 @@
   color: var(--danger);
 }
 
+/* COST-01: the per-bot unpriced count and the note under the breakdown.
+   Deliberately quiet - this is information, not an alarm, so it borrows
+   `--muted`/`--faint` rather than `--danger` the way `.acct-warn` does. */
+.spend-bot-fig {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+}
+
+.spend-unpriced {
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+
+.spend-unpriced-note {
+  margin: 0.5rem 0 0;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--line);
+  color: var(--faint);
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+
 /* One bar, same shape the TS popover and settings screen both drew it. */
 .bar {
   height: 5px;

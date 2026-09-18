@@ -248,8 +248,13 @@ mod tests {
             "assistant",
             "done",
             store::NewMessage {
+                // A real dollar figure is being seeded here for the
+                // escalation-ladder tests below, not COST-01's unpriced
+                // case, so `cost_known: true` is set explicitly rather than
+                // left to `Default` (which is `false`).
                 usage: Some(store::Usage {
                     cost_usd,
+                    cost_known: true,
                     ..Default::default()
                 }),
                 ..Default::default()

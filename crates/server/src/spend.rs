@@ -103,6 +103,13 @@ pub struct BotSpend {
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub cached_tokens: i64,
+    /// COST-01: how many of this bot's assistant messages this month came
+    /// back with a usage frame that carried no cost at all. `cost_usd` above
+    /// is the SUM of only what was priced - it does not, and must not,
+    /// silently absorb these as $0.00. A non-zero count here is the signal
+    /// that this row's dollar figure understates what the bot actually
+    /// cost.
+    pub unpriced_count: i64,
 }
 
 /// Per-bot spend for a calendar month, summed from provider-reported costs.
@@ -114,7 +121,8 @@ pub fn spend_by_bot(db: &Db, month: &str) -> rusqlite::Result<Vec<BotSpend>> {
                 COUNT(m.id),
                 COALESCE(SUM(m.input_tokens), 0),
                 COALESCE(SUM(m.output_tokens), 0),
-                COALESCE(SUM(m.cached_tokens), 0)
+                COALESCE(SUM(m.cached_tokens), 0),
+                COALESCE(SUM(m.cost_unknown), 0)
            FROM messages m
            JOIN conversations c ON c.id = m.conversation_id
            JOIN bots b ON b.id = c.bot_id
@@ -134,6 +142,7 @@ pub fn spend_by_bot(db: &Db, month: &str) -> rusqlite::Result<Vec<BotSpend>> {
             input_tokens: row.get(4)?,
             output_tokens: row.get(5)?,
             cached_tokens: row.get(6)?,
+            unpriced_count: row.get(7)?,
         })
     })?;
 

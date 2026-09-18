@@ -102,6 +102,11 @@ pub struct Usage {
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub cached_tokens: i64,
+    /// `true` when the provider actually reported `cost_usd`; `false` when a
+    /// usage frame arrived with token counts but no cost at all - COST-01,
+    /// see migration 21. Defaults to `false` (unknown) so a caller that
+    /// forgets to set it never silently claims a price it does not have.
+    pub cost_known: bool,
 }
 
 /// What a caller supplies beyond the required role/content. Mirrors the
@@ -136,10 +141,18 @@ pub fn append_message(
     let id = uuid::Uuid::new_v4().to_string();
     let created_at = now_iso();
 
+    // COST-01: 1 only when usage was actually present on this message and
+    // the provider did not report a cost for it - never for a message with
+    // no usage at all (a plain user turn, say), which stays 0 same as every
+    // pre-existing row. See migration 21's comment: this is forward-only
+    // tracking, not a retroactive claim about history.
+    let cost_unknown = extra.usage.as_ref().map(|u| !u.cost_known).unwrap_or(false);
+
     db.conn().execute(
         "INSERT INTO messages (id, conversation_id, seq, role, content, model, error, created_at,
-                                attachment_id, bot_id, cost_usd, input_tokens, output_tokens, cached_tokens)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                                attachment_id, bot_id, cost_usd, input_tokens, output_tokens, cached_tokens,
+                                cost_unknown)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         params![
             id,
             conversation_id,
@@ -155,6 +168,7 @@ pub fn append_message(
             extra.usage.as_ref().map(|u| u.input_tokens),
             extra.usage.as_ref().map(|u| u.output_tokens),
             extra.usage.as_ref().map(|u| u.cached_tokens),
+            cost_unknown,
         ],
     )?;
 

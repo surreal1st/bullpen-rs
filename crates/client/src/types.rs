@@ -385,6 +385,12 @@ pub struct SpendBotRow {
     pub bot_id: String,
     pub bot_name: String,
     pub cost_usd: f64,
+    /// COST-01: how many of this bot's assistant messages this month came
+    /// back with no provider-reported cost at all. `cost_usd` is the sum of
+    /// only what was priced, so this is the count the panel shows beside it
+    /// rather than letting the dollar figure quietly understate the bot.
+    #[serde(default)]
+    pub unpriced_count: i64,
 }
 
 /// `GET /api/spend`'s response shape (`routes/spend.rs::GetSpendResponse`).

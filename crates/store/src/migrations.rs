@@ -435,4 +435,21 @@ pub const MIGRATIONS: &[&str] = &[
   ALTER TABLE approvals ADD COLUMN judge_verdict TEXT;
   ALTER TABLE approvals ADD COLUMN judge_reason TEXT;
   "#,
+    // 21. COST-01: an OpenRouter usage frame can carry token counts with no
+    //     `cost` at all - `model::ModelUsage::cost_known` tracks that in
+    //     memory, and this column is where it lands per message so
+    //     `spend_by_bot` can report an unpriced count instead of silently
+    //     folding an unknown cost into the priced sum as if it were exactly
+    //     $0.00.
+    //
+    //     DEFAULT 0 applies to every row that already exists when this
+    //     migration runs, same as any `ALTER TABLE ... ADD COLUMN`. That is
+    //     NOT a backfilled claim that every past message was priced - we
+    //     have no way to know that retroactively, and writing 1 (unknown)
+    //     onto them would be an equally invented claim in the other
+    //     direction. This migration only starts tracking the flag from here
+    //     forward; it does not and must not attempt to reconstruct history.
+    r#"
+  ALTER TABLE messages ADD COLUMN cost_unknown INTEGER NOT NULL DEFAULT 0;
+  "#,
 ];

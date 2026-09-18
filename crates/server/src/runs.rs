@@ -2537,11 +2537,18 @@ were doing unless he changed it."
                 return;
             }
         };
+        // No usage frame ever arrived for this run at all - not "a frame
+        // came back with no cost" (that's `cost_known: false`, COST-01),
+        // but genuinely no model call ever completed for it (F6: stopped
+        // before the first call, or between steps before one produced any).
+        // $0.00 known is the honest figure for a run that never called the
+        // model.
         let usage = state.usage.clone().unwrap_or(ModelUsage {
             cost_usd: 0.0,
             input_tokens: 0,
             output_tokens: 0,
             cached_tokens: 0,
+            cost_known: true,
         });
 
         let messages_json = serde_json::to_string(&state.messages).unwrap_or_else(|err| {
@@ -2678,6 +2685,7 @@ were doing unless he changed it."
                     input_tokens: usage.input_tokens as i64,
                     output_tokens: usage.output_tokens as i64,
                     cached_tokens: usage.cached_tokens as i64,
+                    cost_known: usage.cost_known,
                 }),
             };
             match store::append_message(&db, conversation_id, "assistant", &state.text, extra) {
@@ -2793,11 +2801,15 @@ is looking at."
             });
         }
 
+        // Same reasoning as `settle`'s identical fallback above: no usage
+        // frame ever arrived, meaning no model call happened before this run
+        // parked for approval, not that one happened and came back unpriced.
         let usage = state.usage.unwrap_or(ModelUsage {
             cost_usd: 0.0,
             input_tokens: 0,
             output_tokens: 0,
             cached_tokens: 0,
+            cost_known: true,
         });
         let messages_json = serde_json::to_string(&messages).unwrap_or_else(|err| {
             tracing::error!("run {run_id}: failed to serialize paused run messages: {err}");
@@ -3185,6 +3197,18 @@ is looking at."
                     input_tokens: input_tokens as u32,
                     output_tokens: output_tokens as u32,
                     cached_tokens: cached_tokens as u32,
+                    // The `runs` table only ever persisted the numeric
+                    // dollar total, never whether it was fully priced -
+                    // COST-01 added `cost_known` to `messages`, not to
+                    // `runs`. A run that parked mid-turn with an unpriced
+                    // step already folded into this total round-trips back
+                    // in as `true` here, which is a real gap: it can read as
+                    // priced again after an approval resume even though part
+                    // of it never was. Left as `true` (matching this run's
+                    // pre-COST-01 behaviour) rather than guessing; flagged
+                    // for the coordinator rather than adding a migration
+                    // outside this ticket's stated scope.
+                    cost_known: true,
                 }),
                 resolved_usage,
             );
@@ -3442,7 +3466,71 @@ fn add_usage(current: Option<ModelUsage>, incoming: Option<ModelUsage>) -> Optio
             input_tokens: c.input_tokens + u.input_tokens,
             output_tokens: c.output_tokens + u.output_tokens,
             cached_tokens: c.cached_tokens + u.cached_tokens,
+            // COST-01: AND, not OR. A total that folds in even one unpriced
+            // request is itself not fully priced - unknown infects the sum
+            // and must never wash out just because the rest of the run was
+            // billed normally.
+            cost_known: c.cost_known && u.cost_known,
         }),
+    }
+}
+
+#[cfg(test)]
+mod add_usage_tests {
+    use super::*;
+
+    fn usage(cost_usd: f64, cost_known: bool) -> ModelUsage {
+        ModelUsage {
+            cost_usd,
+            input_tokens: 10,
+            output_tokens: 5,
+            cached_tokens: 0,
+            cost_known,
+        }
+    }
+
+    #[test]
+    fn two_priced_totals_stay_priced() {
+        let total = add_usage(Some(usage(1.0, true)), Some(usage(2.0, true))).expect("some");
+        assert_eq!(total.cost_usd, 3.0);
+        assert!(total.cost_known);
+    }
+
+    #[test]
+    fn a_priced_and_an_unpriced_total_is_unpriced() {
+        // COST-01's own mutation target: this must AND, not OR. If it ever
+        // flips to OR, an unpriced $0.0 request rides in free next to a
+        // priced one and the combined total still claims to be fully priced.
+        let total = add_usage(Some(usage(1.0, true)), Some(usage(0.0, false))).expect("some");
+        assert!(
+            !total.cost_known,
+            "one unpriced request must make the whole total unpriced"
+        );
+    }
+
+    #[test]
+    fn two_unpriced_totals_stay_unpriced() {
+        let total = add_usage(Some(usage(0.0, false)), Some(usage(0.0, false))).expect("some");
+        assert!(!total.cost_known);
+    }
+
+    #[test]
+    fn a_lone_side_passes_its_own_flag_through_unchanged() {
+        assert!(
+            add_usage(None, Some(usage(1.0, true)))
+                .expect("some")
+                .cost_known
+        );
+        assert!(
+            !add_usage(None, Some(usage(0.0, false)))
+                .expect("some")
+                .cost_known
+        );
+        assert!(
+            add_usage(Some(usage(1.0, true)), None)
+                .expect("some")
+                .cost_known
+        );
     }
 }
 
