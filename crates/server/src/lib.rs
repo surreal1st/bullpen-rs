@@ -11,6 +11,7 @@ mod error;
 pub mod goals;
 pub mod hooks;
 pub mod judge;
+pub mod observations;
 pub mod permissions;
 pub mod prompt;
 mod rooms;
@@ -383,13 +384,14 @@ impl AppState {
         // through here rather than left to its own `BULLPEN_SANDBOX`
         // default. Cloned rather than moved: `vm_docker`/`vm_config` are
         // still needed below, for `AppState`'s own fields.
-        let runs = Arc::new(runs::RunManager::with_sandbox_and_vm(
+        let runs = Arc::new(runs::RunManager::with_sandbox_vm_and_catalog(
             Arc::clone(&db),
             port,
             Arc::clone(&sandbox),
             Arc::clone(&vm_docker),
             Arc::clone(&vm_config),
             vm_enabled,
+            Arc::clone(&catalog),
         ));
         let room_engine = rooms::RoomEngine::install(Arc::clone(&db), Arc::clone(&runs));
 
@@ -698,4 +700,17 @@ pub fn build_app(state: AppState) -> Router {
         .fallback(static_or_spa)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
+}
+
+#[cfg(test)]
+mod screen_catalog_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn app_and_run_manager_share_the_same_capability_catalog() {
+        let catalog: Arc<dyn model::Catalog> =
+            Arc::new(model::FixtureCatalog::from_json("[]").unwrap());
+        let state = AppState::with_catalog(Db::open(":memory:").unwrap(), Arc::clone(&catalog));
+        assert!(Arc::ptr_eq(&catalog, &state.runs.catalog()));
+    }
 }

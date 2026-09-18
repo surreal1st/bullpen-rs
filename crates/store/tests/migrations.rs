@@ -44,6 +44,23 @@ fn memory_db_migrates_to_latest_version() {
     assert_eq!(user_version(db.conn()), 20);
 }
 
+#[test]
+fn run_image_counters_are_self_created_without_bumping_schema_version() {
+    let db = Db::open(":memory:").expect("open :memory:");
+    let columns: BTreeSet<String> = db
+        .conn()
+        .prepare("PRAGMA table_info(runs)")
+        .expect("prepare runs table_info")
+        .query_map([], |row| row.get(1))
+        .expect("query runs table_info")
+        .collect::<Result<_, _>>()
+        .expect("collect runs columns");
+
+    assert!(columns.contains("screen_capture_attempts"));
+    assert!(columns.contains("screen_image_dispatches"));
+    assert_eq!(user_version(db.conn()), 20);
+}
+
 /// Test 2: opening a copy of the TS-made fixture (checked in at
 /// user_version 16) brings it forward to 20 and leaves the `sqlite_master`
 /// object set the same names as before - migrations 17-20 add tables/columns/indexes

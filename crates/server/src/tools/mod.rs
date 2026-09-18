@@ -60,6 +60,7 @@ use model::ladder::Trigger;
 use model::{ModelPort, ModelUsage, ToolSpec};
 use store::Db;
 
+use crate::observations::ScreenObservation;
 use crate::permissions::{Decision, Permissions, always_on_set};
 use crate::sandbox::Sandbox;
 use crate::vm;
@@ -112,13 +113,70 @@ pub type RoomHook = Arc<Mutex<Option<Box<dyn Fn(&str, bool) -> bool + Send + Syn
 /// tool loop folds this into the run's own usage total the same way it folds
 /// its own steps, so a colleague `message_bot` asked is money this run's
 /// `cost_usd` actually accounts for.
-type ToolFuture = Pin<Box<dyn Future<Output = (String, Option<ModelUsage>)> + Send>>;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunExecutionContext {
+    Unbound,
+    ModelTurn { run_id: String },
+    DirectRoutine,
+}
+
+#[derive(Debug)]
+pub struct ToolOutcome {
+    pub text: String,
+    pub usage: Option<ModelUsage>,
+    pub observation: Option<ScreenObservation>,
+}
+
+impl ToolOutcome {
+    pub fn new(text: impl Into<String>, usage: Option<ModelUsage>) -> Self {
+        Self {
+            text: text.into(),
+            usage,
+            observation: None,
+        }
+    }
+
+    pub fn with_observation(
+        text: impl Into<String>,
+        usage: Option<ModelUsage>,
+        observation: ScreenObservation,
+    ) -> Self {
+        Self {
+            text: text.into(),
+            usage,
+            observation: Some(observation),
+        }
+    }
+
+    pub fn into_text_only(self, consumer: &str) -> (String, Option<ModelUsage>) {
+        match self.observation {
+            None => (self.text, self.usage),
+            Some(observation) => {
+                tracing::error!(
+                    consumer,
+                    observation_id = %observation.metadata().observation_id,
+                    run_id = %observation.metadata().run_id,
+                    "tool observation reached a text-only consumer"
+                );
+                (
+                    "This tool returned a screen observation in a context that cannot deliver it."
+                        .to_string(),
+                    self.usage,
+                )
+            }
+        }
+    }
+}
+
+type ToolFuture = Pin<Box<dyn Future<Output = ToolOutcome> + Send>>;
 
 /// What a run offers the model: the specs it sees, one executor keyed by
 /// name. Port of the TS `ToolBox`.
 pub struct ToolBox {
     pub specs: Vec<ToolSpec>,
     handler: Arc<dyn Fn(String, String) -> ToolFuture + Send + Sync>,
+    bot_id: String,
+    execution_context: RunExecutionContext,
     /// S2-04: set by the `escalate` tool when it climbs a rung; taken
     /// (cleared) by `runs.rs`'s tool loop right after the call that set it,
     /// which applies `model` to the run's next request and folds `note`
@@ -131,8 +189,23 @@ impl ToolBox {
     /// Runs one tool call. An unknown name is never a panic - a model can
     /// hallucinate a tool name same as anything else, and the run should
     /// hear about that as an ordinary tool result, not crash over it.
-    pub async fn run(&self, name: &str, args: &str) -> (String, Option<ModelUsage>) {
+    pub async fn run(&self, name: &str, args: &str) -> ToolOutcome {
         (self.handler)(name.to_string(), args.to_string()).await
+    }
+
+    pub fn execution_context(&self) -> &RunExecutionContext {
+        &self.execution_context
+    }
+
+    pub fn run_id(&self) -> Option<&str> {
+        match &self.execution_context {
+            RunExecutionContext::ModelTurn { run_id } => Some(run_id),
+            RunExecutionContext::Unbound | RunExecutionContext::DirectRoutine => None,
+        }
+    }
+
+    pub fn bot_id(&self) -> &str {
+        &self.bot_id
     }
 
     /// S2-04: takes (clears) whatever `escalate` decided during the last
@@ -183,6 +256,7 @@ pub struct BuildParams {
     /// tool-kind routine's own direct tool call) offers the full box,
     /// same as before this field existed.
     pub only: Option<Vec<String>>,
+    pub execution_context: RunExecutionContext,
 }
 
 /// F1: the full spec list this crate's toolbox can offer, before either
@@ -285,6 +359,8 @@ pub fn build(params: BuildParams) -> ToolBox {
     let vm_config = params.vm_config;
     let vm_enabled = params.vm_enabled;
     let only = params.only;
+    let execution_context = params.execution_context;
+    let toolbox_bot_id = bot_id.clone();
     // F3: `always_on_set()` rides through any `only` narrowing whatever it
     // says (TS `app.ts:5783`) - a routine's phrasing turn narrowed to `[]`
     // must still be able to say something or ask Josh a question, not lose
@@ -325,7 +401,7 @@ pub fn build(params: BuildParams) -> ToolBox {
             let vm_docker = Arc::clone(&vm_docker);
             let vm_config = Arc::clone(&vm_config);
             Box::pin(async move {
-                match name.as_str() {
+                let legacy = match name.as_str() {
                     "say" => (say::run(&db, &bot_id, &args), None),
                     "ask_josh" => (ask_josh::run(&db, &bot_id, &args, changes), None),
                     "remember" => (remember::run(&db, &bot_id, &args), None),
@@ -540,7 +616,8 @@ pub fn build(params: BuildParams) -> ToolBox {
                         (text, None)
                     }
                     other => (format!("Unknown tool: {other}"), None),
-                }
+                };
+                ToolOutcome::new(legacy.0, legacy.1)
             })
         })
     };
@@ -548,6 +625,8 @@ pub fn build(params: BuildParams) -> ToolBox {
     ToolBox {
         specs,
         handler,
+        bot_id: toolbox_bot_id,
+        execution_context,
         escalated,
     }
 }

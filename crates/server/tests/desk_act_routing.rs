@@ -141,10 +141,10 @@ async fn desk_act_execs_into_each_bots_own_container() {
     let one_key_action = r#"{"actions":[{"kind":"key","keys":"a"}]}"#;
 
     let toolbox_a = manager.toolbox_for("bot-a", Trigger::Chat, false, "test/model", None);
-    let (result_a, _) = toolbox_a.run("desk_act", one_key_action).await;
+    let result_a = toolbox_a.run("desk_act", one_key_action).await.text;
 
     let toolbox_b = manager.toolbox_for("bot-b", Trigger::Chat, false, "test/model", None);
-    let (result_b, _) = toolbox_b.run("desk_act", one_key_action).await;
+    let result_b = toolbox_b.run("desk_act", one_key_action).await.text;
 
     assert!(
         result_a.contains("ran on bullpen-vm-bot-a"),
@@ -192,9 +192,10 @@ async fn desk_act_refuses_before_touching_docker_when_vms_are_disabled() {
     ));
 
     let toolbox = manager.toolbox_for("bot-a", Trigger::Chat, false, "test/model", None);
-    let (result, _) = toolbox
+    let result = toolbox
         .run("desk_act", r#"{"actions":[{"kind":"key","keys":"a"}]}"#)
-        .await;
+        .await
+        .text;
 
     assert_eq!(
         result,

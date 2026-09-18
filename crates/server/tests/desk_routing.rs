@@ -160,14 +160,16 @@ async fn browse_reaches_two_different_bots_own_machines() {
     ));
 
     let toolbox_a = manager.toolbox_for("bot-a", Trigger::Chat, false, "test/model", None);
-    let (result_a, _) = toolbox_a
+    let result_a = toolbox_a
         .run("browse", r#"{"url":"https://example.com/"}"#)
-        .await;
+        .await
+        .text;
 
     let toolbox_b = manager.toolbox_for("bot-b", Trigger::Chat, false, "test/model", None);
-    let (result_b, _) = toolbox_b
+    let result_b = toolbox_b
         .run("browse", r#"{"url":"https://example.com/"}"#)
-        .await;
+        .await
+        .text;
 
     // S8b-01: nothing is listening on either port, and `cdp_for_bot` now
     // polls for readiness before ever handing back a working `Cdp` (see
@@ -231,9 +233,10 @@ async fn browse_refuses_before_touching_docker_when_vms_are_disabled() {
     ));
 
     let toolbox = manager.toolbox_for("bot-a", Trigger::Chat, false, "test/model", None);
-    let (result, _) = toolbox
+    let result = toolbox
         .run("browse", r#"{"url":"https://example.com/"}"#)
-        .await;
+        .await
+        .text;
 
     // `UnavailableCdp::create_window` returns the reason as an `Err`, which
     // `run_browse` wraps the same way it wraps every other `Cdp` failure

@@ -154,14 +154,16 @@ async fn desk_shell_execs_into_each_bots_own_container() {
     ));
 
     let toolbox_a = manager.toolbox_for("bot-a", Trigger::Chat, false, "test/model", None);
-    let (result_a, _) = toolbox_a
+    let result_a = toolbox_a
         .run("desk_shell", r#"{"command":"echo hi"}"#)
-        .await;
+        .await
+        .text;
 
     let toolbox_b = manager.toolbox_for("bot-b", Trigger::Chat, false, "test/model", None);
-    let (result_b, _) = toolbox_b
+    let result_b = toolbox_b
         .run("desk_shell", r#"{"command":"echo hi"}"#)
-        .await;
+        .await
+        .text;
 
     assert!(
         result_a.contains("ran on bullpen-vm-bot-a"),
@@ -211,7 +213,10 @@ async fn desk_shell_refuses_before_touching_docker_when_vms_are_disabled() {
     ));
 
     let toolbox = manager.toolbox_for("bot-a", Trigger::Chat, false, "test/model", None);
-    let (result, _) = toolbox.run("desk_shell", r#"{"command":"echo hi"}"#).await;
+    let result = toolbox
+        .run("desk_shell", r#"{"command":"echo hi"}"#)
+        .await
+        .text;
 
     assert_eq!(
         result,

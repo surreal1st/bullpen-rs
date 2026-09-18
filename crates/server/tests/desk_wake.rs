@@ -258,9 +258,10 @@ async fn wake_poll_absorbs_a_reaped_desks_slow_boot_into_a_successful_browse() {
     ));
 
     let toolbox = manager.toolbox_for("arthur", Trigger::Chat, false, "test/model", None);
-    let (result, _) = toolbox
+    let result = toolbox
         .run("browse", r#"{"url":"https://example.com/"}"#)
-        .await;
+        .await
+        .text;
 
     assert!(
         result.contains("Example") && result.contains("the page finally loaded"),
@@ -307,7 +308,7 @@ async fn wake_poll_times_out_with_an_actionable_message_and_never_hangs() {
     let toolbox = manager.toolbox_for("arthur", Trigger::Chat, false, "test/model", None);
 
     let started = std::time::Instant::now();
-    let (result, _) = tokio::time::timeout(
+    let result = tokio::time::timeout(
         server::desk::WAKE_POLL_BUDGET + Duration::from_secs(3),
         toolbox.run("browse", r#"{"url":"https://example.com/"}"#),
     )
@@ -315,7 +316,8 @@ async fn wake_poll_times_out_with_an_actionable_message_and_never_hangs() {
     .expect(
         "browse must return within WAKE_POLL_BUDGET plus a small margin, never hang past it - \
 if this panics, the poll is not bounded",
-    );
+    )
+    .text;
     let elapsed = started.elapsed();
 
     assert_eq!(

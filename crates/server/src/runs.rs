@@ -16,7 +16,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use model::ladder::{Trigger, model_for_run};
 use model::{
-    FunctionCall, MessageContent, MessageToolCall, ModelEvent, ModelMessage, ModelPort,
+    Catalog, FunctionCall, MessageContent, MessageToolCall, ModelEvent, ModelMessage, ModelPort,
     ModelRequest, ModelUsage, ToolCall,
 };
 use rusqlite::OptionalExtension;
@@ -26,6 +26,7 @@ use uuid::Uuid;
 use crate::approvals;
 use crate::changes::{ChangeBus, ChangeKind};
 use crate::judge;
+use crate::observations::{ObservationAdmission, ObservationRegistry};
 use crate::permissions::{self, Decision};
 use crate::rules;
 use crate::sandbox;
@@ -201,6 +202,9 @@ type OnRunDone = Box<dyn Fn(&str, &str, &str) + Send + Sync>;
 pub struct RunManager {
     db: Arc<Mutex<Db>>,
     port: Arc<dyn ModelPort>,
+    catalog: Arc<dyn Catalog>,
+    observation_admission: Arc<ObservationAdmission>,
+    observations: Arc<ObservationRegistry>,
     /// S6L-02: what `toolbox_for` hands `shell`/`sandbox_read` to actually run
     /// against. Resolved from `BULLPEN_SANDBOX` by the no-arg constructors
     /// (`new`, `with_backlog_ttl`); injected by `with_sandbox` for
@@ -330,6 +334,10 @@ fn default_vm_parts() -> (Arc<dyn vm::DockerRun>, Arc<store::vms::VmConfig>, boo
     (docker, cfg, enabled)
 }
 
+fn empty_catalog() -> Arc<dyn Catalog> {
+    Arc::new(model::FixtureCatalog::from_json("[]").expect("empty catalog fixture"))
+}
+
 impl RunManager {
     pub fn new(db: Arc<Mutex<Db>>, port: Arc<dyn ModelPort>) -> Self {
         Self::with_backlog_ttl(db, port, BACKLOG_TTL)
@@ -352,6 +360,7 @@ impl RunManager {
             vm_config,
             vm_enabled,
             backlog_ttl,
+            empty_catalog(),
         )
     }
 
@@ -381,6 +390,7 @@ impl RunManager {
             vm_config,
             vm_enabled,
             BACKLOG_TTL,
+            empty_catalog(),
         )
     }
 
@@ -398,6 +408,27 @@ impl RunManager {
         vm_config: Arc<store::vms::VmConfig>,
         vm_enabled: bool,
     ) -> Self {
+        Self::with_sandbox_vm_and_catalog(
+            db,
+            port,
+            sandbox,
+            vm_docker,
+            vm_config,
+            vm_enabled,
+            empty_catalog(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_sandbox_vm_and_catalog(
+        db: Arc<Mutex<Db>>,
+        port: Arc<dyn ModelPort>,
+        sandbox: Arc<dyn sandbox::Sandbox>,
+        vm_docker: Arc<dyn vm::DockerRun>,
+        vm_config: Arc<store::vms::VmConfig>,
+        vm_enabled: bool,
+        catalog: Arc<dyn Catalog>,
+    ) -> Self {
         Self::build(
             db,
             port,
@@ -406,6 +437,7 @@ impl RunManager {
             vm_config,
             vm_enabled,
             BACKLOG_TTL,
+            catalog,
         )
     }
 
@@ -418,10 +450,14 @@ impl RunManager {
         vm_config: Arc<store::vms::VmConfig>,
         vm_enabled: bool,
         backlog_ttl: Duration,
+        catalog: Arc<dyn Catalog>,
     ) -> Self {
         Self {
             db,
             port,
+            catalog,
+            observation_admission: Arc::new(ObservationAdmission::new()),
+            observations: Arc::new(ObservationRegistry::new()),
             sandbox,
             vm_docker,
             vm_config,
@@ -442,6 +478,18 @@ impl RunManager {
     /// and a failed run, never for a run still going.
     pub fn set_on_run_done(&self, f: impl Fn(&str, &str, &str) + Send + Sync + 'static) {
         *self.on_run_done.lock().expect("on_run_done mutex poisoned") = Some(Box::new(f));
+    }
+
+    pub fn catalog(&self) -> Arc<dyn Catalog> {
+        Arc::clone(&self.catalog)
+    }
+
+    pub fn observation_admission(&self) -> Arc<ObservationAdmission> {
+        Arc::clone(&self.observation_admission)
+    }
+
+    pub fn observation_registry(&self) -> Arc<ObservationRegistry> {
+        Arc::clone(&self.observations)
     }
 
     /// S5b-04b: ADDS a listener rather than replacing whatever `on_run_done`
@@ -866,6 +914,25 @@ impl RunManager {
         model: &str,
         only: Option<Vec<String>>,
     ) -> ToolBox {
+        self.toolbox_for_context(
+            bot_id,
+            trigger,
+            room,
+            model,
+            only,
+            tools::RunExecutionContext::Unbound,
+        )
+    }
+
+    pub fn toolbox_for_context(
+        self: &Arc<Self>,
+        bot_id: &str,
+        trigger: Trigger,
+        room: bool,
+        model: &str,
+        only: Option<Vec<String>>,
+        execution_context: tools::RunExecutionContext,
+    ) -> ToolBox {
         // A-F6: the same `permissions_for_run` resolution `run_turn` does
         // for its own decision loop, so the spec list offered and the
         // decisions made against it agree on what this run is allowed.
@@ -888,6 +955,7 @@ impl RunManager {
             vm_config: Arc::clone(&self.vm_config),
             vm_enabled: self.vm_enabled,
             only,
+            execution_context,
         })
     }
 
@@ -1048,7 +1116,16 @@ impl RunManager {
             }
         }
 
-        let toolbox = self.toolbox_for(&bot_id, trigger, room, &model, only);
+        let toolbox = self.toolbox_for_context(
+            &bot_id,
+            trigger,
+            room,
+            &model,
+            only,
+            tools::RunExecutionContext::ModelTurn {
+                run_id: run_id.clone(),
+            },
+        );
         let outcome = self
             .run_turn(
                 &run_id,
@@ -1663,8 +1740,10 @@ were doing unless he changed it."
                                 args: call.arguments.clone(),
                             },
                         );
-                        let (result, delegated_usage) =
-                            toolbox.run(&call.name, &call.arguments).await;
+                        let (result, delegated_usage) = toolbox
+                            .run(&call.name, &call.arguments)
+                            .await
+                            .into_text_only("ordinary run dispatch");
                         // F3: a `message_bot` call that reached a colleague's
                         // model spent real money nobody watching THIS run
                         // would otherwise see charged to it - folded into
@@ -2257,7 +2336,16 @@ is looking at."
         // resume is out of scope, and every case this ticket's tests
         // exercise is an ordinary chat turn, which `room: false` floors
         // exactly the same as `start` would have.
-        let toolbox = self.toolbox_for(&pending.bot_id, trigger, false, &model, only.clone());
+        let toolbox = self.toolbox_for_context(
+            &pending.bot_id,
+            trigger,
+            false,
+            &model,
+            only.clone(),
+            tools::RunExecutionContext::ModelTurn {
+                run_id: pending.run_id.clone(),
+            },
+        );
 
         let resolved_usage = if approved {
             self.note(&pending.run_id, Some(call.name.clone()), false);
@@ -2296,10 +2384,11 @@ is looking at."
                 } else {
                     clipped_fulfilment
                 };
-                (fenced, None)
+                tools::ToolOutcome::new(fenced, None)
             } else {
                 toolbox.run(&call.name, &call.arguments).await
-            };
+            }
+            .into_text_only("approval resume");
             let clipped: String = result.chars().take(4000).collect();
             self.emit(
                 &pending.run_id,
@@ -2369,7 +2458,16 @@ is looking at."
         let run_id = pending.run_id.clone();
         let bot_id = pending.bot_id.clone();
         tokio::spawn(async move {
-            let toolbox = manager.toolbox_for(&bot_id, trigger, false, &model, only);
+            let toolbox = manager.toolbox_for_context(
+                &bot_id,
+                trigger,
+                false,
+                &model,
+                only,
+                tools::RunExecutionContext::ModelTurn {
+                    run_id: run_id.clone(),
+                },
+            );
             let outcome = manager
                 .run_turn(
                     &run_id,
@@ -2522,6 +2620,7 @@ is looking at."
     /// exactly B5's "grows by one entry per run for the life of the
     /// process", just delayed rather than fixed.
     fn finish(self: &Arc<Self>, run_id: &str) {
+        self.observations.release(run_id);
         self.stopping
             .lock()
             .expect("stopping mutex poisoned")

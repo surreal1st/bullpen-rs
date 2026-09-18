@@ -161,6 +161,16 @@ impl Db {
             "tools",
             "ALTER TABLE runs ADD COLUMN tools TEXT",
         )?;
+        db.ensure_column(
+            Table::Runs,
+            "screen_capture_attempts",
+            "ALTER TABLE runs ADD COLUMN screen_capture_attempts INTEGER NOT NULL DEFAULT 0",
+        )?;
+        db.ensure_column(
+            Table::Runs,
+            "screen_image_dispatches",
+            "ALTER TABLE runs ADD COLUMN screen_image_dispatches INTEGER NOT NULL DEFAULT 0",
+        )?;
         goals::ensure_goal_tables(&db)?;
         // S5c-F-02 (F5): was only wired into `server::AppState::build`
         // (S5c-03's stopgap), so a bare `store::Db::open` got a database

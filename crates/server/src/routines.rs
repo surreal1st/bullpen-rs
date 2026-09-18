@@ -214,10 +214,18 @@ async fn fire_routine_tool(state: &AppState, row: &RoutineRow) -> Option<String>
     // The tool call itself gets the FULL toolbox (`only: None`) - F3's
     // narrowing to ALWAYS_ON applies only to the PHRASING run below, which
     // is a MODEL turn; this is the routine calling its own tool directly.
-    let toolbox = state
-        .runs
-        .toolbox_for(&bot_id, Trigger::Routine, false, &model, None);
-    let (result, _usage) = toolbox.run(&tool_name, &tool_args_raw).await;
+    let toolbox = state.runs.toolbox_for_context(
+        &bot_id,
+        Trigger::Routine,
+        false,
+        &model,
+        None,
+        tools::RunExecutionContext::DirectRoutine,
+    );
+    let (result, _usage) = toolbox
+        .run(&tool_name, &tool_args_raw)
+        .await
+        .into_text_only("direct tool routine");
 
     // (c) Nothing worth reporting - record an OK tool run and an OK health
     // update, but no model turn (TS `runFoundNothing`, `routines.ts:866`).
