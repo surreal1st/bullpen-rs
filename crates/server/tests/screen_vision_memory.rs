@@ -7,12 +7,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use base64::Engine;
 use futures::StreamExt;
 use model::secrets::KeySource;
 use model::{
-    FunctionCall, MessageContent, MessageToolCall, ModelMessage, ModelPort, ModelRequest,
-    OpenRouterPort,
+    ContentPart, FunctionCall, ImageUrl, MessageContent, MessageToolCall, ModelMessage, ModelPort,
+    ModelRequest, OpenRouterPort,
 };
+use rcgen::{CertifiedKey, generate_simple_self_signed};
+use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
 use server::observations::ObservationAdmission;
 use server::runs::screen_observation_request_message;
 use server::vm::CapturedFrame;
@@ -24,6 +27,10 @@ const ROLE_ENV: &str = "BULLPEN_S8D_MEMORY_ROLE";
 const SCENARIO_ENV: &str = "BULLPEN_S8D_MEMORY_SCENARIO";
 const ENDPOINT_ENV: &str = "BULLPEN_S8D_MEMORY_ENDPOINT";
 const CONTROL_ENV: &str = "BULLPEN_S8D_MEMORY_CONTROL";
+const TLS_ROOT_ENV: &str = "BULLPEN_S8D_MEMORY_TLS_ROOT";
+const SEQUENTIAL_CANCELLATIONS: usize = 8;
+const CONCURRENT_CANCELLATION_GROUPS: usize = 4;
+const CLEANUP_SPREAD: usize = 64 * 1024;
 const FRAME_BYTES: usize = server::vm::MAX_FRAME_PNG_BYTES;
 const SINGLE_BUDGET: usize = 24 * 1024 * 1024;
 const DOUBLE_BUDGET: usize = 48 * 1024 * 1024;
@@ -123,6 +130,24 @@ fn http_response(status: &str, content_type: &str, body: &str) -> Vec<u8> {
     .into_bytes()
 }
 
+type TlsServerStream = rustls::StreamOwned<rustls::ServerConnection, TcpStream>;
+
+trait FixtureStream: Read + Write {
+    fn set_fixture_read_timeout(&self, timeout: Option<Duration>);
+}
+
+impl FixtureStream for TcpStream {
+    fn set_fixture_read_timeout(&self, timeout: Option<Duration>) {
+        self.set_read_timeout(timeout).unwrap();
+    }
+}
+
+impl FixtureStream for TlsServerStream {
+    fn set_fixture_read_timeout(&self, timeout: Option<Duration>) {
+        self.sock.set_read_timeout(timeout).unwrap();
+    }
+}
+
 #[derive(serde::Serialize)]
 struct RequestEvidence {
     content_length: usize,
@@ -132,10 +157,8 @@ struct RequestEvidence {
     observed_close: bool,
 }
 
-fn read_request(stream: &mut TcpStream, body_limit: usize) -> RequestEvidence {
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
+fn read_request(stream: &mut impl FixtureStream, body_limit: usize) -> RequestEvidence {
+    stream.set_fixture_read_timeout(Some(Duration::from_secs(5)));
     let mut bytes = Vec::new();
     let header_end = loop {
         let mut chunk = [0u8; 8192];
@@ -185,7 +208,7 @@ fn read_request(stream: &mut TcpStream, body_limit: usize) -> RequestEvidence {
     }
 }
 
-fn drain_after_cancel(stream: &mut TcpStream, evidence: &mut RequestEvidence) {
+fn drain_after_cancel(stream: &mut impl FixtureStream, evidence: &mut RequestEvidence) {
     let deadline = Instant::now() + Duration::from_secs(3);
     let mut total = evidence.received;
     let mut observed_close = false;
@@ -195,7 +218,7 @@ fn drain_after_cancel(stream: &mut TcpStream, evidence: &mut RequestEvidence) {
             !remaining.is_zero(),
             "upload drain exceeded absolute deadline"
         );
-        stream.set_read_timeout(Some(remaining)).unwrap();
+        stream.set_fixture_read_timeout(Some(remaining));
         let mut chunk = [0u8; 8192];
         let wanted = evidence
             .content_length
@@ -249,10 +272,8 @@ fn accept_complete(listener: &TcpListener, response: &[u8]) -> RequestEvidence {
     evidence
 }
 
-fn wait_for_peer_close(stream: &mut TcpStream) -> bool {
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
+fn wait_for_peer_close(stream: &mut impl FixtureStream) -> bool {
+    stream.set_fixture_read_timeout(Some(Duration::from_secs(5)));
     let mut byte = [0u8; 1];
     match stream.read(&mut byte) {
         Ok(0) => true,
@@ -277,6 +298,107 @@ fn signal(control: &mut TcpStream, marker: u8) {
     control.flush().unwrap();
 }
 
+fn tls_server_config() -> (Arc<rustls::ServerConfig>, Vec<u8>) {
+    let CertifiedKey { cert, signing_key } =
+        generate_simple_self_signed(vec!["127.0.0.1".to_string()]).unwrap();
+    let root_der = cert.der().to_vec();
+    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(signing_key.serialize_der()));
+    let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_no_client_auth()
+    .with_single_cert(vec![cert.der().clone()], key)
+    .unwrap();
+    (Arc::new(config), root_der)
+}
+
+fn accept_tls(listener: &TcpListener, config: &Arc<rustls::ServerConfig>) -> TlsServerStream {
+    let (socket, _) = listener.accept().expect("TLS fixture accept");
+    SockRef::from(&socket)
+        .set_recv_buffer_size(4096)
+        .expect("bounded TLS receive window");
+    socket
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let connection = rustls::ServerConnection::new(Arc::clone(config)).unwrap();
+    rustls::StreamOwned::new(connection, socket)
+}
+
+fn accept_complete_tls(
+    listener: &TcpListener,
+    config: &Arc<rustls::ServerConfig>,
+    response: &[u8],
+) -> RequestEvidence {
+    let mut stream = accept_tls(listener, config);
+    let evidence = read_request(&mut stream, usize::MAX);
+    stream.write_all(response).expect("TLS fixture response");
+    stream.flush().expect("TLS fixture flush");
+    evidence
+}
+
+fn repeated_upload_recorder(
+    listener: &TcpListener,
+    control_listener: &TcpListener,
+    config: &Arc<rustls::ServerConfig>,
+    iterations: usize,
+    concurrent: usize,
+    strict_incomplete: bool,
+    evidence: &mut Vec<RequestEvidence>,
+) {
+    let mut controls = (0..concurrent)
+        .map(|_| control_listener.accept().expect("repeat control").0)
+        .collect::<Vec<_>>();
+    for _ in 0..iterations {
+        let streams = (0..concurrent)
+            .map(|_| accept_tls(listener, config))
+            .collect::<Vec<_>>();
+        let handles = streams
+            .into_iter()
+            .zip(controls.drain(..))
+            .map(|(mut stream, mut control)| {
+                thread::spawn(move || {
+                    let mut item = read_request(&mut stream, UPLOAD_PREFIX_BYTES);
+                    assert!(
+                        item.received > 0 && item.received < item.content_length,
+                        "repeated upload must be positive and incomplete before readiness"
+                    );
+                    signal(&mut control, b'1');
+                    control
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    let mut cancelled = [0u8; 1];
+                    control
+                        .read_exact(&mut cancelled)
+                        .expect("repeated cancellation acknowledgement");
+                    assert_eq!(cancelled, *b"0");
+                    drain_after_cancel(&mut stream, &mut item);
+                    assert!(
+                        item.observed_close,
+                        "repeated cancellation omitted EOF/reset"
+                    );
+                    if strict_incomplete {
+                        assert!(
+                            item.received < item.content_length,
+                            "Linux repeated upload completed before cancellation"
+                        );
+                    } else {
+                        assert!(item.received <= item.content_length);
+                    }
+                    signal(&mut control, b'2');
+                    (item, control)
+                })
+            })
+            .collect::<Vec<_>>();
+        for handle in handles {
+            let (item, control) = handle.join().unwrap();
+            evidence.push(item);
+            controls.push(control);
+        }
+    }
+}
+
 fn run_recorder(scenario: &str) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("fixture bind");
     let control_listener = TcpListener::bind("127.0.0.1:0").expect("control bind");
@@ -285,10 +407,34 @@ fn run_recorder(scenario: &str) {
         .expect("bounded fixture receive window");
     let port = listener.local_addr().unwrap().port();
     let control_port = control_listener.local_addr().unwrap().port();
-    println!("S8D_RECORDER_READY {port} {control_port}");
+    let repeated = scenario.starts_with("repeated_");
+    let tls = repeated.then(|| {
+        let (config, root_der) = tls_server_config();
+        let root_listener = TcpListener::bind("127.0.0.1:0").expect("root channel bind");
+        (config, root_der, root_listener)
+    });
+    if let Some((_, _, root_listener)) = &tls {
+        println!(
+            "S8D_RECORDER_READY {port} {control_port} {}",
+            root_listener.local_addr().unwrap().port()
+        );
+    } else {
+        println!("S8D_RECORDER_READY {port} {control_port}");
+    }
     std::io::stdout().flush().unwrap();
+    if let Some((_, root_der, root_listener)) = &tls {
+        let (mut root_channel, _) = root_listener.accept().expect("root channel accept");
+        root_channel
+            .write_all(root_der)
+            .expect("public root transfer");
+        root_channel.flush().expect("public root flush");
+    }
 
-    let mut evidence = vec![accept_complete(&listener, &done_response())];
+    let mut evidence = if let Some((config, _, _)) = &tls {
+        vec![accept_complete_tls(&listener, config, &done_response())]
+    } else {
+        vec![accept_complete(&listener, &done_response())]
+    };
     match scenario {
         "success" => evidence.push(accept_complete(&listener, &done_response())),
         "retry" => {
@@ -351,6 +497,30 @@ fn run_recorder(scenario: &str) {
             }
             signal(&mut control, b'2');
             evidence.push(item);
+        }
+        "repeated_cancel_upload" | "repeated_cancel_after_prefix" => {
+            let (config, _, _) = tls.as_ref().expect("repeated TLS config");
+            repeated_upload_recorder(
+                &listener,
+                &control_listener,
+                config,
+                SEQUENTIAL_CANCELLATIONS,
+                1,
+                scenario == "repeated_cancel_upload",
+                &mut evidence,
+            );
+        }
+        "repeated_concurrent_stalled" => {
+            let (config, _, _) = tls.as_ref().expect("repeated TLS config");
+            repeated_upload_recorder(
+                &listener,
+                &control_listener,
+                config,
+                CONCURRENT_CANCELLATION_GROUPS,
+                2,
+                cfg!(not(windows)),
+                &mut evidence,
+            );
         }
         "concurrent_stalled" => {
             let controls = [
@@ -466,22 +636,261 @@ async fn wait_for_recorder(control: &mut tokio::net::TcpStream, expected: u8) {
         .expect("recorder state signal closed");
     assert_eq!(marker, [expected]);
 }
-async fn run_measurement(scenario: &str, endpoint: String, control: String) {
-    let port = Arc::new(
-        OpenRouterPort::with_local_endpoint(KeySource::Inline("fixture-key".into()), endpoint)
-            .unwrap(),
+fn retain_four_frames(
+    admission: &Arc<ObservationAdmission>,
+) -> Vec<server::observations::ScreenObservation> {
+    (0..4)
+        .map(|index| {
+            admission
+                .try_begin_capture()
+                .expect("retained reservation")
+                .retain(
+                    CapturedFrame {
+                        png: vec![index as u8; FRAME_BYTES],
+                        width: 4096,
+                        height: 1024,
+                    },
+                    format!("run-{index}"),
+                    format!("bot-{index}"),
+                    format!("observation-{index}"),
+                    "2026-09-18T12:00:00Z",
+                    0,
+                )
+        })
+        .collect()
+}
+
+async fn wait_for_cleanup_while_stalled(
+    admission: &ObservationAdmission,
+    baseline: usize,
+) -> (usize, u64) {
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(1);
+    loop {
+        let current = LIVE.load(Ordering::SeqCst);
+        if current <= baseline + CLEANUP_TOLERANCE {
+            return (current, started.elapsed().as_millis() as u64);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "repeated cancellation cleanup exceeded one second while receivers were stalled: baseline={baseline} current={current} tolerance={CLEANUP_TOLERANCE} permits={:?}",
+            admission.snapshot()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+async fn run_repeated_measurement(
+    scenario: &str,
+    port: &Arc<OpenRouterPort>,
+    control: &str,
+    warmed_transport_current: usize,
+) {
+    let (iterations, concurrent, budget) = if scenario == "repeated_concurrent_stalled" {
+        (CONCURRENT_CANCELLATION_GROUPS, 2, DOUBLE_BUDGET)
+    } else {
+        (SEQUENTIAL_CANCELLATIONS, 1, SINGLE_BUDGET)
+    };
+    let admission = Arc::new(ObservationAdmission::new());
+    let messages = canonical_messages();
+    let mut controls = Vec::with_capacity(concurrent);
+    for _ in 0..concurrent {
+        controls.push(
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                tokio::net::TcpStream::connect(control),
+            )
+            .await
+            .expect("repeat control connection timed out")
+            .expect("repeat control connection failed"),
+        );
+    }
+    let mut cleanup_readings = Vec::with_capacity(iterations);
+    let mut cleanup_latencies_ms = Vec::with_capacity(iterations);
+    let mut peak_incrementals = Vec::with_capacity(iterations);
+    let mut active_incrementals = Vec::with_capacity(iterations);
+    let cleanup_baseline = LIVE.load(Ordering::SeqCst);
+
+    for iteration in 0..iterations {
+        let mut frames = retain_four_frames(&admission);
+        let retained_current = LIVE.load(Ordering::SeqCst);
+        assert!(
+            retained_current.saturating_sub(cleanup_baseline) >= 4 * FRAME_BYTES,
+            "iteration {iteration} did not retain four production-max frame buffers"
+        );
+        let snapshot = admission.snapshot();
+        assert_eq!(snapshot.retained_in_use, 4);
+        assert_eq!(snapshot.capture_decode_in_use, 0);
+
+        let mut dispatch_permits = Vec::with_capacity(concurrent);
+        for _ in 0..concurrent {
+            dispatch_permits.push(
+                admission
+                    .try_begin_dispatch()
+                    .expect("repeated dispatch reservation"),
+            );
+        }
+        assert_eq!(admission.snapshot().dispatch_in_use, concurrent);
+        let baseline = reset_peak();
+        let mut tasks = Vec::with_capacity(concurrent);
+        for frame in frames.iter().take(concurrent) {
+            let request = image_request(&messages, frame);
+            let task_port = Arc::clone(port);
+            tasks.push(tokio::spawn(
+                async move { drain(&task_port, request).await },
+            ));
+        }
+        if concurrent == 1 {
+            wait_for_recorder(&mut controls[0], b'1').await;
+        } else {
+            let (first, second) = controls.split_at_mut(1);
+            tokio::join!(
+                wait_for_recorder(&mut first[0], b'1'),
+                wait_for_recorder(&mut second[0], b'1')
+            );
+        }
+        assert!(
+            tasks.iter().all(|task| !task.is_finished()),
+            "iteration {iteration} completed before synchronized cancellation"
+        );
+        let active_current = LIVE.load(Ordering::SeqCst);
+        for task in tasks {
+            task.abort();
+            let cancelled = task
+                .await
+                .expect_err("repeated request returned before cancellation");
+            assert!(cancelled.is_cancelled());
+        }
+        let peak = PEAK.load(Ordering::SeqCst);
+        let peak_incremental = peak.saturating_sub(baseline);
+        assert!(
+            peak_incremental <= budget,
+            "iteration {iteration} exceeded image buffer budget: peak={peak_incremental} budget={budget}"
+        );
+
+        dispatch_permits.clear();
+        frames.clear();
+        let released = admission.snapshot();
+        assert_eq!(released.retained_in_use, 0);
+        assert_eq!(released.capture_decode_in_use, 0);
+        assert_eq!(released.dispatch_in_use, 0);
+        let (cleanup_current, cleanup_latency_ms) =
+            wait_for_cleanup_while_stalled(&admission, cleanup_baseline).await;
+        cleanup_readings.push(cleanup_current);
+        cleanup_latencies_ms.push(cleanup_latency_ms);
+        peak_incrementals.push(peak_incremental);
+        active_incrementals.push(signed_delta(active_current, baseline));
+
+        for control in &mut controls {
+            control
+                .write_all(b"0")
+                .await
+                .expect("repeated cancellation acknowledgement");
+        }
+        if concurrent == 1 {
+            wait_for_recorder(&mut controls[0], b'2').await;
+        } else {
+            let (first, second) = controls.split_at_mut(1);
+            tokio::join!(
+                wait_for_recorder(&mut first[0], b'2'),
+                wait_for_recorder(&mut second[0], b'2')
+            );
+        }
+    }
+
+    let smallest_cleanup = *cleanup_readings.iter().min().unwrap();
+    let largest_cleanup = *cleanup_readings.iter().max().unwrap();
+    let cleanup_spread = largest_cleanup - smallest_cleanup;
+    assert!(
+        cleanup_spread <= CLEANUP_SPREAD,
+        "repeated cancellation cleanup spread exceeded 64 KiB: smallest={smallest_cleanup} largest={largest_cleanup} spread={cleanup_spread}"
     );
-    drain(
-        &port,
+    assert!(peak_incrementals.iter().all(|peak| *peak <= budget));
+    assert_eq!(admission.snapshot().retained_in_use, 0);
+    assert_eq!(admission.snapshot().capture_decode_in_use, 0);
+    assert_eq!(admission.snapshot().dispatch_in_use, 0);
+    drop(controls);
+    drop(messages);
+    drop(admission);
+    tokio::task::yield_now().await;
+    let final_current = LIVE.load(Ordering::SeqCst);
+    assert!(final_current <= warmed_transport_current + CLEANUP_TOLERANCE);
+
+    println!(
+        "S8D_MEMORY_MEASUREMENT {}",
+        serde_json::json!({
+            "scenario": scenario,
+            "iterations": iterations,
+            "dispatches_per_iteration": concurrent,
+            "total_cancellations": iterations * concurrent,
+            "frame_bytes_each": FRAME_BYTES,
+            "retained_frames_per_iteration": 4,
+            "frame_payload": "synthetic max-size byte buffers; not valid PNG decode fixtures",
+            "warmed_transport_current": warmed_transport_current,
+            "cleanup_baseline": cleanup_baseline,
+            "cleanup_readings": cleanup_readings,
+            "cleanup_latencies_ms": cleanup_latencies_ms,
+            "cleanup_spread": cleanup_spread,
+            "cleanup_spread_limit": CLEANUP_SPREAD,
+            "peak_incrementals": peak_incrementals,
+            "active_incrementals": active_incrementals,
+            "budget": budget,
+            "within_budget": true,
+            "final_current": final_current,
+            "cleanup_tolerance": CLEANUP_TOLERANCE,
+            "permits_after_cleanup": {"retained": 0, "capture_decode": 0, "dispatch": 0},
+            "scope": "Raw OpenRouterPort requested Rust heap for application image buffers over directly owned Hyper HTTP/1 with Rustls",
+            "transport_path": "image-only directly owned Hyper HTTP/1 over controlled TLS",
+            "counter_semantics": "live requested bytes; successful realloc applies the signed new-size minus old-size delta",
+            "excluded": ["allocator arena overhead", "RSS", "kernel socket and TLS buffers", "recorder process", "native Ring allocations", "allocator-internal transient realloc overlap"],
+        })
+    );
+}
+
+async fn run_measurement(scenario: &str, endpoint: String, control: String) {
+    let port = Arc::new(if let Ok(encoded_root) = std::env::var(TLS_ROOT_ENV) {
+        let root_der = base64::engine::general_purpose::STANDARD
+            .decode(encoded_root)
+            .expect("public TLS root encoding");
+        OpenRouterPort::with_local_https_endpoint(
+            KeySource::Inline("fixture-key".into()),
+            endpoint,
+            root_der,
+        )
+        .unwrap()
+    } else {
+        OpenRouterPort::with_local_endpoint(KeySource::Inline("fixture-key".into()), endpoint)
+            .unwrap()
+    });
+    let warm_request = if scenario.starts_with("repeated_") {
+        ModelRequest {
+            model: "vision/model".into(),
+            messages: vec![ModelMessage {
+                role: "user".into(),
+                content: MessageContent::Parts(vec![ContentPart::ImageUrl {
+                    image_url: ImageUrl {
+                        url: "data:image/png;base64,AA==".into(),
+                    },
+                }]),
+                tool_calls: None,
+                tool_call_id: None,
+            }],
+            ..Default::default()
+        }
+    } else {
         ModelRequest {
             model: "vision/model".into(),
             messages: vec![ModelMessage::user("warm transport")],
             ..Default::default()
-        },
-    )
-    .await;
+        }
+    };
+    drain(&port, warm_request).await;
 
     let warmed_current = LIVE.load(Ordering::SeqCst);
+    if scenario.starts_with("repeated_") {
+        run_repeated_measurement(scenario, &port, &control, warmed_current).await;
+        return;
+    }
     let admission = Arc::new(ObservationAdmission::new());
     let mut frames = Vec::new();
     for index in 0..4 {
@@ -759,7 +1168,10 @@ fn fail_recorder(recorder: RecorderChild, context: impl std::fmt::Display) -> ! 
     )
 }
 
-fn start_recorder(exe: &std::path::Path, scenario: &str) -> (String, String, RecorderChild) {
+fn start_recorder(
+    exe: &std::path::Path,
+    scenario: &str,
+) -> (String, String, Option<Vec<u8>>, RecorderChild) {
     let mut child = Command::new(exe)
         .args([
             "--exact",
@@ -804,12 +1216,28 @@ fn start_recorder(exe: &std::path::Path, scenario: &str) -> (String, String, Rec
             let ports = line[index + "S8D_RECORDER_READY ".len()..]
                 .split_whitespace()
                 .collect::<Vec<_>>();
-            if ports.len() != 2 {
+            if !matches!(ports.len(), 2 | 3) {
                 fail_recorder(recorder, format!("parsing readiness line: {line}"));
             }
-            let endpoint = format!("http://127.0.0.1:{}/api/v1/chat/completions", ports[0]);
+            let scheme = if ports.len() == 3 { "https" } else { "http" };
+            let endpoint = format!("{scheme}://127.0.0.1:{}/api/v1/chat/completions", ports[0]);
             let control = format!("127.0.0.1:{}", ports[1]);
-            return (endpoint, control, recorder);
+            let root_der = if ports.len() == 3 {
+                let mut channel = TcpStream::connect(format!("127.0.0.1:{}", ports[2]))
+                    .expect("public root channel connect");
+                channel
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut root = Vec::new();
+                channel
+                    .read_to_end(&mut root)
+                    .expect("public root transfer");
+                assert!(!root.is_empty() && root.len() <= 64 * 1024);
+                Some(root)
+            } else {
+                None
+            };
+            return (endpoint, control, root_der, recorder);
         }
     }
 }
@@ -876,12 +1304,20 @@ fn application_image_buffer_memory_acceptance() {
     let mut measurements = Vec::new();
     let mut scenarios = vec!["success", "retry", "stalled_response", "concurrent_stalled"];
     #[cfg(windows)]
-    scenarios.push("cancel_after_prefix");
+    {
+        scenarios.push("cancel_after_prefix");
+        scenarios.push("repeated_cancel_after_prefix");
+    }
     #[cfg(not(windows))]
-    scenarios.push("cancel_upload");
+    {
+        scenarios.push("cancel_upload");
+        scenarios.push("repeated_cancel_upload");
+    }
+    scenarios.push("repeated_concurrent_stalled");
     for scenario in scenarios {
-        let (endpoint, control, recorder) = start_recorder(&exe, scenario);
-        let child = match Command::new(&exe)
+        let (endpoint, control, root_der, recorder) = start_recorder(&exe, scenario);
+        let mut command = Command::new(&exe);
+        command
             .args([
                 "--exact",
                 "memory_fixture_process",
@@ -893,9 +1329,14 @@ fn application_image_buffer_memory_acceptance() {
             .env(ENDPOINT_ENV, endpoint)
             .env(CONTROL_ENV, control)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-        {
+            .stderr(Stdio::piped());
+        if let Some(root_der) = root_der {
+            command.env(
+                TLS_ROOT_ENV,
+                base64::engine::general_purpose::STANDARD.encode(root_der),
+            );
+        }
+        let child = match command.spawn() {
             Ok(child) => child,
             Err(error) => fail_recorder(recorder, format!("spawning measurement child: {error}")),
         };
@@ -925,13 +1366,37 @@ fn application_image_buffer_memory_acceptance() {
         let expected_requests = match scenario {
             "retry" => 4,
             "concurrent_stalled" => 3,
+            "repeated_cancel_upload" | "repeated_cancel_after_prefix" => {
+                1 + SEQUENTIAL_CANCELLATIONS
+            }
+            "repeated_concurrent_stalled" => 1 + 2 * CONCURRENT_CANCELLATION_GROUPS,
             _ => 2,
         };
         assert_eq!(wire["request_count"], expected_requests);
         if scenario == "retry" {
             assert_eq!(wire["image_hashes_equal"], true);
         }
-        if matches!(scenario, "cancel_upload" | "cancel_after_prefix") {
+        if scenario.starts_with("repeated_") {
+            let count = expected_requests - 1;
+            assert_eq!(measurement["total_cancellations"], count);
+            let received = wire["image_received"].as_array().unwrap();
+            let lengths = wire["image_content_lengths"].as_array().unwrap();
+            let closed = wire["image_observed_close"].as_array().unwrap();
+            assert_eq!(received.len(), count);
+            assert_eq!(lengths.len(), count);
+            assert_eq!(closed.len(), count);
+            for index in 0..count {
+                assert_eq!(closed[index], true);
+                let bytes = received[index].as_u64().unwrap();
+                let length = lengths[index].as_u64().unwrap();
+                assert!(bytes > 0 && bytes <= length);
+                #[cfg(not(windows))]
+                assert!(
+                    bytes < length,
+                    "Linux repeated cancellation followed full upload"
+                );
+            }
+        } else if matches!(scenario, "cancel_upload" | "cancel_after_prefix") {
             assert_eq!(wire["image_observed_close"][0], true);
             let received = wire["image_received"][0].as_u64().unwrap();
             let content_length = wire["image_content_lengths"][0].as_u64().unwrap();

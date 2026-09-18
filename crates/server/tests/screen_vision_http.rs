@@ -1,17 +1,19 @@
 mod common;
 
+use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 
 use async_trait::async_trait;
 use base64::Engine;
 use common::{own_conversation, seed_bot};
-use futures::StreamExt;
+use futures::{Stream, StreamExt};
 use model::ladder::Trigger;
 use model::secrets::KeySource;
 use model::{
-    ContentPart, ImageUrl, MessageContent, ModelEvent, ModelMessage, ModelPort, ModelRequest,
-    OpenRouterPort,
+    ContentPart, EventStream, ImageUrl, MessageContent, ModelEvent, ModelMessage, ModelPort,
+    ModelRequest, OpenRouterPort,
 };
 use server::observations::ObservationAdmission;
 use server::runs::{RunEvent, RunManager, StartOptions};
@@ -31,6 +33,7 @@ enum FinalResponse {
     BusyExhausted,
     EofWithoutDone,
     EmptyBody,
+    StalledImage,
 }
 
 #[derive(Debug, Clone)]
@@ -53,6 +56,9 @@ struct Recorder {
     admission: Arc<Mutex<Option<Arc<ObservationAdmission>>>>,
     final_response: FinalResponse,
     expected_host: String,
+    stalled_image: AtomicUsize,
+    peer_closed: AtomicUsize,
+    state_changed: tokio::sync::Notify,
 }
 
 impl Recorder {
@@ -65,6 +71,9 @@ impl Recorder {
             admission: Arc::new(Mutex::new(None)),
             final_response,
             expected_host,
+            stalled_image: AtomicUsize::new(0),
+            peer_closed: AtomicUsize::new(0),
+            state_changed: tokio::sync::Notify::new(),
         });
         let state = Arc::clone(&recorder);
         tokio::spawn(async move {
@@ -129,6 +138,21 @@ impl Recorder {
                     summaries.len()
                 };
 
+                if request_number == 2
+                    && matches!(state.final_response, FinalResponse::StalledImage)
+                {
+                    state.stalled_image.store(1, Ordering::SeqCst);
+                    state.state_changed.notify_one();
+                    let mut byte = [0u8; 1];
+                    match socket.read(&mut byte).await {
+                        Ok(0) | Err(_) => {}
+                        Ok(_) => panic!("unexpected request byte after Content-Length"),
+                    }
+                    state.peer_closed.store(1, Ordering::SeqCst);
+                    state.state_changed.notify_one();
+                    return;
+                }
+
                 let response = match request_number {
                     1 if matches!(state.final_response, FinalResponse::EmptyBody) => {
                         http_response("200 OK", "text/event-stream", "", &[])
@@ -166,6 +190,83 @@ impl Recorder {
             }
         });
         (endpoint, recorder)
+    }
+
+    async fn wait_for_state(&self, state: &AtomicUsize, label: &str) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if state.load(Ordering::SeqCst) == 1 {
+                    return;
+                }
+                self.state_changed.notified().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {label}"));
+    }
+}
+
+#[derive(Clone)]
+struct DropOrderPort {
+    inner: OpenRouterPort,
+    admission: Arc<Mutex<Option<Arc<ObservationAdmission>>>>,
+    image_drop_dispatch_counts: Arc<Mutex<Vec<usize>>>,
+}
+
+impl ModelPort for DropOrderPort {
+    fn stream(&self, request: ModelRequest) -> EventStream {
+        let image_request = request.messages.iter().any(|message| {
+            matches!(
+                &message.content,
+                MessageContent::Parts(parts)
+                    if parts.iter().any(|part| matches!(part, ContentPart::ImageUrl { .. }))
+            )
+        });
+        let inner = self.inner.stream(request);
+        if !image_request {
+            return inner;
+        }
+        Box::pin(DropObservedImageStream {
+            inner: Some(inner),
+            admission: Arc::clone(&self.admission),
+            image_drop_dispatch_counts: Arc::clone(&self.image_drop_dispatch_counts),
+        })
+    }
+}
+
+struct DropObservedImageStream {
+    inner: Option<EventStream>,
+    admission: Arc<Mutex<Option<Arc<ObservationAdmission>>>>,
+    image_drop_dispatch_counts: Arc<Mutex<Vec<usize>>>,
+}
+
+impl Stream for DropObservedImageStream {
+    type Item = ModelEvent;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.inner
+            .as_mut()
+            .expect("image stream already dropped")
+            .as_mut()
+            .poll_next(cx)
+    }
+}
+
+impl Drop for DropObservedImageStream {
+    fn drop(&mut self) {
+        drop(self.inner.take());
+        let dispatch_in_use = self
+            .admission
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("drop-order admission installed")
+            .snapshot()
+            .dispatch_in_use;
+        self.image_drop_dispatch_counts
+            .lock()
+            .unwrap()
+            .push(dispatch_in_use);
     }
 }
 
@@ -431,6 +532,94 @@ async fn run_case(
     .await
     .expect("real HTTP run settled");
     (db, manager, capture, recorder, run_id, events)
+}
+
+#[tokio::test]
+async fn public_stop_drops_image_transport_before_dispatch_release() {
+    let (endpoint, recorder) = Recorder::spawn(FinalResponse::StalledImage).await;
+    let admission = Arc::new(Mutex::new(None));
+    let image_drop_dispatch_counts = Arc::new(Mutex::new(Vec::new()));
+    let port = Arc::new(DropOrderPort {
+        inner: OpenRouterPort::with_local_endpoint(
+            KeySource::Inline("fixture-key".into()),
+            endpoint,
+        )
+        .unwrap(),
+        admission: Arc::clone(&admission),
+        image_drop_dispatch_counts: Arc::clone(&image_drop_dispatch_counts),
+    });
+    let db = Arc::new(Mutex::new(Db::open(":memory:").unwrap()));
+    seed_bot(&db, "arthur", "Arthur");
+    let conversation_id = own_conversation(&db, "arthur");
+    {
+        let db = db.lock().unwrap();
+        model::routing::set_routing_settings(&db, Some(false), None).unwrap();
+        server::judge::set_judge_enabled(&db, false).unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO vms (bot_id, container, cdp_port, web_port, state, last_used_at)
+                 VALUES ('arthur', 'bullpen-vm-arthur', 9501, 6501, 'running', '2026-09-18T12:00:00Z')",
+                [],
+            )
+            .unwrap();
+    }
+    let capture = Arc::new(OwnFrameCapture::default());
+    let manager = Arc::new(RunManager::with_screen_capture(
+        Arc::clone(&db),
+        port,
+        sandbox::default_sandbox(),
+        Arc::new(RunningDocker),
+        Arc::new(config()),
+        true,
+        catalog(),
+        Arc::clone(&capture) as Arc<dyn FrameCapture>,
+    ));
+    let shared_admission = manager.observation_admission();
+    *admission.lock().unwrap() = Some(Arc::clone(&shared_admission));
+    *recorder.admission.lock().unwrap() = Some(Arc::clone(&shared_admission));
+
+    let run_id = manager.start(StartOptions {
+        bot_id: "arthur".into(),
+        conversation_id,
+        model: "vision/model".into(),
+        messages: vec![ModelMessage::user("inspect the screen")],
+        trigger: Trigger::Chat,
+        room: false,
+    });
+    let events = manager.subscribe(&run_id);
+    recorder
+        .wait_for_state(&recorder.stalled_image, "stalled image request")
+        .await;
+    assert_eq!(capture.0.load(Ordering::SeqCst), 1);
+    assert_eq!(shared_admission.snapshot().dispatch_in_use, 1);
+    assert_eq!(recorder.summaries.lock().unwrap().len(), 2);
+    assert_eq!(recorder.summaries.lock().unwrap()[1].dispatch_in_use, 1);
+
+    manager.stop(&run_id);
+    let terminal = tokio::time::timeout(std::time::Duration::from_secs(5), common::drain(events))
+        .await
+        .expect("public stop settled stalled image request");
+    recorder
+        .wait_for_state(&recorder.peer_closed, "stalled image peer close")
+        .await;
+
+    assert_eq!(*image_drop_dispatch_counts.lock().unwrap(), [1]);
+    assert_eq!(shared_admission.snapshot().dispatch_in_use, 0);
+    assert!(manager.observation_registry().metadata(&run_id).is_none());
+    let stored: (String, Option<String>, String) = db
+        .lock()
+        .unwrap()
+        .conn()
+        .query_row(
+            "SELECT status, error, messages FROM runs WHERE id = ?1",
+            [&run_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(stored.0, "failed");
+    assert_eq!(stored.1.as_deref(), Some("Stopped."));
+    assert!(!stored.2.contains("data:image"));
+    assert!(!format!("{terminal:?}").contains("data:image"));
 }
 
 #[tokio::test]

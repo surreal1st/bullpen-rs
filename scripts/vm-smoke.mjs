@@ -1,4 +1,4 @@
-// VM smoke test against a RUNNING bullpen-rs server (default: meridian :4380).
+// VM smoke test against a RUNNING bullpen-rs server (default: meridian HTTPS :8452).
 //
 // Walks the path the API actually advertises, which is the only thing that
 // has ever caught this class of bug: a unit test makes the same routing
@@ -21,8 +21,8 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-const base = (process.argv[2] ?? "http://100.119.100.103:4380").replace(/\/$/, "");
-const botId = process.argv[3] ?? "dora";
+const base = (process.argv[2] ?? "https://meridian.tail74afb5.ts.net:8452").replace(/\/$/, "");
+const botId = process.argv[3];
 
 const short = (s, n = 400) => (s.length > n ? `${s.slice(0, n)}… [${s.length} bytes]` : s);
 
@@ -32,6 +32,7 @@ async function step(name, fn) {
 }
 
 async function main() {
+  if (!botId) throw new Error("Pass an explicit test bot ID: node scripts/vm-smoke.mjs [baseUrl] [botId]");
   const pw = readFileSync(join(process.env.USERPROFILE, ".bullpen", "password.key"), "utf8").replace(/\r?\n$/, "");
   if (!pw) throw new Error("password.key is empty (name only, never the value)");
 
