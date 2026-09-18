@@ -734,9 +734,33 @@ impl FrameCapture for FakeFrameCapture {
     }
 }
 
+/// THUMB-01 follow-up: every thumbnail test below drives the SAME
+/// process-global cache, and `cargo test` runs a binary's tests in
+/// PARALLEL threads. The cap tests insert 65+ entries and evict
+/// oldest-first, which silently deleted a frame another test had just
+/// cached - that test then recaptured and failed. Measured 2 failures in
+/// 10 runs before this lock, and it passed the gate twice by luck.
+///
+/// A per-test `clear_thumbnail_cache()` cannot fix this: it clears at the
+/// start, it does not keep a concurrent test out. Serialise instead. A
+/// flaky guard is worse than no guard, because it teaches you to ignore
+/// red.
+/// A TOKIO mutex, not a std one: these tests hold the guard across `.await`,
+/// which `clippy::await_holding_lock` rejects for a std `Mutex` (it blocks
+/// the executor thread and can deadlock). Tokio's is built for exactly this.
+static THUMB_CACHE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Takes the lock AND empties the cache, so each test starts from a known
+/// empty one with nothing else running against it.
+async fn thumb_cache_guard() -> tokio::sync::MutexGuard<'static, ()> {
+    let guard = THUMB_CACHE_TEST_LOCK.lock().await;
+    server::vm::clear_thumbnail_cache();
+    guard
+}
+
 #[tokio::test]
 async fn thumbnail_reuses_a_cached_frame_inside_the_ttl() {
-    server::vm::clear_thumbnail_cache();
+    let _cache_guard = thumb_cache_guard().await;
     let cfg = test_config();
     let capture = FakeFrameCapture::new();
 
@@ -754,7 +778,7 @@ async fn thumbnail_reuses_a_cached_frame_inside_the_ttl() {
 
 #[tokio::test]
 async fn thumbnail_recaptures_once_the_ttl_expires() {
-    server::vm::clear_thumbnail_cache();
+    let _cache_guard = thumb_cache_guard().await;
     let cfg = test_config();
     let capture = FakeFrameCapture::new();
 
@@ -810,7 +834,7 @@ impl FrameCapture for SizedFrameCapture {
 
 #[tokio::test]
 async fn thumbnail_caps_entry_count_at_the_configured_bound() {
-    server::vm::clear_thumbnail_cache();
+    let _cache_guard = thumb_cache_guard().await;
     let cfg = test_config();
     // 1 KiB frames: far under the byte cap, so only the entry cap can bind.
     let capture = SizedFrameCapture::new(1_024);
@@ -829,7 +853,7 @@ async fn thumbnail_caps_entry_count_at_the_configured_bound() {
 
 #[tokio::test]
 async fn thumbnail_caps_aggregate_bytes_at_the_configured_bound() {
-    server::vm::clear_thumbnail_cache();
+    let _cache_guard = thumb_cache_guard().await;
     let cfg = test_config();
     // 8 frames at a quarter of the byte cap each guarantee the byte cap
     // trips (32 MiB net demand at 4x the cap) long before the 64-entry
@@ -851,7 +875,7 @@ async fn thumbnail_caps_aggregate_bytes_at_the_configured_bound() {
 
 #[tokio::test]
 async fn thumbnail_evicts_the_oldest_entry_first() {
-    server::vm::clear_thumbnail_cache();
+    let _cache_guard = thumb_cache_guard().await;
     let cfg = test_config();
     let capture = SizedFrameCapture::new(1_024);
 
@@ -881,7 +905,7 @@ async fn thumbnail_evicts_the_oldest_entry_first() {
 
 #[tokio::test]
 async fn thumbnail_sweeps_expired_entries_on_insert() {
-    server::vm::clear_thumbnail_cache();
+    let _cache_guard = thumb_cache_guard().await;
     let cfg = test_config();
     let capture = SizedFrameCapture::new(1_024);
 
