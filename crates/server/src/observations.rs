@@ -1,5 +1,5 @@
-//! Run-scoped screen observations and the process-wide admission bounds that
-//! keep capture, decoded frames, and image dispatch finite.
+//! Run-scoped screen observations and the shared S8d observation-pipeline
+//! admission bounds. Thumbnail caching predates and does not use this budget.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -73,6 +73,13 @@ pub struct CaptureReservation {
 }
 
 impl CaptureReservation {
+    pub fn into_worker(self) -> CaptureWorkerLease {
+        CaptureWorkerLease {
+            retained: self.retained,
+            decode: self.decode,
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn retain(
         self,
@@ -85,6 +92,82 @@ impl CaptureReservation {
     ) -> ScreenObservation {
         let CaptureReservation { retained, decode } = self;
         drop(decode);
+        RetainedFrameReservation { retained }.retain(
+            frame,
+            run_id,
+            bot_id,
+            observation_id,
+            captured_at,
+            desktop_generation,
+        )
+    }
+}
+
+pub struct CaptureWorkerLease {
+    retained: OwnedSemaphorePermit,
+    decode: OwnedSemaphorePermit,
+}
+
+impl fmt::Debug for CaptureWorkerLease {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CaptureWorkerLease").finish_non_exhaustive()
+    }
+}
+
+pub struct CapturedObservationFrame {
+    frame: CapturedFrame,
+    retained: OwnedSemaphorePermit,
+    decode: OwnedSemaphorePermit,
+}
+
+impl CaptureWorkerLease {
+    pub fn finish(self, frame: CapturedFrame) -> CapturedObservationFrame {
+        CapturedObservationFrame {
+            frame,
+            retained: self.retained,
+            decode: self.decode,
+        }
+    }
+}
+
+impl CapturedObservationFrame {
+    pub fn into_frame(self) -> (CapturedFrame, RetainedFrameReservation) {
+        let CapturedObservationFrame {
+            frame,
+            retained,
+            decode,
+        } = self;
+        drop(decode);
+        (frame, RetainedFrameReservation { retained })
+    }
+
+    pub(crate) fn dispose(self) {
+        let CapturedObservationFrame {
+            frame,
+            retained,
+            decode,
+        } = self;
+        drop(frame);
+        drop(retained);
+        drop(decode);
+    }
+}
+
+pub struct RetainedFrameReservation {
+    retained: OwnedSemaphorePermit,
+}
+
+impl RetainedFrameReservation {
+    #[allow(clippy::too_many_arguments)]
+    pub fn retain(
+        self,
+        frame: CapturedFrame,
+        run_id: impl Into<String>,
+        bot_id: impl Into<String>,
+        observation_id: impl Into<String>,
+        captured_at: impl Into<String>,
+        desktop_generation: u64,
+    ) -> ScreenObservation {
         ScreenObservation {
             metadata: ObservationMetadata {
                 run_id: run_id.into(),
@@ -96,8 +179,10 @@ impl CaptureReservation {
                 desktop_generation,
                 encoded_bytes: frame.png.len(),
             },
-            frame,
-            _retained: retained,
+            payload: Arc::new(FramePayload {
+                frame,
+                _retained: self.retained,
+            }),
         }
     }
 }
@@ -127,6 +212,10 @@ pub struct ObservationMetadata {
 
 pub struct ScreenObservation {
     metadata: ObservationMetadata,
+    payload: Arc<FramePayload>,
+}
+
+struct FramePayload {
     frame: CapturedFrame,
     _retained: OwnedSemaphorePermit,
 }
@@ -137,7 +226,7 @@ impl ScreenObservation {
     }
 
     pub fn png(&self) -> &[u8] {
-        &self.frame.png
+        &self.payload.frame.png
     }
 }
 
@@ -151,7 +240,12 @@ impl fmt::Debug for ScreenObservation {
 
 #[derive(Default)]
 pub struct ObservationRegistry {
-    frames: Mutex<HashMap<String, ScreenObservation>>,
+    frames: Mutex<HashMap<String, RegistryObservation>>,
+}
+
+struct RegistryObservation {
+    metadata: ObservationMetadata,
+    payload: Option<Arc<FramePayload>>,
 }
 
 impl ObservationRegistry {
@@ -159,19 +253,54 @@ impl ObservationRegistry {
         Self::default()
     }
 
-    fn frames(&self) -> MutexGuard<'_, HashMap<String, ScreenObservation>> {
+    fn frames(&self) -> MutexGuard<'_, HashMap<String, RegistryObservation>> {
         self.frames.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     pub fn replace(&self, observation: ScreenObservation) -> bool {
         let run_id = observation.metadata.run_id.clone();
-        self.frames().insert(run_id, observation).is_some()
+        self.frames()
+            .insert(
+                run_id,
+                RegistryObservation {
+                    metadata: observation.metadata,
+                    payload: Some(observation.payload),
+                },
+            )
+            .is_some()
+    }
+
+    pub fn store(&self, observation: &ScreenObservation) -> bool {
+        let run_id = observation.metadata.run_id.clone();
+        self.frames()
+            .insert(
+                run_id,
+                RegistryObservation {
+                    metadata: observation.metadata.clone(),
+                    payload: Some(Arc::clone(&observation.payload)),
+                },
+            )
+            .is_some()
     }
 
     pub fn metadata(&self, run_id: &str) -> Option<ObservationMetadata> {
         self.frames()
             .get(run_id)
             .map(|observation| observation.metadata.clone())
+    }
+
+    pub fn has_bytes(&self, run_id: &str) -> bool {
+        self.frames()
+            .get(run_id)
+            .is_some_and(|observation| observation.payload.is_some())
+    }
+
+    pub fn release_bytes(&self, run_id: &str) -> bool {
+        let mut frames = self.frames();
+        let Some(observation) = frames.get_mut(run_id) else {
+            return false;
+        };
+        observation.payload.take().is_some()
     }
 
     pub fn release(&self, run_id: &str) -> bool {

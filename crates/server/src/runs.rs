@@ -26,7 +26,9 @@ use uuid::Uuid;
 use crate::approvals;
 use crate::changes::{ChangeBus, ChangeKind};
 use crate::judge;
-use crate::observations::{ObservationAdmission, ObservationRegistry};
+use crate::observations::{
+    CounterClaim, ObservationAdmission, ObservationRegistry, claim_capture_attempt,
+};
 use crate::permissions::{self, Decision};
 use crate::rules;
 use crate::sandbox;
@@ -205,6 +207,7 @@ pub struct RunManager {
     catalog: Arc<dyn Catalog>,
     observation_admission: Arc<ObservationAdmission>,
     observations: Arc<ObservationRegistry>,
+    frame_capture: Arc<dyn vm::FrameCapture>,
     /// S6L-02: what `toolbox_for` hands `shell`/`sandbox_read` to actually run
     /// against. Resolved from `BULLPEN_SANDBOX` by the no-arg constructors
     /// (`new`, `with_backlog_ttl`); injected by `with_sandbox` for
@@ -361,6 +364,7 @@ impl RunManager {
             vm_enabled,
             backlog_ttl,
             empty_catalog(),
+            Arc::new(vm::RealFrameCapture),
         )
     }
 
@@ -391,6 +395,7 @@ impl RunManager {
             vm_enabled,
             BACKLOG_TTL,
             empty_catalog(),
+            Arc::new(vm::RealFrameCapture),
         )
     }
 
@@ -429,6 +434,29 @@ impl RunManager {
         vm_enabled: bool,
         catalog: Arc<dyn Catalog>,
     ) -> Self {
+        Self::with_screen_capture(
+            db,
+            port,
+            sandbox,
+            vm_docker,
+            vm_config,
+            vm_enabled,
+            catalog,
+            Arc::new(vm::RealFrameCapture),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_screen_capture(
+        db: Arc<Mutex<Db>>,
+        port: Arc<dyn ModelPort>,
+        sandbox: Arc<dyn sandbox::Sandbox>,
+        vm_docker: Arc<dyn vm::DockerRun>,
+        vm_config: Arc<store::vms::VmConfig>,
+        vm_enabled: bool,
+        catalog: Arc<dyn Catalog>,
+        frame_capture: Arc<dyn vm::FrameCapture>,
+    ) -> Self {
         Self::build(
             db,
             port,
@@ -438,6 +466,7 @@ impl RunManager {
             vm_enabled,
             BACKLOG_TTL,
             catalog,
+            frame_capture,
         )
     }
 
@@ -451,6 +480,7 @@ impl RunManager {
         vm_enabled: bool,
         backlog_ttl: Duration,
         catalog: Arc<dyn Catalog>,
+        frame_capture: Arc<dyn vm::FrameCapture>,
     ) -> Self {
         Self {
             db,
@@ -458,6 +488,7 @@ impl RunManager {
             catalog,
             observation_admission: Arc::new(ObservationAdmission::new()),
             observations: Arc::new(ObservationRegistry::new()),
+            frame_capture,
             sandbox,
             vm_docker,
             vm_config,
@@ -490,6 +521,192 @@ impl RunManager {
 
     pub fn observation_registry(&self) -> Arc<ObservationRegistry> {
         Arc::clone(&self.observations)
+    }
+
+    /// Internal capture seam for S8d. No tool spec or dispatch arm reaches
+    /// this until the observation-delivery bite is complete.
+    pub async fn capture_screen_internal(&self, toolbox: &ToolBox) -> tools::ToolOutcome {
+        let run_id = match toolbox.execution_context() {
+            tools::RunExecutionContext::ModelTurn { run_id } => run_id.as_str(),
+            tools::RunExecutionContext::Unbound => {
+                return tools::ToolOutcome::new(
+                    "Screen capture requires an active persisted run.",
+                    None,
+                );
+            }
+            tools::RunExecutionContext::DirectRoutine => {
+                return tools::ToolOutcome::new(
+                    "Screen capture is unavailable in a direct tool routine.",
+                    None,
+                );
+            }
+        };
+
+        let run: Option<(String, String, String)> = {
+            let db = self.db();
+            db.conn()
+                .query_row(
+                    "SELECT bot_id, model, status FROM runs WHERE id = ?1",
+                    [run_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()
+                .unwrap_or_else(|err| {
+                    tracing::error!("run {run_id}: failed to read capture ownership: {err}");
+                    None
+                })
+        };
+        let Some((run_bot_id, effective_model, status)) = run else {
+            return tools::ToolOutcome::new(
+                "Screen capture requires an active persisted run.",
+                None,
+            );
+        };
+        if run_bot_id != toolbox.bot_id() {
+            return tools::ToolOutcome::new(
+                "Screen capture cannot use another bot's run or machine.",
+                None,
+            );
+        }
+        if status != "running" {
+            return tools::ToolOutcome::new("Screen capture requires a running run.", None);
+        }
+
+        let claim = {
+            let db = self.db();
+            claim_capture_attempt(&db, run_id)
+        };
+        match claim {
+            Ok(CounterClaim::Claimed(_)) => {}
+            Ok(CounterClaim::Exhausted(_)) => {
+                return tools::ToolOutcome::new(
+                    "This run has reached its screen capture attempt limit.",
+                    None,
+                );
+            }
+            Ok(CounterClaim::MissingRun) => {
+                return tools::ToolOutcome::new(
+                    "Screen capture requires an active persisted run.",
+                    None,
+                );
+            }
+            Err(err) => {
+                tracing::error!("run {run_id}: failed to claim capture attempt: {err}");
+                return tools::ToolOutcome::new(
+                    "Screen capture could not reserve a persisted attempt.",
+                    None,
+                );
+            }
+        }
+
+        if self.stop_requested(run_id) {
+            return tools::ToolOutcome::new("Screen capture stopped.", None);
+        }
+
+        let stop = self.wait_for_stop(run_id);
+        tokio::pin!(stop);
+        let catalog_model = tokio::select! {
+            biased;
+            _ = &mut stop => return tools::ToolOutcome::new("Screen capture stopped.", None),
+            model = self.catalog.get(&effective_model) => model,
+        };
+        let eligible = match catalog_model {
+            Ok(Some(model)) => model.supports_images && model.supports_tools,
+            Ok(None) => false,
+            Err(err) => {
+                tracing::warn!(
+                    "run {run_id}: model catalog lookup failed for screen capture: {err}"
+                );
+                false
+            }
+        };
+        if !eligible {
+            return tools::ToolOutcome::new(
+                "The run's current model cannot inspect a screen.",
+                None,
+            );
+        }
+        if !self.vm_enabled {
+            return tools::ToolOutcome::new(
+                "Per-bot machines are off here, so there is no screen to capture.",
+                None,
+            );
+        }
+
+        let Some(reservation) = self.observation_admission.try_begin_capture() else {
+            return tools::ToolOutcome::new(
+                "Screen capture is busy at its bounded capacity. Try again later.",
+                None,
+            );
+        };
+        let worker_lease = reservation.into_worker();
+
+        let stop = self.wait_for_stop(run_id);
+        tokio::pin!(stop);
+        let desk = tokio::select! {
+            biased;
+            _ = &mut stop => return tools::ToolOutcome::new("Screen capture stopped.", None),
+            desk = crate::desk::desk_config_for_bot(
+                &self.db,
+                Arc::clone(&self.vm_docker),
+                &self.vm_config,
+                self.vm_enabled,
+                toolbox.bot_id(),
+            ) => desk,
+        };
+        let desk = match desk {
+            Ok(desk) => desk,
+            Err(reason) => {
+                return tools::ToolOutcome::new(
+                    format!("The bot's computer did not answer: {reason}"),
+                    None,
+                );
+            }
+        };
+        if self.stop_requested(run_id) {
+            return tools::ToolOutcome::new("Screen capture stopped.", None);
+        }
+
+        let stop = self.wait_for_stop(run_id);
+        tokio::pin!(stop);
+        let capture =
+            self.frame_capture
+                .capture_observation(&desk.container, &self.vm_config, worker_lease);
+        tokio::pin!(capture);
+        let captured = tokio::select! {
+            biased;
+            _ = &mut stop => return tools::ToolOutcome::new("Screen capture stopped.", None),
+            frame = &mut capture => frame,
+        };
+        let Some(captured) = captured else {
+            return tools::ToolOutcome::new("The screen capture failed.", None);
+        };
+        if self.stop_requested(run_id) {
+            captured.dispose();
+            return tools::ToolOutcome::new("Screen capture stopped.", None);
+        }
+        let (frame, retained) = captured.into_frame();
+
+        let observation_id = Uuid::new_v4().to_string();
+        let captured_at = chrono::Utc::now().to_rfc3339();
+        let observation = retained.retain(
+            frame,
+            run_id,
+            toolbox.bot_id(),
+            &observation_id,
+            &captured_at,
+            0,
+        );
+        self.observations.store(&observation);
+        let metadata = observation.metadata();
+        tools::ToolOutcome::with_observation(
+            format!(
+                "Captured observation {} at {} ({}x{} native pixels).",
+                metadata.observation_id, metadata.captured_at, metadata.width, metadata.height
+            ),
+            None,
+            observation,
+        )
     }
 
     /// S5b-04b: ADDS a listener rather than replacing whatever `on_run_done`
@@ -1776,6 +1993,37 @@ were doing unless he changed it."
                         if call.name == "escalate"
                             && let Some(step) = toolbox.take_escalated()
                         {
+                            let persisted = {
+                                let db = self.db();
+                                db.conn().execute(
+                                    "UPDATE runs SET model = ?1, updated_at = ?2 WHERE id = ?3",
+                                    rusqlite::params![&step.model, now_iso(), run_id],
+                                )
+                            };
+                            let persistence_failure = match persisted {
+                                Ok(1) => None,
+                                Ok(rows) => Some(format!("updated {rows} run rows")),
+                                Err(err) => Some(err.to_string()),
+                            };
+                            if let Some(reason) = persistence_failure {
+                                tracing::error!(
+                                    "run {run_id}: failed to persist escalated requested model: {reason}"
+                                );
+                                return Outcome::Failed {
+                                    state: RunState {
+                                        messages,
+                                        text,
+                                        effective_requested_model,
+                                        responding_model,
+                                        usage,
+                                        steps,
+                                    },
+                                    failure:
+                                        "Could not persist the selected model for the next step."
+                                            .to_string(),
+                                    status: None,
+                                };
+                            }
                             effective_requested_model = step.model.clone();
                             self.emit(
                                 run_id,
@@ -2663,6 +2911,22 @@ is looking at."
             .lock()
             .expect("stopping mutex poisoned")
             .remove(run_id)
+    }
+
+    fn stop_requested(&self, run_id: &str) -> bool {
+        self.stopping
+            .lock()
+            .expect("stopping mutex poisoned")
+            .contains(run_id)
+    }
+
+    async fn wait_for_stop(&self, run_id: &str) {
+        loop {
+            if self.stop_requested(run_id) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
     }
 
     /// Records what a run is doing, and tells the working-indicator's

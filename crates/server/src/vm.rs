@@ -1126,10 +1126,10 @@ async fn kill_and_reap(child: &mut tokio::process::Child) {
 }
 
 /// Worker ownership makes receiver closure an explicit cancellation signal.
-async fn collect_frame_from_child(
+async fn collect_frame_from_child<T>(
     mut child: tokio::process::Child,
     timeout: Duration,
-    cancelled: &mut tokio::sync::oneshot::Sender<Option<CapturedFrame>>,
+    cancelled: &mut tokio::sync::oneshot::Sender<T>,
 ) -> Option<CapturedFrame> {
     let mut stdout = child.stdout.take()?;
     let deadline = tokio::time::Instant::now() + timeout;
@@ -1174,6 +1174,14 @@ pub async fn capture_frame(
     cfg: &VmConfig,
     timeout_ms: u64,
 ) -> Option<CapturedFrame> {
+    let child = spawn_frame_child(container, cfg)?;
+    spawn_frame_collection(child, Duration::from_millis(timeout_ms))
+        .await
+        .ok()
+        .flatten()
+}
+
+fn spawn_frame_child(container: &str, cfg: &VmConfig) -> Option<tokio::process::Child> {
     let script = frame_capture_script();
     let mut command = tokio::process::Command::new("docker");
     command
@@ -1192,11 +1200,7 @@ pub async fn capture_frame(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
-    let child = command.spawn().ok()?;
-    spawn_frame_collection(child, Duration::from_millis(timeout_ms))
-        .await
-        .ok()
-        .flatten()
+    command.spawn().ok()
 }
 /// Starts the production owner task. Receiver closure is the cancellation
 /// signal; this task retains child ownership and always kills then reaps it.
@@ -1208,6 +1212,25 @@ fn spawn_frame_collection(
     tokio::spawn(async move {
         let result = collect_frame_from_child(child, timeout, &mut result_tx).await;
         let _ = result_tx.send(result);
+    });
+    result_rx
+}
+
+fn spawn_observation_frame_collection(
+    child: tokio::process::Child,
+    timeout: Duration,
+    worker_lease: crate::observations::CaptureWorkerLease,
+) -> tokio::sync::oneshot::Receiver<Option<crate::observations::CapturedObservationFrame>> {
+    let (mut result_tx, result_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let result = collect_frame_from_child(child, timeout, &mut result_tx)
+            .await
+            .map(|frame| worker_lease.finish(frame));
+        if let Err(unsent) = result_tx.send(result)
+            && let Some(unsent) = unsent
+        {
+            unsent.dispose();
+        }
     });
     result_rx
 }
@@ -1243,6 +1266,20 @@ fn thumbs() -> &'static Mutex<HashMap<String, CachedThumb>> {
 #[async_trait::async_trait]
 pub trait FrameCapture: Send + Sync {
     async fn capture(&self, container: &str, cfg: &VmConfig) -> Option<CapturedFrame>;
+
+    /// Uncached observation capture. Implementors that detach cleanup or
+    /// buffer ownership must move the lease into that owner, as the real
+    /// implementation does below, rather than relying on this default.
+    async fn capture_observation(
+        &self,
+        container: &str,
+        cfg: &VmConfig,
+        lease: crate::observations::CaptureWorkerLease,
+    ) -> Option<crate::observations::CapturedObservationFrame> {
+        self.capture(container, cfg)
+            .await
+            .map(|frame| lease.finish(frame))
+    }
 }
 
 /// `FrameCapture` wired to the real `capture_frame` (20s timeout, same as
@@ -1253,6 +1290,19 @@ pub struct RealFrameCapture;
 impl FrameCapture for RealFrameCapture {
     async fn capture(&self, container: &str, cfg: &VmConfig) -> Option<CapturedFrame> {
         capture_frame(container, cfg, 20_000).await
+    }
+
+    async fn capture_observation(
+        &self,
+        container: &str,
+        cfg: &VmConfig,
+        lease: crate::observations::CaptureWorkerLease,
+    ) -> Option<crate::observations::CapturedObservationFrame> {
+        let child = spawn_frame_child(container, cfg)?;
+        spawn_observation_frame_collection(child, Duration::from_millis(20_000), lease)
+            .await
+            .ok()
+            .flatten()
     }
 }
 
@@ -1390,7 +1440,7 @@ mod capture_process_tests {
     async fn capture_child_overflow_refuses_before_timeout_and_reaps_the_real_process() {
         let child = fixture("overflow").await;
         let pid = child.id().unwrap();
-        let (mut tx, _rx) = tokio::sync::oneshot::channel();
+        let (mut tx, _rx) = tokio::sync::oneshot::channel::<Option<CapturedFrame>>();
         let started = tokio::time::Instant::now();
         assert!(
             collect_frame_from_child(child, Duration::from_secs(2), &mut tx)
@@ -1408,7 +1458,7 @@ mod capture_process_tests {
     async fn capture_child_timeout_kills_and_reaps_the_real_process() {
         let child = fixture("sleep").await;
         let pid = child.id().unwrap();
-        let (mut tx, _rx) = tokio::sync::oneshot::channel();
+        let (mut tx, _rx) = tokio::sync::oneshot::channel::<Option<CapturedFrame>>();
         let started = std::time::Instant::now();
         assert!(
             collect_frame_from_child(child, Duration::from_millis(30), &mut tx)
@@ -1430,5 +1480,49 @@ mod capture_process_tests {
         tokio::time::sleep(Duration::from_millis(30)).await;
         drop(receiver);
         assert_reaped(pid).await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_real_child_owner_holds_both_capture_leases_until_reaped() {
+        let admission = Arc::new(crate::observations::ObservationAdmission::new());
+        let worker_lease = admission
+            .try_begin_capture()
+            .expect("capture admission")
+            .into_worker();
+        let child = fixture("sleep").await;
+        let pid = child.id().unwrap();
+        let receiver =
+            spawn_observation_frame_collection(child, Duration::from_secs(2), worker_lease);
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(
+            pid_is_alive(pid).await,
+            "owner child exited before cancellation"
+        );
+        assert_eq!(admission.snapshot().capture_decode_in_use, 1);
+        assert_eq!(admission.snapshot().retained_in_use, 1);
+        drop(receiver);
+        while pid_is_alive(pid).await {
+            assert_eq!(
+                admission.snapshot().capture_decode_in_use,
+                1,
+                "decode lease released while the child was still alive"
+            );
+            assert_eq!(
+                admission.snapshot().retained_in_use,
+                1,
+                "retained-frame lease released while the child was still alive"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_reaped(pid).await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while admission.snapshot().capture_decode_in_use != 0
+                || admission.snapshot().retained_in_use != 0
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("owner task released decode lease after reap");
     }
 }
