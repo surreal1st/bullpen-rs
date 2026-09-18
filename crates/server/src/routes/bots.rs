@@ -51,6 +51,20 @@
 //! else applied) rather than moving on to pin/hide with the bot left in its
 //! old section - a partial write here (wrong section, but now also pinned)
 //! would be worse than a flat refusal. `avatar`/`shape` remain out of scope.
+//!
+//! RAIL-03 adds `avatar`/`shape`, checked and applied LAST - after
+//! `sectionId`/`pinned`/`hidden`, matching the TS route's own order
+//! (`app.ts:2340-2362`). Neither is refused: `"avatar" in body`/
+//! `"shape" in body` mean "the key is present at all", and everything
+//! present under either key that is not a non-empty string (`null`, `""`,
+//! a number, an object) collapses to `None`, clearing the column - the
+//! same `typeof chosen === "string" && chosen !== "" ? chosen : null` shape
+//! `sectionId` above already takes, not the boolean-guard shape `pinned`/
+//! `hidden` use. Truncation to two code points (`avatar`) and the
+//! `shared::faces::SHAPES` membership check (`shape`) both live in
+//! `store::set_avatar`/`store::set_shape`, not here - this handler only
+//! decides "did the client send a string to set, or anything else to
+//! clear."
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -288,9 +302,9 @@ async fn list_archived_bots(State(state): State<AppState>) -> Result<Response, c
     Ok(Json(json!({ "bots": bots })).into_response())
 }
 
-/// RAIL-01/RAIL-02: `PATCH /api/bots/:id/rail` - port of `app.ts:2340-2362`'s
-/// route, narrowed to `pinned`/`hidden`/`sectionId` (see this file's top doc
-/// comment on the `avatar`/`shape` room left for later).
+/// RAIL-01/RAIL-02/RAIL-03: `PATCH /api/bots/:id/rail` - port of
+/// `app.ts:2340-2362`'s route, now carrying all four fields the TS route
+/// does: `sectionId`/`pinned`/`hidden`/`avatar`/`shape`.
 ///
 /// The 404 check runs FIRST, before the body is even read - matching the
 /// TS's own `const bot = getBot(...); if (!bot) return ...404` ahead of its
@@ -344,6 +358,26 @@ async fn patch_rail(
     }
     if let Some(serde_json::Value::Bool(hidden)) = obj.get("hidden") {
         store::set_hidden(&db, &id, *hidden)?;
+    }
+
+    // RAIL-03: `store::set_avatar`/`store::set_shape` return `false` only
+    // for an unknown bot id, which this handler already ruled out above -
+    // the existence check ran before the body was even read - so the
+    // return value has nothing left to report here, same as `set_pinned`/
+    // `set_hidden`'s `Option<Bot>` above being ignored for the same reason.
+    if let Some(raw) = obj.get("avatar") {
+        let chosen: Option<&str> = match raw {
+            serde_json::Value::String(s) if !s.is_empty() => Some(s.as_str()),
+            _ => None,
+        };
+        store::set_avatar(&db, &id, chosen)?;
+    }
+    if let Some(raw) = obj.get("shape") {
+        let chosen: Option<&str> = match raw {
+            serde_json::Value::String(s) if !s.is_empty() => Some(s.as_str()),
+            _ => None,
+        };
+        store::set_shape(&db, &id, chosen)?;
     }
 
     // RAIL-01: one call refreshes the rail - same contract the TS route's

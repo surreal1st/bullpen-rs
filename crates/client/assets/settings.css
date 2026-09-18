@@ -65,6 +65,17 @@
   color: var(--ink);
 }
 
+/* RAIL-03: the avatar field reuses `.pane-perms-btn`'s border/radius/font
+   (same "one look for every pane-head control" the "Move to section"
+   `<select>` above already established), narrowed to a couple of
+   characters wide rather than the button/select default - an avatar is
+   at most one emoji, never a label. */
+.pane-avatar-input {
+  width: 3rem;
+  text-align: center;
+  cursor: text;
+}
+
 /* The default `.modal` (420px, `rail.css`) is too narrow for a `perm-row`'s
    label + three-way choice group to sit on one line. */
 .perms-modal {

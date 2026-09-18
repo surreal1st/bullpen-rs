@@ -1125,6 +1125,27 @@ pub async fn set_bot_section(bot_id: &str, target: Option<&str>) -> Result<(), S
     patch_rail(bot_id, serde_json::json!({ "sectionId": target })).await
 }
 
+/* --------------------------------------------------------------- RAIL-03 */
+
+/// Sets or clears a bot's avatar override - `thread.rs`'s header field.
+/// Same explicit-single-key posture `set_bot_section` above already takes:
+/// `None` (or an empty/whitespace field) clears it, anything else sets it,
+/// and truncation to two code points happens server-side
+/// (`store::set_avatar`'s own doc), not here.
+pub async fn set_bot_avatar(bot_id: &str, avatar: Option<&str>) -> Result<(), String> {
+    patch_rail(bot_id, serde_json::json!({ "avatar": avatar })).await
+}
+
+/// Sets or clears which silhouette a bot's generated face wears -
+/// `thread.rs`'s header picker. Same posture as `set_bot_avatar` above; an
+/// unrecognised shape name is never sent by this client (the picker's own
+/// options come from `shared::faces::SHAPES`), but the server-side
+/// membership check (`store::set_shape`'s own doc) is what actually
+/// enforces it either way.
+pub async fn set_bot_shape(bot_id: &str, shape: Option<&str>) -> Result<(), String> {
+    patch_rail(bot_id, serde_json::json!({ "shape": shape })).await
+}
+
 /* --------------------------------------------------------------- S3-05: memory */
 
 /// `GET /api/bots/:id/memory[?q=...]` - core, its token budget, and the log,

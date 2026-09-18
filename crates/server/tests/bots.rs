@@ -1102,3 +1102,267 @@ async fn rail_unknown_section_id_is_400_and_nothing_in_the_request_applies() {
         "pinned must not apply when sectionId in the same request is refused: {bot:?}"
     );
 }
+
+/* --------------------------------------------------------------- RAIL-03 */
+//
+// `avatar`/`shape` on the same `PATCH /api/bots/:id/rail` route the RAIL-01/
+// RAIL-02 tests above already exercise. Kept in this file for the same
+// reason the RAIL-02 block above is: same route, same handler, same local
+// helpers (`seed_bot`, `patch_route`, `get_route`).
+
+/// Bite: setting an avatar shows up on the bot in the roster, and clearing
+/// it works both ways the TS route allows - an explicit `""` and an
+/// explicit `null` both return it to NULL. Checked against a fresh
+/// `/api/roster` fetch too, not just the PATCH's own echo, same "not just
+/// the echo" posture every other rail test above takes.
+#[tokio::test]
+async fn avatar_sets_and_both_empty_string_and_null_clear_it() {
+    let db = open_db();
+    seed_bot(&db, "test-bot", "Test Bot");
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let (status, response) = patch_route(
+        &app,
+        "/api/bots/test-bot/rail",
+        &session,
+        json!({ "avatar": "🎉" }),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let bots = response["bots"].as_array().unwrap();
+    let bot = bots.iter().find(|b| b["id"] == "test-bot").unwrap();
+    assert_eq!(bot["avatar"], "🎉");
+
+    let (_status, roster) = get_route(&app, "/api/roster", &session).await;
+    let bots = roster["bots"].as_array().unwrap();
+    let bot = bots.iter().find(|b| b["id"] == "test-bot").unwrap();
+    assert_eq!(
+        bot["avatar"], "🎉",
+        "the avatar must hold on a fresh fetch too, not just the PATCH's own echo"
+    );
+
+    for clear in [json!(""), json!(null)] {
+        let (status, response) = patch_route(
+            &app,
+            "/api/bots/test-bot/rail",
+            &session,
+            json!({ "avatar": clear }),
+        )
+        .await;
+        assert_eq!(status, 200, "avatar={clear:?}");
+        let bots = response["bots"].as_array().unwrap();
+        let bot = bots.iter().find(|b| b["id"] == "test-bot").unwrap();
+        assert!(
+            bot["avatar"].is_null(),
+            "avatar={clear:?} must clear it: {bot:?}"
+        );
+    }
+}
+
+/// Bite: a WHITESPACE-ONLY avatar clears to NULL rather than storing an
+/// empty string.
+///
+/// This test exists because a mutation survived without it. Removing
+/// `set_avatar`'s `.filter(|s| !s.is_empty())` stayed green against the
+/// suite above, because the ROUTE already maps a literal `""` to `None`
+/// before the store is reached - so the store's own guard looked equivalent.
+/// It is not: `"   "` is a non-empty string to the route, reaches the store,
+/// trims to nothing, and without the filter is written as `''` instead of
+/// NULL. An empty-string avatar is not the same as no avatar - the client
+/// renders a set avatar INSTEAD of the generated face
+/// (`crates/client/src/avatar.rs:91`), so a bot would show a blank badge
+/// where its face should be.
+///
+/// The lesson, not just the case: a surviving mutant is a defective test
+/// until the two worlds are named and no observable differs. Here one did.
+#[tokio::test]
+async fn a_whitespace_only_avatar_clears_to_null_not_an_empty_string() {
+    let db = open_db();
+    seed_bot(&db, "test-bot", "Test Bot");
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let (status, _response) = patch_route(
+        &app,
+        "/api/bots/test-bot/rail",
+        &session,
+        json!({ "avatar": "🎉" }),
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    for blank in ["   ", "\t", " \n "] {
+        let (status, response) = patch_route(
+            &app,
+            "/api/bots/test-bot/rail",
+            &session,
+            json!({ "avatar": blank }),
+        )
+        .await;
+        assert_eq!(status, 200, "avatar={blank:?}");
+        let bots = response["bots"].as_array().unwrap();
+        let bot = bots.iter().find(|b| b["id"] == "test-bot").unwrap();
+        assert!(
+            bot["avatar"].is_null(),
+            "a whitespace-only avatar must be NULL, never an empty string: {bot:?}"
+        );
+
+        // Re-set it, so each blank in the loop starts from a set avatar
+        // rather than passing because the previous iteration already cleared.
+        patch_route(
+            &app,
+            "/api/bots/test-bot/rail",
+            &session,
+            json!({ "avatar": "🎉" }),
+        )
+        .await;
+    }
+}
+
+/// Bite: a long avatar is cut to two CODE POINTS, checked with
+/// `.chars().count()` rather than `.len()` (a byte count would pass even if
+/// the route cut by bytes) - and a multi-byte emoji does not panic the
+/// server, proving the cut is `chars().take(2)`, never a byte slice.
+#[tokio::test]
+async fn avatar_is_cut_to_two_code_points_and_multibyte_does_not_panic() {
+    let db = open_db();
+    seed_bot(&db, "ascii-bot", "Ascii Bot");
+    seed_bot(&db, "emoji-bot", "Emoji Bot");
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let (status, response) = patch_route(
+        &app,
+        "/api/bots/ascii-bot/rail",
+        &session,
+        json!({ "avatar": "robot" }),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let bots = response["bots"].as_array().unwrap();
+    let bot = bots.iter().find(|b| b["id"] == "ascii-bot").unwrap();
+    let stored = bot["avatar"].as_str().unwrap();
+    assert_eq!(
+        stored.chars().count(),
+        2,
+        "a long avatar must be cut to two CODE POINTS: {stored:?}"
+    );
+    assert_eq!(stored, "ro");
+
+    // Three multi-byte emoji (each > 1 byte in UTF-8) - a byte slice at
+    // index 2 would panic mid-character; `chars().take(2)` must not.
+    let (status, response) = patch_route(
+        &app,
+        "/api/bots/emoji-bot/rail",
+        &session,
+        json!({ "avatar": "🔥🔥🔥" }),
+    )
+    .await;
+    assert_eq!(status, 200, "a multi-byte avatar must not panic the server");
+    let bots = response["bots"].as_array().unwrap();
+    let bot = bots.iter().find(|b| b["id"] == "emoji-bot").unwrap();
+    let stored = bot["avatar"].as_str().unwrap();
+    assert_eq!(
+        stored.chars().count(),
+        2,
+        "a multi-byte avatar must also be cut to two CODE POINTS, not two bytes: {stored:?}"
+    );
+    assert_eq!(stored, "🔥🔥");
+}
+
+/// Bite: a known shape is stored as-is; an unknown one stores NULL and does
+/// NOT 400, matching the TS `Object.hasOwn` guard exactly - "shape" is
+/// present-but-invalid input, not a malformed request.
+#[tokio::test]
+async fn shape_known_value_stored_unknown_value_stores_null_not_400() {
+    let db = open_db();
+    seed_bot(&db, "test-bot", "Test Bot");
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let known = shared::faces::SHAPES[0].0;
+    let (status, response) = patch_route(
+        &app,
+        "/api/bots/test-bot/rail",
+        &session,
+        json!({ "shape": known }),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let bots = response["bots"].as_array().unwrap();
+    let bot = bots.iter().find(|b| b["id"] == "test-bot").unwrap();
+    assert_eq!(bot["shape"], known);
+
+    let (status, response) = patch_route(
+        &app,
+        "/api/bots/test-bot/rail",
+        &session,
+        json!({ "shape": "not-a-real-shape" }),
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "an unknown shape must not be refused with a 400"
+    );
+    let bots = response["bots"].as_array().unwrap();
+    let bot = bots.iter().find(|b| b["id"] == "test-bot").unwrap();
+    assert!(
+        bot["shape"].is_null(),
+        "an unknown shape must store NULL: {bot:?}"
+    );
+}
+
+/// Bite: an unknown bot id is 404 for both `avatar` and `shape`, same as
+/// every other field this route carries - checked BEFORE the body is even
+/// read, so a bogus id never gets far enough to look at either key.
+#[tokio::test]
+async fn rail_unknown_id_is_404_for_avatar_and_shape() {
+    let db = open_db();
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let (status, response) = patch_route(
+        &app,
+        "/api/bots/does-not-exist/rail",
+        &session,
+        json!({ "avatar": "🎉", "shape": "circle" }),
+    )
+    .await;
+    assert_eq!(status, 404);
+    assert_eq!(response["error"], "no such bot");
+}
+
+/// Bite: `avatar` and `shape` apply together with `pinned` in the SAME
+/// request - the whole reason this is one route rather than three: a
+/// context menu that sets several things at once should be one call, not
+/// three round trips that could each partially fail.
+#[tokio::test]
+async fn avatar_and_shape_apply_together_with_pinned_in_one_request() {
+    let db = open_db();
+    seed_bot(&db, "test-bot", "Test Bot");
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let known = shared::faces::SHAPES[1].0;
+    let (status, response) = patch_route(
+        &app,
+        "/api/bots/test-bot/rail",
+        &session,
+        json!({ "avatar": "🚀", "shape": known, "pinned": true }),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let bots = response["bots"].as_array().unwrap();
+    let bot = bots.iter().find(|b| b["id"] == "test-bot").unwrap();
+    assert_eq!(bot["avatar"], "🚀");
+    assert_eq!(bot["shape"], known);
+    assert_eq!(bot["pinned"], true);
+
+    let (_status, roster) = get_route(&app, "/api/roster", &session).await;
+    let bots = roster["bots"].as_array().unwrap();
+    let bot = bots.iter().find(|b| b["id"] == "test-bot").unwrap();
+    assert_eq!(bot["avatar"], "🚀");
+    assert_eq!(bot["shape"], known);
+    assert_eq!(bot["pinned"], true);
+}

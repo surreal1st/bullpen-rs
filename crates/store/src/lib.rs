@@ -22,8 +22,8 @@ pub use auth::{
 };
 pub use bots::{
     BotDraft, create_bot, create_section, delete_section, get_bot, get_bot_egress, list_bots,
-    list_hidden, list_sections, move_bot, rename_section, set_archived, set_bot_egress, set_hidden,
-    set_pinned,
+    list_hidden, list_sections, move_bot, rename_section, set_archived, set_avatar, set_bot_egress,
+    set_hidden, set_pinned, set_shape,
 };
 pub use conversations::{
     archive_thread, create_thread, get_conversation, get_or_create_conversation, list_threads,

@@ -22,6 +22,7 @@ use crate::types::{Bot, Message, Role, Section};
 use crate::vm_card::VmCard;
 use crate::working_bar::WorkingBar;
 use dioxus::prelude::*;
+use shared::faces::SHAPES;
 use std::rc::Rc;
 
 /// Owns one bot's (or room's) conversation: fetches it, renders it, and
@@ -252,6 +253,11 @@ pub fn ChatPane(
     // (`rail_error` above is shared by all three, only one of them is ever
     // busy at a time).
     let mut move_busy = use_signal(|| false);
+    // RAIL-03: the avatar field and shape picker - same direct-action, no
+    // confirm posture as the three above (`rail_error` is shared by all
+    // five now, still only one busy at a time).
+    let mut avatar_busy = use_signal(|| false);
+    let mut shape_busy = use_signal(|| false);
 
     rsx! {
         div { class: "pane",
@@ -357,6 +363,82 @@ pub fn ChatPane(
                     };
                     let current_section = current.section_id.clone().unwrap_or_default();
 
+                    // RAIL-03: sets or clears the avatar override - the
+                    // same "seed a local copy, patch it on success" posture
+                    // as `toggle_pinned`/`on_move_section` above. An empty
+                    // (or whitespace-only) field clears it; the two-code-
+                    // point cap is enforced server-side
+                    // (`store::set_avatar`'s own doc), not duplicated here.
+                    let avatar_current = current.clone();
+                    let avatar_bot_id = bot_id.clone();
+                    let on_avatar_change = move |evt: FormEvent| {
+                        if *avatar_busy.read() {
+                            return;
+                        }
+                        let value = evt.value();
+                        let target = if value.trim().is_empty() {
+                            None
+                        } else {
+                            Some(value)
+                        };
+                        avatar_busy.set(true);
+                        rail_error.set(None);
+                        let bot_id = avatar_bot_id.clone();
+                        let mut updated = avatar_current.clone();
+                        spawn(async move {
+                            match api::set_bot_avatar(&bot_id, target.as_deref()).await {
+                                Ok(()) => {
+                                    avatar_busy.set(false);
+                                    updated.avatar = target;
+                                    local_bot.set(Some(updated));
+                                    on_rail_changed.call(());
+                                }
+                                Err(err) => {
+                                    avatar_busy.set(false);
+                                    rail_error.set(Some(err));
+                                }
+                            }
+                        });
+                    };
+                    let current_avatar = current.avatar.clone().unwrap_or_default();
+
+                    // RAIL-03: the shape picker - options come from
+                    // `shared::faces::SHAPES`, the same table the client's
+                    // own `avatar.rs` renders the generated face from, so
+                    // this picker can never offer a name the server would
+                    // refuse (it never refuses one anyway - see
+                    // `store::set_shape`'s own doc). The first option
+                    // ("Auto") clears the override back to the hashed
+                    // default, same as an empty `sectionId` unassigning.
+                    let shape_current = current.clone();
+                    let shape_bot_id = bot_id.clone();
+                    let on_shape_change = move |evt: FormEvent| {
+                        if *shape_busy.read() {
+                            return;
+                        }
+                        let value = evt.value();
+                        let target = if value.is_empty() { None } else { Some(value) };
+                        shape_busy.set(true);
+                        rail_error.set(None);
+                        let bot_id = shape_bot_id.clone();
+                        let mut updated = shape_current.clone();
+                        spawn(async move {
+                            match api::set_bot_shape(&bot_id, target.as_deref()).await {
+                                Ok(()) => {
+                                    shape_busy.set(false);
+                                    updated.shape = target;
+                                    local_bot.set(Some(updated));
+                                    on_rail_changed.call(());
+                                }
+                                Err(err) => {
+                                    shape_busy.set(false);
+                                    rail_error.set(Some(err));
+                                }
+                            }
+                        });
+                    };
+                    let current_shape = current.shape.clone().unwrap_or_default();
+
                     rsx! {
                         div { class: "pane-head",
                             div { class: "pane-head-who",
@@ -405,6 +487,28 @@ pub fn ChatPane(
                                     disabled: *hide_busy.read(),
                                     onclick: toggle_hidden,
                                     if current.hidden { "Unhide" } else { "Hide" }
+                                }
+                                input {
+                                    class: "pane-perms-btn pane-avatar-input",
+                                    "aria-label": "Avatar",
+                                    title: "Avatar",
+                                    r#type: "text",
+                                    maxlength: "8",
+                                    placeholder: "🙂",
+                                    disabled: *avatar_busy.read(),
+                                    value: "{current_avatar}",
+                                    onchange: on_avatar_change,
+                                }
+                                select {
+                                    class: "pane-perms-btn",
+                                    "aria-label": "Shape",
+                                    disabled: *shape_busy.read(),
+                                    value: "{current_shape}",
+                                    onchange: on_shape_change,
+                                    option { value: "", "Auto shape" }
+                                    for (key , shape) in SHAPES.iter() {
+                                        option { key: "{key}", value: "{key}", "{shape.label}" }
+                                    }
                                 }
                                 button {
                                     class: "pane-perms-btn",

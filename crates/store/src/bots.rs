@@ -486,6 +486,55 @@ pub fn list_hidden(db: &Db) -> rusqlite::Result<Vec<Bot>> {
     Ok(bots.into_iter().map(row_to_bot).collect())
 }
 
+/// RAIL-03: sets or clears a bot's avatar override - port of
+/// `roster.ts:98-104`'s `setAvatar`. `false` for an unknown bot; nothing is
+/// written in that case, same posture as `move_bot` above. `None`, or a
+/// trimmed value that collapses to nothing (all whitespace), stores NULL.
+///
+/// **Kept to the first two CODE POINTS, never two bytes**: two is enough
+/// for one emoji plus a variation selector or a skin-tone modifier -
+/// anything longer is a label, not an avatar - and `chars().take(2)` is the
+/// only way to take that cap that does not panic. A byte slice (`&clean[..2]`)
+/// would cut a multi-byte emoji in half the moment its boundary lands
+/// mid-character; `crates/server/tests/bots.rs` has a multi-byte case for
+/// exactly this.
+pub fn set_avatar(db: &Db, id: &str, avatar: Option<&str>) -> rusqlite::Result<bool> {
+    if get_bot(db, id)?.is_none() {
+        return Ok(false);
+    }
+    let clean: Option<String> = avatar
+        .map(|a| a.trim().chars().take(2).collect::<String>())
+        .filter(|s| !s.is_empty());
+    db.conn().execute(
+        "UPDATE bots SET avatar = ?1 WHERE id = ?2",
+        params![clean, id],
+    )?;
+    Ok(true)
+}
+
+/// RAIL-03: sets or clears which silhouette a bot's generated face wears -
+/// port of `roster.ts:112-123`'s `setShape`. `false` for an unknown bot.
+///
+/// A shape that is not a key in `shared::faces::SHAPES` stores NULL rather
+/// than being refused, matching the TS `Object.hasOwn(SHAPES, shape)`
+/// check exactly - an unrecognised shape is silently treated as "no
+/// preference" (`shared::faces::normalize_shape` then hashes a default from
+/// the name), not a 400. The membership check reads `SHAPES` itself - the
+/// same table `crates/client/src/avatar.rs` already renders the picker and
+/// the face from - rather than a second hardcoded list of names, which
+/// would drift the moment a shape is added to one and not the other.
+pub fn set_shape(db: &Db, id: &str, shape: Option<&str>) -> rusqlite::Result<bool> {
+    if get_bot(db, id)?.is_none() {
+        return Ok(false);
+    }
+    let clean = shape.filter(|s| shared::faces::SHAPES.iter().any(|(k, _)| k == s));
+    db.conn().execute(
+        "UPDATE bots SET shape = ?1 WHERE id = ?2",
+        params![clean, id],
+    )?;
+    Ok(true)
+}
+
 /// F7b-01: adds a bot to the roster - port of `store.ts:411-426`'s
 /// `createBot`. Only `id, name, purpose, instructions, model, created_at`
 /// are written; every other column keeps its schema default (`crate::
