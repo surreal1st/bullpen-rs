@@ -34,6 +34,7 @@ mod markdown;
 mod memory_editor;
 mod message_time;
 mod model_chip;
+mod new_bot;
 mod permissions_editor;
 mod questions;
 mod rail;

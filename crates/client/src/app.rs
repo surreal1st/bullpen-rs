@@ -22,12 +22,13 @@
 
 use crate::api;
 use crate::events::{ChangeKind, subscribe_events};
+use crate::new_bot::NewBotModal;
 use crate::rail::Rail;
 use crate::room_picker::{PickerMode, RoomPicker};
 use crate::settings::SettingsModal;
 use crate::thread::ChatPane;
 use crate::transport::Request;
-use crate::types::{RoomSummary, Roster};
+use crate::types::{Bot, RoomSummary, Roster};
 use dioxus::prelude::*;
 
 async fn fetch_roster() -> Result<Roster, String> {
@@ -176,6 +177,9 @@ fn AppShell() -> Element {
     let mut rooms = use_signal(Vec::<RoomSummary>::new);
     let mut selected = use_signal::<Option<Selection>>(|| None);
     let mut picker = use_signal::<Option<PickerMode>>(|| None);
+    // F7b-01: whether the "New bot" modal is open - same one-signal-per-
+    // modal posture as `picker`/`settings_open` below.
+    let mut new_bot_open = use_signal(|| false);
     // S2-09b opened this from a floating `position: fixed` button, which sat
     // directly over the composer's Send button (S2-F-08, D2). The trigger
     // now lives in `rail.rs`'s `.rail-group-head` (`on_settings` below);
@@ -273,6 +277,7 @@ fn AppShell() -> Element {
                         on_select: move |id| selected.set(Some(Selection::Bot(id))),
                         on_select_room: move |room: RoomSummary| selected.set(Some(Selection::Room(room))),
                         on_new_room: move |_| picker.set(Some(PickerMode::Create)),
+                        on_new_bot: move |_| new_bot_open.set(true),
                         on_edit_room: move |room: RoomSummary| picker.set(Some(PickerMode::Edit(room))),
                         on_settings: move |_| settings_open.set(true),
                     }
@@ -336,6 +341,27 @@ fn AppShell() -> Element {
                             }
                             drop(list);
                             selected.set(Some(Selection::Room(room)));
+                        },
+                    }
+                }
+                if *new_bot_open.read() {
+                    NewBotModal {
+                        on_close: move |_| new_bot_open.set(false),
+                        on_created: move |bot: Bot| {
+                            new_bot_open.set(false);
+                            // Optimistic, same posture as `RoomPicker`'s
+                            // `on_saved` above: land it in `roster` right
+                            // away rather than waiting on a refetch, so the
+                            // next thing Josh sees is its empty thread.
+                            let mut current = roster.write();
+                            if let Some(Ok(data)) = current.as_mut() {
+                                match data.bots.iter_mut().find(|b| b.id == bot.id) {
+                                    Some(existing) => *existing = bot.clone(),
+                                    None => data.bots.push(bot.clone()),
+                                }
+                            }
+                            drop(current);
+                            selected.set(Some(Selection::Bot(bot.id.clone())));
                         },
                     }
                 }

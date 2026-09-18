@@ -19,6 +19,10 @@ pub fn Rail(
     on_select: EventHandler<String>,
     on_select_room: EventHandler<RoomSummary>,
     on_new_room: EventHandler<()>,
+    // F7b-01: the "New bot" affordance beside "New group chat" - see
+    // `new_bot.rs`'s own doc for why it opens a modal rather than growing a
+    // third shape here.
+    on_new_bot: EventHandler<()>,
     on_edit_room: EventHandler<RoomSummary>,
     // S2-F-08 (D2): `app.rs`'s settings gear used to float as a
     // `position: fixed` button over the composer's Send button (`shots/
@@ -93,6 +97,13 @@ pub fn Rail(
                 div { class: "rail-group-head",
                     span { class: "rail-group-title", "Group chats" }
                     div { class: "rail-group-acts",
+                        button {
+                            class: "rail-new-room",
+                            title: "New bot",
+                            "aria-label": "New bot",
+                            onclick: move |_| on_new_bot.call(()),
+                            "+"
+                        }
                         button {
                             class: "rail-new-room",
                             title: "New group chat",

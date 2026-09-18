@@ -89,6 +89,22 @@ async fn patch_route(app: &Router, path: &str, session: &str, body: Value) -> (u
     (status, value)
 }
 
+async fn post_route(app: &Router, path: &str, session: &str, body: Value) -> (u16, Value) {
+    let request = Request::post(path)
+        .header("cookie", session)
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+
+    let response = app.clone().oneshot(request).await.unwrap();
+    let status = response.status().as_u16();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+    (status, value)
+}
+
 async fn get_route(app: &Router, path: &str, session: &str) -> (u16, Value) {
     let request = Request::get(path)
         .header("cookie", session)
@@ -267,4 +283,168 @@ async fn patch_no_such_bot_is_404() {
     )
     .await;
     assert_eq!(status, 404);
+}
+
+/* --------------------------------------------------------- F7b-01: create */
+
+/// Bite: creating a bot returns 201 with the bot in the body, and a
+/// subsequent roster fetch carries it too - not just the POST's own echo.
+#[tokio::test]
+async fn create_bot_returns_201_and_appears_in_roster() {
+    let db = open_db();
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let (status, response) = post_route(
+        &app,
+        "/api/bots",
+        &session,
+        json!({ "name": "Trinity", "purpose": "Watches the error log" }),
+    )
+    .await;
+    assert_eq!(status, 201);
+    assert_eq!(response["bot"]["name"], "Trinity");
+    assert_eq!(response["bot"]["id"], "trinity");
+    assert_eq!(response["bot"]["purpose"], "Watches the error log");
+    assert!(response["bot"]["model"].is_null());
+
+    let (status, roster) = get_route(&app, "/api/roster", &session).await;
+    assert_eq!(status, 200);
+    let bots = roster["bots"].as_array().unwrap();
+    assert!(
+        bots.iter()
+            .any(|b| b["id"] == "trinity" && b["name"] == "Trinity"),
+        "roster must carry the new bot: {bots:?}"
+    );
+}
+
+/// Bite: the name-required check. A blank name and a whitespace-only name
+/// are both refused, and neither leaves a row behind.
+#[tokio::test]
+async fn create_bot_blank_or_whitespace_name_is_400_and_roster_unchanged() {
+    let db = open_db();
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    for name in ["", "   "] {
+        let (status, response) =
+            post_route(&app, "/api/bots", &session, json!({ "name": name })).await;
+        assert_eq!(status, 400, "name {name:?}");
+        assert_eq!(response["error"], "name is required");
+    }
+
+    let (_status, roster) = get_route(&app, "/api/roster", &session).await;
+    assert!(
+        roster["bots"].as_array().unwrap().is_empty(),
+        "a rejected name must not create a row"
+    );
+}
+
+/// Bite: slug uniqueness. Two bots named "Trinity" get `trinity` and
+/// `trinity-2` - without the uniqueness check the second either collides
+/// with the first (an insert error, no 201) or overwrites it (the roster
+/// would carry one bot, not two).
+#[tokio::test]
+async fn create_bot_duplicate_name_gets_numbered_slug() {
+    let db = open_db();
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let (status1, first) =
+        post_route(&app, "/api/bots", &session, json!({ "name": "Trinity" })).await;
+    assert_eq!(status1, 201);
+    assert_eq!(first["bot"]["id"], "trinity");
+
+    let (status2, second) =
+        post_route(&app, "/api/bots", &session, json!({ "name": "Trinity" })).await;
+    assert_eq!(status2, 201);
+    assert_eq!(second["bot"]["id"], "trinity-2");
+
+    let (status3, third) =
+        post_route(&app, "/api/bots", &session, json!({ "name": "Trinity" })).await;
+    assert_eq!(status3, 201);
+    assert_eq!(third["bot"]["id"], "trinity-3");
+
+    let (_status, roster) = get_route(&app, "/api/roster", &session).await;
+    let bots = roster["bots"].as_array().unwrap();
+    assert_eq!(bots.len(), 3, "all three must have landed as distinct rows");
+}
+
+/// Bite: the empty-slug fallback. A name that slugs to nothing (only
+/// punctuation) becomes the id `"bot"` rather than an empty string.
+#[tokio::test]
+async fn create_bot_name_with_no_alnum_becomes_bot() {
+    let db = open_db();
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let (status, response) =
+        post_route(&app, "/api/bots", &session, json!({ "name": "!!!" })).await;
+    assert_eq!(status, 201);
+    assert_eq!(response["bot"]["id"], "bot");
+}
+
+/// Bite: the 40-character truncation. A name that slugs to more than 40
+/// characters is cut to exactly 40 - without the truncation, the id would
+/// be the full 45-character slug instead.
+#[tokio::test]
+async fn create_bot_slug_truncates_to_40_chars() {
+    let db = open_db();
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let long_name = "a".repeat(45);
+    let (status, response) =
+        post_route(&app, "/api/bots", &session, json!({ "name": long_name })).await;
+    assert_eq!(status, 201);
+    let id = response["bot"]["id"].as_str().unwrap();
+    assert_eq!(id.len(), 40);
+    assert_eq!(id, "a".repeat(40));
+}
+
+/// Bite: `judge_pin` runs BEFORE the insert. A model the fixture catalog
+/// refuses is a 400 with the refusal text, and the roster stays completely
+/// empty afterward - not just the status code, the row itself must never
+/// have landed (if `judge_pin` ran after the insert instead, this would
+/// still be 400 but the roster would carry one bot).
+#[tokio::test]
+async fn create_bot_refused_model_is_400_and_nothing_inserted() {
+    let db = open_db();
+    let session = seed_session(&db);
+    let app = app_with_catalog(db, fixture_catalog());
+
+    let (status, response) = post_route(
+        &app,
+        "/api/bots",
+        &session,
+        json!({ "name": "Trinity", "model": "unknown/does-not-exist" }),
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert!(
+        response["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("does not list this model")
+    );
+
+    let (_status, roster) = get_route(&app, "/api/roster", &session).await;
+    assert!(
+        roster["bots"].as_array().unwrap().is_empty(),
+        "a refused pin must not create the row at all"
+    );
+}
+
+/// A body with no `model` key at all creates a bot with a null pin - the
+/// platform default, same as the TS route's own `model ?? null`.
+#[tokio::test]
+async fn create_bot_without_model_key_has_null_pin() {
+    let db = open_db();
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let (status, response) =
+        post_route(&app, "/api/bots", &session, json!({ "name": "Trinity" })).await;
+    assert_eq!(status, 201);
+    assert!(response["bot"]["model"].is_null());
 }

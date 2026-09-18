@@ -20,7 +20,9 @@ pub use auth::{
     PasswordRecord, create_session, destroy_session, is_configured, password_record, session_valid,
     set_password, verify_password,
 };
-pub use bots::{get_bot, get_bot_egress, list_bots, list_sections, set_bot_egress};
+pub use bots::{
+    BotDraft, create_bot, get_bot, get_bot_egress, list_bots, list_sections, set_bot_egress,
+};
 pub use conversations::{
     archive_thread, create_thread, get_conversation, get_or_create_conversation, list_threads,
     rename_thread, title_from_first_message, touch_thread, validate_members,

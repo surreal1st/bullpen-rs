@@ -9,11 +9,17 @@
 //! premium refusal, reusing `routes/settings.rs::refuse_if_premium` so this
 //! gives the exact same text `/api/default-model` does rather than a second,
 //! driftable copy.
+//!
+//! F7b-01 adds `POST /api/bots` - the only way to make a bot at all; a fresh
+//! database showed an empty roster forever without it. Port of
+//! `projects/bullpen-night/src/server/app.ts:1162-1188`. Unlike `PATCH`
+//! above, the TS create route runs `judgePin` alone (no separate premium
+//! check), so this does the same rather than reusing `refuse_if_premium`.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::patch;
+use axum::routing::{patch, post};
 use axum::{Json, Router};
 use model::judge_pin;
 use serde_json::json;
@@ -22,7 +28,76 @@ use super::settings::refuse_if_premium;
 use crate::AppState;
 
 pub fn router() -> Router<AppState> {
-    Router::new().route("/api/bots/{id}", patch(patch_bot))
+    Router::new()
+        .route("/api/bots", post(create_bot))
+        .route("/api/bots/{id}", patch(patch_bot))
+}
+
+/// F7b-01: `POST /api/bots`. The body is read as a raw JSON object, same
+/// posture as `patch_bot` below, but a body that fails to parse AT ALL
+/// becomes `{}` rather than a 400 - matching the TS route's own
+/// `c.req.json().catch(() => ({}))`, which swallows a malformed body
+/// instead of refusing it outright. `{}` has no `name`, so that still ends
+/// in the same 400 a genuinely empty body gets.
+async fn create_bot(
+    State(state): State<AppState>,
+    body: axum::body::Bytes,
+) -> Result<Response, crate::AppError> {
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap_or_else(|_| json!({}));
+    let obj = parsed.as_object().cloned().unwrap_or_default();
+
+    let name = obj
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if name.is_empty() {
+        return Err(crate::AppError::bad_request("name is required"));
+    }
+
+    let purpose = obj
+        .get("purpose")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let instructions = obj
+        .get("instructions")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    // Matches the TS `typeof body["model"] === "string" && body["model"] !==
+    // "" ? body["model"] : null`: absent, non-string, and empty-string all
+    // collapse to "no pin".
+    let model = match obj.get("model") {
+        Some(serde_json::Value::String(s)) if !s.is_empty() => Some(s.clone()),
+        _ => None,
+    };
+
+    // Judged HERE, before the row exists - held to no db lock across this
+    // `.await` (same reasoning as `patch_bot`'s own locked-scope comment
+    // below), so a refused pin can never land a row first and get judged
+    // after.
+    if let Some(ref m) = model {
+        let verdict = judge_pin(state.catalog.as_ref(), m, false).await;
+        if !verdict.ok {
+            return Err(crate::AppError::bad_request(
+                verdict
+                    .refusal
+                    .unwrap_or_else(|| "that model cannot be pinned".to_string()),
+            ));
+        }
+    }
+
+    let draft = store::BotDraft {
+        name,
+        purpose,
+        instructions,
+        model,
+    };
+    let db = state.db();
+    let bot = store::create_bot(&db, draft)?;
+    Ok((StatusCode::CREATED, Json(json!({ "bot": bot }))).into_response())
 }
 
 fn no_such_bot() -> Response {

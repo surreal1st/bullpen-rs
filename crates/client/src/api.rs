@@ -804,6 +804,42 @@ pub async fn fetch_bot_tools() -> Vec<MadeTool> {
         .unwrap_or_default()
 }
 
+/// `POST /api/bots`'s body - name only required, `purpose` sent even when
+/// blank (the server treats a missing key and an empty string the same, so
+/// this keeps `NewBotModal`'s call site simple: always both fields).
+#[derive(Serialize)]
+struct CreateBotReq<'a> {
+    name: &'a str,
+    purpose: &'a str,
+}
+
+/// `POST /api/bots` - F7b-01's only way to add a bot to the roster. 201
+/// carries `{"bot": ...}`, the same shape `patch_bot` below already parses,
+/// so this reuses `BotPatchResponse`/`ModelError` rather than a second pair
+/// of response types.
+pub async fn create_bot(name: &str, purpose: &str) -> Result<Bot, String> {
+    let resp = Request::post("/api/bots")
+        .json(&CreateBotReq { name, purpose })
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if resp.ok() {
+        return resp
+            .json::<BotPatchResponse>()
+            .await
+            .map(|b| b.bot)
+            .map_err(|e| e.to_string());
+    }
+    // S13a-01: see `put_model_field`'s comment on why `status` must be
+    // captured before `.json()`.
+    let status = resp.status();
+    match resp.json::<ModelError>().await {
+        Ok(err) => Err(err.error),
+        Err(_) => Err(format!("/api/bots -> {status}")),
+    }
+}
+
 /// `PATCH /api/bots/:id` - pins a model and/or sets the reasoning effort
 /// (`crates/server/src/routes/bots.rs`, added by this same ticket). `body`
 /// carries only the keys being changed - `null` for `model` clears the pin,

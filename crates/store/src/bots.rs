@@ -1,5 +1,6 @@
 use crate::Db;
-use rusqlite::params;
+use crate::conversations::now_iso;
+use rusqlite::{OptionalExtension, params};
 use shared::{Bot, Effort, Section};
 
 struct BotRow {
@@ -155,4 +156,92 @@ pub fn set_bot_egress(db: &Db, id: &str, egress_json: &str) -> rusqlite::Result<
         params![egress_json, id],
     )?;
     Ok(())
+}
+
+/// F7b-01: fields for a freshly created bot - port of
+/// `projects/bullpen-night/src/server/store.ts:396-404`'s `BotDraft`,
+/// narrowed to what this schema stores. No `user_id` (S5b scopes are not
+/// ported into this schema - see `crate::migrations`) and no `voice`
+/// (S11's device-voice field, also not ported).
+pub struct BotDraft {
+    pub name: String,
+    pub purpose: String,
+    pub instructions: String,
+    pub model: Option<String>,
+}
+
+/// The base slug: `name` lowercased, every run of a non `[a-z0-9]`
+/// character collapsed to a single `-`, leading/trailing `-` trimmed,
+/// truncated to 40 characters - in that order, matching
+/// `store.ts:380-386`'s `slugFor` exactly (truncation happens AFTER
+/// trimming, so a cut that lands on an internal `-` is not re-trimmed).
+/// `"bot"` when nothing survives, e.g. a name of only punctuation.
+fn slug_base(name: &str) -> String {
+    let mut collapsed = String::new();
+    let mut last_was_dash = false;
+    for ch in name.to_lowercase().chars() {
+        if ch.is_ascii_lowercase() || ch.is_ascii_digit() {
+            collapsed.push(ch);
+            last_was_dash = false;
+        } else if !last_was_dash {
+            collapsed.push('-');
+            last_was_dash = true;
+        }
+    }
+    let trimmed = collapsed.trim_matches('-');
+    let truncated: String = trimmed.chars().take(40).collect();
+    if truncated.is_empty() {
+        "bot".to_string()
+    } else {
+        truncated
+    }
+}
+
+/// A url-safe id derived from the name, unique within the roster - port of
+/// `store.ts:379-394`'s `slugFor`. Uniqueness is by suffix against the
+/// existing roster: `trinity`, then `trinity-2`, `trinity-3`, matching the
+/// TS numbering exactly (starts at 2, not 1).
+fn slug_for(db: &Db, name: &str) -> rusqlite::Result<String> {
+    let base = slug_base(name);
+    let mut candidate = base.clone();
+    let mut n = 2;
+    loop {
+        let taken = db
+            .conn()
+            .query_row(
+                "SELECT 1 FROM bots WHERE id = ?1",
+                params![candidate],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !taken {
+            return Ok(candidate);
+        }
+        candidate = format!("{base}-{n}");
+        n += 1;
+    }
+}
+
+/// F7b-01: adds a bot to the roster - port of `store.ts:411-426`'s
+/// `createBot`. Only `id, name, purpose, instructions, model, created_at`
+/// are written; every other column keeps its schema default (`crate::
+/// migrations`'s `CREATE TABLE bots` / later `ALTER TABLE` defaults).
+/// Returns the row through `get_bot` so the caller sees the exact same
+/// shape a getter would.
+pub fn create_bot(db: &Db, draft: BotDraft) -> rusqlite::Result<Bot> {
+    let id = slug_for(db, &draft.name)?;
+    db.conn().execute(
+        "INSERT INTO bots (id, name, purpose, instructions, model, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            id,
+            draft.name,
+            draft.purpose,
+            draft.instructions,
+            draft.model,
+            now_iso(),
+        ],
+    )?;
+    Ok(get_bot(db, &id)?.expect("just-inserted bot row must exist"))
 }
