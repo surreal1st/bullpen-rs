@@ -23,6 +23,19 @@ Environment=DOCKER_HOST=unix:///run/user/1004/docker.sock
 # a bot can reach the files and services meridian hosts.
 Environment=BULLPEN_SSH_KEY=/home/bullpen/.ssh/id_ed25519
 Environment=BULLPEN_SANDBOX=on
+# S8c: per-bot machines. THIS LINE IS WHAT MAKES COMPUTER USE EXIST - `browse`,
+# `read_page`, `click`, `type_text` and `desk_shell` all resolve through
+# `vms_enabled()` (`lib.rs:629`), which reads this and defaults to OFF. With it
+# unset every one of them refuses with "Per-bot machines are off here" and the
+# gate stays green the whole time, because nothing in the test suite reads the
+# real env var.
+#
+# 🔴 It was missing here until 2026-09-17 and the running service had it only
+# from the EnvironmentFile below - so a rebuild from this repo would have
+# produced a server with every computer-use tool silently dead. Tracked here as
+# the default; the env file still wins if it sets it too (see the ordering note
+# below), which is how the box has it today.
+Environment=BULLPEN_VM=on
 # S8b: without this the server is SILENT. `tracing` emits nothing by default,
 # so `journalctl -u bullpen-rs` showed only systemd's own start/stop lines -
 # no "listening", no errors, nothing. Two consequences, both measured on
@@ -40,7 +53,19 @@ Environment=RUST_LOG=info,server=debug,model=debug,bullpen=debug
 # unit file, never on a command line.
 # 🔴 Its OWN file, never live's bullpen.env: an EnvironmentFile overrides Environment=
 # lines, and live's sets BULLPEN_DATA_DIR=/home/bullpen/data, which would point this
-# service at the LIVE database. bullpen-rs.env holds only BULLPEN_OPENROUTER_KEY_FILE.
+# service at the LIVE database.
+#
+# What bullpen-rs.env actually holds, read off the box 2026-09-17 (names only -
+# never the values): BULLPEN_OPENROUTER_KEY_FILE, BULLPEN_SANDBOX, BULLPEN_VM,
+# PUBLIC_URL. The old comment here claimed it held only the key file, which was
+# wrong, and the two it did not mention were exactly the two that never made it
+# into this tracked file. Only the key-file path genuinely needs to live outside
+# the repo; the other three are plain operational settings, so BULLPEN_SANDBOX
+# and BULLPEN_VM are now ALSO set above, where a reader can see them.
+#
+# PUBLIC_URL stays out of this file on purpose: it is the host's own external
+# URL, which belongs to the deployment, not to the program. It must be set
+# wherever this unit is installed.
 EnvironmentFile=/home/bullpen/bullpen-rs.env
 Restart=on-failure
 RestartSec=2
