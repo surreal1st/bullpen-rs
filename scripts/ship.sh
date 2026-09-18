@@ -96,7 +96,7 @@ scp -q "deploy/bullpen-rs.service" "$MERIDIAN_HOST:$INCOMING/bullpen-rs.service"
 echo "Transferring checksums (F14, F15)..."
 scp -q "$CHECKSUMS_FILE" "$MERIDIAN_HOST:$INCOMING/CHECKSUMS"
 
-rm "$CHECKSUMS_FILE"
+printf 'Checksum manifest preserved at: %s\n' "$CHECKSUMS_FILE"
 
 # Verify checksums on meridian
 echo ""
