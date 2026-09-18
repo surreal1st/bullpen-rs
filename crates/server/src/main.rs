@@ -69,27 +69,55 @@ async fn main() {
     // Says whether the dir is there, never anything from inside the db.
     tracing::info!(%data_dir, "bullpen data dir");
 
+    // SPEND-01: `BULLPEN_FAKE_CREDITS=<amount>` swaps the real OpenRouter
+    // credits reader for one that answers a fixed dollar figure - same
+    // reasoning as `BULLPEN_FAKE_PORT` just above: this environment has no
+    // OpenRouter key, so `accountReadable` is always false and the Spend
+    // panel's main view (the figure, the bar, the per-bot rows) can never
+    // be screenshotted without it. Kept to this one file, `#[cfg(debug_
+    // assertions)]`-gated the same way, so a release build never carries a
+    // way to fake its own balance.
     #[cfg(debug_assertions)]
-    let state = if matches!(
+    let fake_credits: Option<Arc<dyn server::spend::CreditsPort>> =
+        std::env::var("BULLPEN_FAKE_CREDITS")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .map(|amount| {
+                tracing::info!(
+                    amount,
+                    "BULLPEN_FAKE_CREDITS: credits reads are scripted, no OpenRouter key needed"
+                );
+                Arc::new(server::spend::FakeCredits::usage(amount))
+                    as Arc<dyn server::spend::CreditsPort>
+            });
+
+    #[cfg(debug_assertions)]
+    let fake_port: Option<Arc<dyn ModelPort>> = matches!(
         std::env::var("BULLPEN_FAKE_PORT").as_deref(),
         Ok("1") | Ok("empty")
-    ) {
+    )
+    .then(|| {
         let empty = std::env::var("BULLPEN_FAKE_PORT").as_deref() == Ok("empty");
         tracing::info!(
             empty,
             "BULLPEN_FAKE_PORT: model calls are scripted, no OpenRouter key needed"
         );
-        let fake_port: Arc<dyn ModelPort> = Arc::new(DelayedFakePort {
+        Arc::new(DelayedFakePort {
             reply: if empty {
                 None
             } else {
                 Some("Working on it - give me a moment.")
             },
             delay: Duration::from_secs(4),
-        });
-        server::AppState::with_port(db, fake_port)
-    } else {
-        server::AppState::new(db)
+        }) as Arc<dyn ModelPort>
+    });
+
+    #[cfg(debug_assertions)]
+    let state = match (fake_port, fake_credits) {
+        (Some(port), Some(credits)) => server::AppState::with_port_and_credits(db, port, credits),
+        (Some(port), None) => server::AppState::with_port(db, port),
+        (None, Some(credits)) => server::AppState::with_credits(db, credits),
+        (None, None) => server::AppState::new(db),
     };
 
     #[cfg(not(debug_assertions))]

@@ -439,3 +439,189 @@ async fn credits_read_error_still_starts_the_run() {
     let message = first_event["message"].as_str().expect("message");
     assert!(message.contains("Could not read"), "{message}");
 }
+
+// ---------------------------------------------------------------------
+// SPEND-01: `PUT /api/spend/ceiling` over HTTP, each refusal shape. The
+// existing `put_ceiling_sets_and_returns_the_value` /
+// `put_ceiling_cleans_negative_to_zero` tests above call `spend::set_ceiling`
+// directly - the store function, which always clamps rather than refusing.
+// Nothing in this file drove the route itself before this ticket, so the
+// route's own validation (`routes/spend.rs::put_ceiling`) was unproven.
+// ---------------------------------------------------------------------
+
+fn put_req(uri: &str, body: Value, cookie: &str) -> Request<Body> {
+    Request::put(uri)
+        .header("content-type", "application/json")
+        .header("cookie", cookie)
+        .body(Body::from(body.to_string()))
+        .expect("build request")
+}
+
+fn put_req_no_body(uri: &str, cookie: &str) -> Request<Body> {
+    Request::put(uri)
+        .header("cookie", cookie)
+        .body(Body::empty())
+        .expect("build request")
+}
+
+#[tokio::test]
+async fn put_ceiling_rejects_a_negative_number_over_http() {
+    let db = open_db();
+    let cookie = seed_session(&db);
+    let port: Arc<dyn ModelPort> = as_port(model::fake::text_port("hi", "test/model"));
+    let credits = Arc::new(spend::FakeCredits::usage(0.0));
+    let app = build_app(AppState::with_port_and_credits(db, port, credits));
+
+    let resp = app
+        .clone()
+        .oneshot(put_req(
+            "/api/spend/ceiling",
+            json!({"ceiling": -5.0}),
+            &cookie,
+        ))
+        .await
+        .expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body: Value = serde_json::from_slice(
+        &resp
+            .into_body()
+            .collect()
+            .await
+            .expect("collect")
+            .to_bytes(),
+    )
+    .expect("json body");
+    assert!(
+        body["error"]
+            .as_str()
+            .expect("error string")
+            .contains("ceiling")
+    );
+
+    // Ceiling unchanged - a refused PUT must not have written anything.
+    let (status, body) = get_json(app, "/api/spend", &cookie).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["ceiling"], 10.0, "default ceiling, untouched");
+}
+
+#[tokio::test]
+async fn put_ceiling_rejects_a_non_number_over_http() {
+    let db = open_db();
+    let cookie = seed_session(&db);
+    let port: Arc<dyn ModelPort> = as_port(model::fake::text_port("hi", "test/model"));
+    let credits = Arc::new(spend::FakeCredits::usage(0.0));
+    let app = build_app(AppState::with_port_and_credits(db, port, credits));
+
+    let resp = app
+        .clone()
+        .oneshot(put_req(
+            "/api/spend/ceiling",
+            json!({"ceiling": "abc"}),
+            &cookie,
+        ))
+        .await
+        .expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    let (status, body) = get_json(app, "/api/spend", &cookie).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["ceiling"], 10.0, "default ceiling, untouched");
+}
+
+// ---------------------------------------------------------------------
+// F-SPEND-01a: a missing body used to be accepted - `parse_body` treats an
+// empty body as `PutCeilingBody::default()` (`ceiling: None`), and
+// `put_ceiling` used to fall back to `unwrap_or(0.0)`, a VALID value, so the
+// ceiling silently dropped to $0 and stopped every run. Bite: revert
+// `routes/spend.rs::put_ceiling` to `parsed.ceiling.unwrap_or(0.0)` and this
+// goes red - status flips to 200 and the ceiling becomes 0.0 instead of
+// staying at its prior value.
+// ---------------------------------------------------------------------
+#[tokio::test]
+async fn put_ceiling_rejects_a_missing_body_over_http() {
+    let db = open_db();
+    let cookie = seed_session(&db);
+    let port: Arc<dyn ModelPort> = as_port(model::fake::text_port("hi", "test/model"));
+    let credits = Arc::new(spend::FakeCredits::usage(0.0));
+    let app = build_app(AppState::with_port_and_credits(db, port, credits));
+
+    // A real ceiling first, so "unchanged" is a meaningful assertion rather
+    // than two defaults happening to match.
+    let set_resp = app
+        .clone()
+        .oneshot(put_req(
+            "/api/spend/ceiling",
+            json!({"ceiling": 42.0}),
+            &cookie,
+        ))
+        .await
+        .expect("oneshot");
+    assert_eq!(set_resp.status(), StatusCode::OK);
+
+    let resp = app
+        .clone()
+        .oneshot(put_req_no_body("/api/spend/ceiling", &cookie))
+        .await
+        .expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body: Value = serde_json::from_slice(
+        &resp
+            .into_body()
+            .collect()
+            .await
+            .expect("collect")
+            .to_bytes(),
+    )
+    .expect("json body");
+    assert!(
+        body["error"]
+            .as_str()
+            .expect("error string")
+            .contains("ceiling")
+    );
+
+    let (status, body) = get_json(app, "/api/spend", &cookie).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["ceiling"], 42.0, "the prior ceiling, untouched");
+}
+
+// ---------------------------------------------------------------------
+// F3/D6: `GET /api/spend` on a credits read failure - `account` must be
+// null, `accountReadable` false, and `bots` still populated. Only the
+// message-send path (`credits_read_error_still_starts_the_run` above)
+// exercised `FakeCredits::failing` before this ticket; the panel's own
+// route was unproven. Bite: swap the `Err` arm's `account_readable: false`
+// for `true` (the inverted-flag mutation SPEND-01's own ticket names as the
+// one that matters) and this goes red.
+// ---------------------------------------------------------------------
+#[tokio::test]
+async fn get_spend_when_credits_unreadable_leaves_bots_intact() {
+    let db = open_db();
+    let cookie = seed_session(&db);
+    seed_bot(&db, "arthur", "Arthur");
+    seed_assistant_message(&db, "arthur", "2026-09-05T00:00:00Z", 4.0);
+
+    let port: Arc<dyn ModelPort> = as_port(model::fake::text_port("hi", "test/model"));
+    let credits = Arc::new(spend::FakeCredits::failing("network blip"));
+    let app = build_app(AppState::with_port_and_credits(db, port, credits));
+
+    let (status, body) = get_json(app, "/api/spend?month=2026-09", &cookie).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["accountReadable"], false);
+    assert!(body["account"].is_null());
+    assert!(
+        body["error"]
+            .as_str()
+            .expect("error string")
+            .contains("network blip")
+    );
+
+    let bots = body["bots"].as_array().expect("bots array");
+    assert_eq!(
+        bots.len(),
+        1,
+        "a balance failure must not blank the bot rows"
+    );
+    assert_eq!(bots[0]["botId"], "arthur");
+    assert_eq!(bots[0]["costUsd"], 4.0);
+}

@@ -101,7 +101,17 @@ async fn put_ceiling(
     body: axum::body::Bytes,
 ) -> Result<impl IntoResponse, AppError> {
     let parsed: PutCeilingBody = super::parse_body(&body)?;
-    let value = parsed.ceiling.unwrap_or(0.0);
+    // F-SPEND-01a: an absent `ceiling` key (a missing body included - an
+    // empty body decodes to `PutCeilingBody::default()`, same `None`) used
+    // to fall back to `unwrap_or(0.0)`, a value `is_finite() && >= 0.0`
+    // happily accepts - so a body-less PUT silently zeroed the ceiling and
+    // stopped every run instead of being refused like every other bad
+    // value. `Some(v)` is now required same as a genuine number is.
+    let Some(value) = parsed.ceiling else {
+        return Err(AppError::bad_request(
+            "ceiling must be a number of dollars, zero or more",
+        ));
+    };
 
     if !value.is_finite() || value < 0.0 {
         return Err(AppError::bad_request(

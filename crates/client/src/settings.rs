@@ -12,7 +12,7 @@ use crate::message_time::format_time;
 use crate::model_chip::short_model;
 use crate::slack_card::SlackCard;
 use crate::transport::sleep;
-use crate::types::{AutoReviewLogEntry, AutoReviewState, CatalogEntry, RoutingState};
+use crate::types::{AutoReviewLogEntry, AutoReviewState, CatalogEntry, RoutingState, SpendView};
 use dioxus::prelude::*;
 use std::cell::Cell;
 use std::rc::Rc;
@@ -68,6 +68,12 @@ fn GeneralSettings() -> Element {
             h3 { class: "stg-group-h", "Memory" }
             div { class: "stg-card stg-card-loose",
                 SharedMemorySection {}
+            }
+        }
+        section { class: "stg-group",
+            h3 { class: "stg-group-h", "Spend" }
+            div { class: "stg-card stg-card-loose",
+                SpendSection {}
             }
         }
         section { class: "stg-group",
@@ -518,6 +524,185 @@ fn SharedMemorySection() -> Element {
                     disabled: is_busy || !is_dirty,
                     onclick: save,
                     if is_busy { "Saving…" } else if is_dirty { "Save" } else { "Saved" }
+                }
+            }
+        }
+    }
+}
+
+/* ------------------------------------------------------------------- Spend */
+
+/// SPEND-01: `GET /api/spend` + `PUT /api/spend/ceiling` - port of
+/// `Account.tsx:89-118`'s usage figure/bar/per-bot rows, moved into this
+/// client's Settings modal rather than a rail popover (this client keeps
+/// every setting in one place - see this module's own doc comment - and
+/// there is no header popover here to extend). Same dirty-tracking-free
+/// save shape as `RulesSection`'s textarea, but the ceiling input has no
+/// "unchanged" state to track: every Save attempt round-trips the server,
+/// which is the only thing that actually validates a dollar figure.
+#[component]
+fn SpendSection() -> Element {
+    let mut spend = use_signal(|| None::<SpendView>);
+    let mut ceiling_input = use_signal(String::new);
+    let mut busy = use_signal(|| false);
+    let mut save_error = use_signal(|| None::<String>);
+    let mut load_error = use_signal(|| None::<String>);
+
+    use_effect(move || {
+        spawn(async move {
+            match api::fetch_spend(None).await {
+                Ok(view) => {
+                    ceiling_input.set(format!("{:.2}", view.ceiling));
+                    spend.set(Some(view));
+                    load_error.set(None);
+                }
+                Err(err) => load_error.set(Some(err)),
+            }
+        });
+    });
+
+    let save = move |_| {
+        let Ok(usd) = ceiling_input.read().trim().parse::<f64>() else {
+            save_error.set(Some("Enter a number of dollars, zero or more.".to_string()));
+            return;
+        };
+        busy.set(true);
+        spawn(async move {
+            match api::set_ceiling(usd).await {
+                Ok(ceiling) => {
+                    save_error.set(None);
+                    let mut next = spend.read().clone();
+                    if let Some(view) = next.as_mut() {
+                        view.ceiling = ceiling;
+                    }
+                    spend.set(next);
+                    ceiling_input.set(format!("{ceiling:.2}"));
+                }
+                Err(err) => save_error.set(Some(err)),
+            }
+            busy.set(false);
+        });
+    };
+
+    let view = spend.read().clone();
+    let is_busy = *busy.read();
+
+    rsx! {
+        div { class: "stg-sub",
+            // "This month", not "Spend": the group header above already says
+            // Spend, and two identical headings stacked on each other read as
+            // a rendering bug (caught in the first screenshot of this panel).
+            h4 { class: "stg-sub-h", "This month" }
+
+            if let Some(err) = load_error.read().clone() {
+                div { class: "refusal",
+                    b { "Could not load spend." }
+                    p { "{err}" }
+                }
+            }
+
+            if let Some(view) = view {
+                SpendUsage { view }
+            }
+
+            if let Some(err) = save_error.read().clone() {
+                div { class: "refusal",
+                    b { "Refused." }
+                    p { "{err}" }
+                }
+            }
+
+            div { class: "field",
+                span { "Ceiling" }
+                small { "Runs stop for the rest of the month once total spend reaches this." }
+                div { class: "spend-edit",
+                    input {
+                        r#type: "number",
+                        step: "0.01",
+                        min: "0",
+                        value: "{ceiling_input}",
+                        oninput: move |evt| ceiling_input.set(evt.value()),
+                    }
+                    button {
+                        class: "stg-btn",
+                        disabled: is_busy,
+                        onclick: save,
+                        if is_busy { "Saving…" } else { "Save" }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The usage figure/bar (or the unreadable-balance copy) and the per-bot
+/// rows, split out from `SpendSection` so its fetch/save plumbing above
+/// stays flat. `view.account_readable` is the branch to trust, never
+/// `view.account.is_some()` alone - the ticket's own contract: a credits
+/// read failure must render as "we could not read it", never as "$0.00 of
+/// $X" (the inverted-flag mutation the ticket names as the one that
+/// matters).
+#[component]
+fn SpendUsage(view: SpendView) -> Element {
+    let used = view.account.map(|a| a.total_usage);
+    let pct = match used {
+        Some(u) if view.ceiling > 0.0 => (u / view.ceiling * 100.0).min(100.0),
+        _ => 0.0,
+    };
+    // F-SPEND-01b: NO `ceiling > 0.0` guard here, deliberately, unlike the
+    // TS panel this is ported from (`Account.tsx:92`). `spend::gate_run`
+    // denies a run whenever `used >= ceiling`, and at a ceiling of exactly
+    // zero that is true of every run including the first - so a zero ceiling
+    // stops the product dead. The TS guard would render that state as a calm
+    // empty bar with no warning while every message silently refused. The
+    // panel has to say what the gate will actually do.
+    let over = used.is_some_and(|u| u >= view.ceiling);
+    let near = pct >= 85.0;
+    let bar_class = if over {
+        "bar is-over"
+    } else if near {
+        "bar is-near"
+    } else {
+        "bar"
+    };
+    // A zero ceiling has no percentage to draw, so the bar renders full
+    // rather than empty: it is the stopped state, not the untouched one.
+    let width = if over {
+        "width: 100%".to_string()
+    } else {
+        format!("width: {pct}%")
+    };
+
+    rsx! {
+        if view.account_readable {
+            if let Some(u) = used {
+                div { class: "acct-usage",
+                    div { class: "acct-usage-top",
+                        span { class: "acct-fig mono", "${u:.2}" }
+                        span { class: "acct-of", "of ${view.ceiling:.2} this month" }
+                    }
+                    div { class: "{bar_class}",
+                        span { style: "{width}" }
+                    }
+                    if over {
+                        p { class: "acct-warn", "Runs are stopped. Raise the ceiling." }
+                    }
+                }
+            }
+        } else {
+            div { class: "acct-usage",
+                b { "Balance unreadable" }
+                p { "Runs still allowed. A network blip must not stop your work." }
+            }
+        }
+
+        if !view.bots.is_empty() {
+            div {
+                for bot in view.bots.iter() {
+                    div { key: "{bot.bot_id}", class: "stg-row",
+                        span { "{bot.bot_name}" }
+                        span { class: "mono", "${bot.cost_usd:.2}" }
+                    }
                 }
             }
         }

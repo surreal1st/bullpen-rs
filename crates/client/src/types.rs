@@ -363,6 +363,49 @@ pub struct RulesField {
     pub rules: String,
 }
 
+/* ------------------------------------------------------------- SPEND-01 */
+
+/// The account's month-to-date usage, from `GET /api/spend`'s `account`
+/// field - null on a credits read failure (see `SpendView::account_readable`).
+/// Mirrors `routes/spend.rs::AccountSpend`.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountSpend {
+    pub total_usage: f64,
+}
+
+/// One bot's month-to-date spend row, from `GET /api/spend`'s `bots` array,
+/// already sorted highest-first by the server
+/// (`spend::spend_by_bot`'s `ORDER BY ... DESC`). A strict subset of
+/// `server::spend::BotSpend` - the panel only shows name and dollars, so the
+/// token/run counts are left off rather than carried unused.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpendBotRow {
+    pub bot_id: String,
+    pub bot_name: String,
+    pub cost_usd: f64,
+}
+
+/// `GET /api/spend`'s response shape (`routes/spend.rs::GetSpendResponse`).
+/// `account_readable` is the flag to trust over `account.is_some()` alone -
+/// the ticket's own contract: a credits read failure must render as "we
+/// could not read it", never as "$0.00 of $X" (the inverted-flag mutation
+/// the ticket names as the one that matters).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpendView {
+    pub month: String,
+    pub ceiling: f64,
+    #[serde(default)]
+    pub account: Option<AccountSpend>,
+    #[serde(default)]
+    pub bots: Vec<SpendBotRow>,
+    pub account_readable: bool,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
 /// One row of `GET /api/models`. A strict subset of `settings.rs::ModelInfo`:
 /// the picker draws price, provider support and the mainstream tag, with no
 /// use yet for `contextLength`.

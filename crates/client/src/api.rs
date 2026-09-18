@@ -10,8 +10,8 @@ use crate::types::{
     MemoryEntryField, MemoryView, ModelError, ModelField, ModelsResponse, OpenQuestion,
     PendingApproval, PermissionsField, ProjectField, ProjectSummary, ProjectsField,
     QuestionsResponse, RoomResponse, RoomSummary, RoomsResponse, Routine, RoutineRun, RoutingState,
-    RulesField, SharedCoreField, SharedLogField, Tier1Models, Tier1Response, VmState, WorkingBot,
-    WorkingResponse,
+    RulesField, SharedCoreField, SharedLogField, SpendView, Tier1Models, Tier1Response, VmState,
+    WorkingBot, WorkingResponse,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -730,6 +730,59 @@ pub async fn put_rules(rules: &str) -> Result<String, String> {
         .await
         .map(|b| b.rules)
         .map_err(|e| e.to_string())
+}
+
+/* ------------------------------------------------------------- SPEND-01 */
+
+/// `GET /api/spend[?month=YYYY-MM]` - the Settings modal's Spend section.
+/// `month` is passed only when given, same as the ticket's own contract -
+/// an absent query param leaves the server to default to the current
+/// calendar month (`routes/spend.rs::get_spend`).
+pub async fn fetch_spend(month: Option<&str>) -> Result<SpendView, String> {
+    let url = match month {
+        Some(m) => format!("/api/spend?month={m}"),
+        None => "/api/spend".to_string(),
+    };
+    let resp = Request::get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("{url} -> {}", resp.status()));
+    }
+    resp.json::<SpendView>().await.map_err(|e| e.to_string())
+}
+
+/// `PUT /api/spend/ceiling` - sets the platform-wide dollar ceiling.
+/// Returns the server's cleaned value on success; a refusal (negative,
+/// non-number, missing) surfaces the server's own message rather than being
+/// swallowed, same posture as `put_model_field` above.
+pub async fn set_ceiling(usd: f64) -> Result<f64, String> {
+    #[derive(Serialize)]
+    struct Req {
+        ceiling: f64,
+    }
+    #[derive(Deserialize)]
+    struct CeilingField {
+        ceiling: f64,
+    }
+    let resp = Request::put("/api/spend/ceiling")
+        .json(&Req { ceiling: usd })
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if resp.ok() {
+        return resp
+            .json::<CeilingField>()
+            .await
+            .map(|b| b.ceiling)
+            .map_err(|e| e.to_string());
+    }
+    // S13a-01: see `put_model_field`'s comment on why `status` must be
+    // captured before `.json()`.
+    let status = resp.status();
+    match resp.json::<ModelError>().await {
+        Ok(err) => Err(err.error),
+        Err(_) => Err(format!("/api/spend/ceiling -> {status}")),
+    }
 }
 
 /// `GET /api/models?q=...`, `all=1` for the full catalogue - ported from

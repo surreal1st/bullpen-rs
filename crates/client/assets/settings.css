@@ -704,6 +704,98 @@
   transform: translateX(1rem);
 }
 
+/* ---------------------------------------------------------------- SPEND-01
+   Ported from `projects/bullpen-night/src/client/shell.css:2823-2885` (the
+   `Account.tsx` popover's usage figure and bar) and `:2900-2935` (`.spend-
+   edit`'s input+button row) - neither existed in this client at all before
+   this ticket (`rg "\.bar\b|is-over|is-near|acct-" crates/client/assets` was
+   empty), since nothing here showed spend before now. */
+
+.acct-usage {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  /* The per-bot rows are SIBLINGS of this block, not children, so the gap
+     above does not separate them - without this the bar sat on top of the
+     first bot's name. Caught in the panel's first screenshot. */
+  margin-bottom: 0.6rem;
+}
+
+.acct-usage b {
+  font-size: 0.85rem;
+}
+
+.acct-usage p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.acct-usage-top {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+}
+
+.acct-fig {
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  font-size: 0.95rem;
+}
+
+.acct-of {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.acct-warn {
+  margin: 0;
+  color: var(--danger);
+}
+
+/* One bar, same shape the TS popover and settings screen both drew it. */
+.bar {
+  height: 5px;
+  border-radius: 999px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.bar span {
+  display: block;
+  height: 100%;
+  background: var(--ok);
+  border-radius: 999px;
+  transition: width var(--slow, 0.3s) var(--spring, ease);
+}
+
+.bar.is-near span {
+  background: #f0c674;
+}
+
+.bar.is-over span {
+  background: var(--danger);
+}
+
+.spend-edit {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.spend-edit input {
+  width: 6rem;
+  background: #0f151d;
+  border: 1px solid var(--line);
+  color: var(--ink);
+  border-radius: 6px;
+  padding: 0.3rem 0.5rem;
+  font: inherit;
+  font-size: 0.82rem;
+}
+
 @media (max-width: 640px) {
   .stg-modal {
     width: 100%;
