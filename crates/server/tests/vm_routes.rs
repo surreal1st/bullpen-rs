@@ -662,3 +662,197 @@ async fn view_proxy_preserves_gzip_bytes_and_their_content_encoding_header() {
         .expect("upstream task did not finish")
         .expect("upstream task panicked");
 }
+
+/* ============================================================ S8c-01 ============================================================ */
+//
+// `GET /api/bots/:id/desk` - is the bot's OWN browser actually answering,
+// as opposed to `GET /api/bots/:id/vm` (above) which only reports the
+// CONTAINER's state. Ticket: `.scratch/bullpen-rs/tickets/S8c-01-desk-status.md`.
+//
+// Two required bites, both reusing THIS file's `RecordingDockerRun` per the
+// ticket's own instruction not to build a second fake:
+//
+// (a) A status check never starts a machine. Guard-present: a `stopped`
+//     row's `GET .../desk` answers without touching docker at all - see
+//     `desk_status_never_wakes_a_stopped_machine_to_check_it` below.
+//     Guard-removed: the handler resolves the desk the way a tool does
+//     (`desk_for_in`/`ensure_vm_in`) and `RecordingDockerRun` would show a
+//     `start`/`run`/`create` call. Observable: `docker.recorded_calls()`.
+//
+// (b) A running container with a dead browser reads as NOT ok.
+//     Guard-present: `desk_status_reports_not_ok_when_the_container_is_running_but_the_browser_is_dead`
+//     below - a `running` row whose probe gets a real HTTP 502 answers
+//     `ok: false` with the status wording. Guard-removed: the handler
+//     reports container state instead of the probe's answer (e.g. `ok:
+//     true` whenever the row is `running`, regardless of what the browser
+//     said). Observable: the `ok` field and `detail` string.
+
+/// A one-shot HTTP listener that answers `GET /json/version` with exactly
+/// `status_line`/`body`, then closes - stands in for the bot's own
+/// Chromium. Duplicated from `tests/desk.rs`'s own `spawn_version_listener`
+/// rather than shared: each integration test file in this crate compiles
+/// as its own binary, and this ticket owns no shared `tests/common`
+/// addition for a two-call helper.
+async fn spawn_desk_probe_listener(status_line: &'static str, body: &'static str) -> i32 {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().expect("local_addr").port() as i32;
+
+    tokio::spawn(async move {
+        let (mut stream, _addr) = listener.accept().await.expect("accept");
+        let mut buf = [0u8; 1024];
+        let _ = stream.read(&mut buf).await;
+        let head = format!(
+            "HTTP/1.1 {status_line}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(head.as_bytes()).await.expect("write head");
+        stream.write_all(body.as_bytes()).await.expect("write body");
+        let _ = stream.shutdown().await;
+    });
+
+    port
+}
+
+#[tokio::test]
+async fn desk_status_route_404s_for_a_bot_that_does_not_exist() {
+    let db = Db::open(":memory:").expect("open :memory: db");
+    let session = seed_session(&db);
+
+    let docker: Arc<dyn DockerRun> = Arc::new(RecordingDockerRun::new());
+    let state = server::AppState::with_vm(db, docker, test_config(), true);
+    let router = server::build_app(state);
+
+    let (status, body) = send(get("/api/bots/nobody/desk", &session), router).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"], "no such bot");
+}
+
+#[tokio::test]
+async fn desk_status_route_reports_off_when_vm_support_is_disabled() {
+    let db = Db::open(":memory:").expect("open :memory: db");
+    let session = seed_session(&db);
+    seed_bot(&db, "arthur", "Arthur");
+
+    let docker = Arc::new(RecordingDockerRun::new());
+    let docker_dyn: Arc<dyn DockerRun> = docker.clone();
+    let state = server::AppState::with_vm(db, docker_dyn, test_config(), false);
+    let router = server::build_app(state);
+
+    let (status, body) = send(get("/api/bots/arthur/desk", &session), router).await;
+    assert_eq!(status, StatusCode::OK, "body: {body:?}");
+    assert_eq!(body["ok"], false);
+    assert!(
+        docker.recorded_calls().is_empty(),
+        "VM support off must never touch docker: {:?}",
+        docker.recorded_calls()
+    );
+}
+
+/// 🔴 BITE (a) target - see this section's header for the two worlds.
+#[tokio::test]
+async fn desk_status_never_wakes_a_stopped_machine_to_check_it() {
+    let db = Db::open(":memory:").expect("open :memory: db");
+    let session = seed_session(&db);
+    seed_bot(&db, "arthur", "Arthur");
+    insert_vm_row(
+        &db,
+        &VmRow {
+            bot_id: "arthur".to_string(),
+            container: "bullpen-vm-arthur".to_string(),
+            cdp_port: 9301,
+            web_port: 6201,
+            state: "stopped".to_string(),
+            last_used_at: "2026-09-15T00:00:00Z".to_string(),
+        },
+    );
+
+    let docker = Arc::new(RecordingDockerRun::new());
+    let docker_dyn: Arc<dyn DockerRun> = docker.clone();
+    let state = server::AppState::with_vm(db, docker_dyn, test_config(), true);
+    let router = server::build_app(state);
+
+    let (status, body) = send(get("/api/bots/arthur/desk", &session), router).await;
+    assert_eq!(status, StatusCode::OK, "body: {body:?}");
+    assert_eq!(body["ok"], false);
+    assert_eq!(
+        body["detail"],
+        "This bot's machine is not running, so there is no browser to check."
+    );
+    assert!(
+        docker.recorded_calls().is_empty(),
+        "a status check on a stopped machine must never touch docker, let alone start it: {:?}",
+        docker.recorded_calls()
+    );
+}
+
+/// 🔴 BITE (b) target - see this section's header for the two worlds. A
+/// real HTTP 502 stands in for "the browser answered, and answered badly" -
+/// the alternative the ticket itself offers ("Unreachable (or a 502)"),
+/// chosen because it is deterministic and fast (no timeout to wait out),
+/// unlike a genuinely refused connection.
+#[tokio::test]
+async fn desk_status_reports_not_ok_when_the_container_is_running_but_the_browser_is_dead() {
+    let db = Db::open(":memory:").expect("open :memory: db");
+    let session = seed_session(&db);
+    seed_bot(&db, "arthur", "Arthur");
+
+    let cdp_port = spawn_desk_probe_listener("502 Bad Gateway", "bad gateway").await;
+    insert_vm_row(
+        &db,
+        &VmRow {
+            bot_id: "arthur".to_string(),
+            container: "bullpen-vm-arthur".to_string(),
+            cdp_port,
+            web_port: 6201,
+            state: "running".to_string(),
+            last_used_at: "2026-09-15T00:00:00Z".to_string(),
+        },
+    );
+
+    let docker = Arc::new(RecordingDockerRun::new());
+    let docker_dyn: Arc<dyn DockerRun> = docker.clone();
+    let state = server::AppState::with_vm(db, docker_dyn, test_config(), true);
+    let router = server::build_app(state);
+
+    let (status, body) = send(get("/api/bots/arthur/desk", &session), router).await;
+    assert_eq!(status, StatusCode::OK, "body: {body:?}");
+    assert_eq!(body["ok"], false, "body: {body:?}");
+    assert_eq!(body["detail"], "The desk browser answered 502.");
+    // A `running` row costs no docker call either (`refresh_vm_in` only
+    // ever calls docker to settle a `starting` row) - the container's own
+    // state was never in question here, only its browser.
+    assert!(docker.recorded_calls().is_empty());
+}
+
+/// The companion happy path: a `running` row whose browser genuinely
+/// answers reads as `ok: true` with its name - proves the route's SUCCESS
+/// path end to end (real HTTP through `RealCdpVersion`), not just the two
+/// bites above.
+#[tokio::test]
+async fn desk_status_route_answers_ok_when_the_bots_browser_is_up() {
+    let db = Db::open(":memory:").expect("open :memory: db");
+    let session = seed_session(&db);
+    seed_bot(&db, "arthur", "Arthur");
+
+    let cdp_port = spawn_desk_probe_listener("200 OK", r#"{"Browser":"Chrome/128.0.0.0"}"#).await;
+    insert_vm_row(
+        &db,
+        &VmRow {
+            bot_id: "arthur".to_string(),
+            container: "bullpen-vm-arthur".to_string(),
+            cdp_port,
+            web_port: 6201,
+            state: "running".to_string(),
+            last_used_at: "2026-09-15T00:00:00Z".to_string(),
+        },
+    );
+
+    let docker: Arc<dyn DockerRun> = Arc::new(RecordingDockerRun::new());
+    let state = server::AppState::with_vm(db, docker, test_config(), true);
+    let router = server::build_app(state);
+
+    let (status, body) = send(get("/api/bots/arthur/desk", &session), router).await;
+    assert_eq!(status, StatusCode::OK, "body: {body:?}");
+    assert_eq!(body["ok"], true, "body: {body:?}");
+    assert_eq!(body["detail"], "Chrome/128.0.0.0 on this bot's machine.");
+}

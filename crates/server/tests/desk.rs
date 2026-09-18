@@ -14,12 +14,16 @@
 
 use async_trait::async_trait;
 use server::desk::{
-    Cdp, MAX_PAGE_CHARS, browse, click_text, desk_config, ensure_desk_tables, may_visit, read_page,
-    screenshot, type_into, window_for,
+    Cdp, CdpVersion, DeskConfig, MAX_PAGE_CHARS, RealCdpVersion, VersionAnswer, browse, click_text,
+    desk_config, desk_status, ensure_desk_tables, may_visit, read_page, screenshot, type_into,
+    window_for,
 };
 use server::egress::Resolver;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
+use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 
 /* ------------------------------------------------------------- fakes */
 
@@ -550,4 +554,175 @@ async fn screenshot_returns_empty_string_when_data_missing() {
 
     let result = screenshot(&cdp, "target-1").await.unwrap();
     assert_eq!(result, "");
+}
+
+/* ------------------------------------------------------------- desk_status */
+//
+// S8c-01. Two layers:
+// - `desk_status` itself, against a scripted `CdpVersion` fake
+//   (`FakeVersionProbe`) - the ticket's own instruction to unit-test all
+//   three branches directly, including the "Chromium" fallback.
+// - `RealCdpVersion`, against a real local TCP listener (never a browser,
+//   same posture `tests/http_cdp_ws.rs` already takes for `HttpCdp`'s own
+//   WebSocket half) - `reqwest`'s own JSON parsing is the one thing a
+//   scripted fake cannot exercise, and the ticket calls out one exact case
+//   a fake would paper over: a 2xx reply whose body is not JSON at all.
+//
+// The two REQUIRED BITES for this ticket are route-level, not here - see
+// `tests/vm_routes.rs`'s own S8c-01 section (it reuses that file's
+// `RecordingDockerRun`, per the ticket's own instruction not to build a
+// second fake).
+
+/// One fixed `VersionAnswer` per instance - `desk_status` calls
+/// `probe.version()` exactly once, so unlike `FakeCdp` above (which drives
+/// a whole DevTools session) this needs no queue or call sequence.
+struct FakeVersionProbe(VersionAnswer);
+
+#[async_trait]
+impl CdpVersion for FakeVersionProbe {
+    async fn version(&self) -> VersionAnswer {
+        self.0.clone()
+    }
+}
+
+#[tokio::test]
+async fn desk_status_reports_ok_with_the_browser_name_from_the_body() {
+    let probe = FakeVersionProbe(VersionAnswer::Ok {
+        browser: Some("Chrome/128.0.0.0".to_string()),
+    });
+
+    let status = desk_status(&probe).await;
+
+    assert!(status.ok);
+    assert_eq!(status.detail, "Chrome/128.0.0.0 on this bot's machine.");
+}
+
+/// TS `body.Browser ?? "Chromium"` (`desk.ts:454`): a 2xx body with no
+/// `Browser` field falls back to "Chromium", not an empty name.
+#[tokio::test]
+async fn desk_status_falls_back_to_chromium_when_the_browser_field_is_missing() {
+    let probe = FakeVersionProbe(VersionAnswer::Ok { browser: None });
+
+    let status = desk_status(&probe).await;
+
+    assert!(status.ok);
+    assert_eq!(status.detail, "Chromium on this bot's machine.");
+}
+
+#[tokio::test]
+async fn desk_status_reports_a_non_2xx_status_verbatim() {
+    let probe = FakeVersionProbe(VersionAnswer::Status(503));
+
+    let status = desk_status(&probe).await;
+
+    assert!(!status.ok);
+    assert_eq!(status.detail, "The desk browser answered 503.");
+}
+
+#[tokio::test]
+async fn desk_status_reports_unreachable_as_not_ok() {
+    let probe = FakeVersionProbe(VersionAnswer::Unreachable);
+
+    let status = desk_status(&probe).await;
+
+    assert!(!status.ok);
+    assert_eq!(status.detail, "This bot's browser is not answering.");
+}
+
+/* --------------------------------------------------- RealCdpVersion (real HTTP) */
+
+fn probe_config(port: u16) -> DeskConfig {
+    DeskConfig {
+        cdp: format!("http://127.0.0.1:{port}"),
+        view: "http://127.0.0.1:0".to_string(),
+        container: "test-desk".to_string(),
+        docker_host: "unix:///dev/null".to_string(),
+    }
+}
+
+/// A one-shot HTTP listener that answers `GET /json/version` with exactly
+/// `status_line`/`body`, then closes. Never a real browser - proves
+/// `RealCdpVersion`'s own parsing, the same way `tests/vm_routes.rs`'s gzip
+/// test proves `view_proxy`'s wiring against a raw loopback listener rather
+/// than a real container.
+async fn spawn_version_listener(status_line: &'static str, body: &'static str) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().expect("local_addr").port();
+
+    tokio::spawn(async move {
+        let (mut stream, _addr) = listener.accept().await.expect("accept");
+        let mut buf = [0u8; 1024];
+        let _ = stream.read(&mut buf).await;
+        let head = format!(
+            "HTTP/1.1 {status_line}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(head.as_bytes()).await.expect("write head");
+        stream.write_all(body.as_bytes()).await.expect("write body");
+        let _ = stream.shutdown().await;
+    });
+
+    port
+}
+
+#[tokio::test]
+async fn real_cdp_version_parses_a_real_2xx_json_body() {
+    let port = spawn_version_listener("200 OK", r#"{"Browser":"Chrome/128.0.0.0"}"#).await;
+    let probe = RealCdpVersion::new(&probe_config(port), Duration::from_secs(2));
+
+    let answer = probe.version().await;
+
+    assert_eq!(
+        answer,
+        VersionAnswer::Ok {
+            browser: Some("Chrome/128.0.0.0".to_string())
+        }
+    );
+}
+
+/// 🔴 The ticket's own explicit case: TS `await res.json()` throws on a
+/// 2xx body that is not JSON, and the surrounding try/catch reads that as
+/// unreachable, never as a third, half-ok outcome. Proven against a REAL
+/// non-JSON body - this is `RealCdpVersion`'s own parsing decision, not
+/// `desk_status`'s, so a scripted `VersionAnswer` fake could not exercise
+/// it at all.
+#[tokio::test]
+async fn real_cdp_version_reads_a_non_json_2xx_body_as_unreachable() {
+    let port = spawn_version_listener("200 OK", "not json at all").await;
+    let probe = RealCdpVersion::new(&probe_config(port), Duration::from_secs(2));
+
+    let answer = probe.version().await;
+
+    assert_eq!(
+        answer,
+        VersionAnswer::Unreachable,
+        "a non-JSON 2xx body must read as unreachable, not ok"
+    );
+}
+
+#[tokio::test]
+async fn real_cdp_version_reports_a_real_non_2xx_status() {
+    let port = spawn_version_listener("502 Bad Gateway", "bad gateway").await;
+    let probe = RealCdpVersion::new(&probe_config(port), Duration::from_secs(2));
+
+    let answer = probe.version().await;
+
+    assert_eq!(answer, VersionAnswer::Status(502));
+}
+
+/// Bind to grab a genuinely free port, then drop the listener before ever
+/// calling `probe.version()` - nothing listens there any more, so the OS
+/// refuses the connection, the same transport failure a dead container
+/// produces.
+#[tokio::test]
+async fn real_cdp_version_reads_a_refused_connection_as_unreachable() {
+    let port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        listener.local_addr().expect("local_addr").port()
+    };
+    let probe = RealCdpVersion::new(&probe_config(port), Duration::from_millis(500));
+
+    let answer = probe.version().await;
+
+    assert_eq!(answer, VersionAnswer::Unreachable);
 }

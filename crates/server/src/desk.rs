@@ -1103,6 +1103,195 @@ pub async fn desk_config_for_bot(
     }
 }
 
+/* ------------------------------------------------------------------ status */
+
+/// S8c-01: one `GET {cdp}/json/version` answer, reduced to what
+/// `desk_status` needs to turn into a sentence for Josh - not a raw
+/// `reqwest::Response`, so `desk_status` itself never has to know this is
+/// HTTP at all (the same separation `store::vms::DockerResult` already
+/// gives `desk_shell` from `docker`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VersionAnswer {
+    /// A 2xx reply. `browser` is the JSON body's `Browser` field, or `None`
+    /// when the field is missing - `desk_status` supplies the "Chromium"
+    /// fallback text (TS `body.Browser ?? "Chromium"`, `desk.ts:454`), not
+    /// this enum, so a caller that only cares about `ok` never has to know
+    /// the fallback string exists.
+    Ok { browser: Option<String> },
+    /// A non-2xx reply, carrying the numeric status TS's own template
+    /// string reports (`desk.ts:452`).
+    Status(u16),
+    /// Nothing usable came back: a refused connection, a timeout, or - per
+    /// this ticket's own instruction - a 2xx reply whose body was not JSON
+    /// at all. TS's `await res.json()` (`desk.ts:453`) throws in that last
+    /// case, and its surrounding `try/catch` (`desk.ts:448-461`) turns the
+    /// throw into the SAME branch a transport failure hits - a non-JSON 2xx
+    /// therefore reads as unreachable here too, not as a third, half-ok
+    /// outcome TS never had.
+    Unreachable,
+}
+
+/// S8c-01: the one real I/O call `desk_status` needs - `vm::thumbnail`'s
+/// `FrameCapture` precedent (`vm.rs:1051`, that trait's own doc) applied to
+/// a status probe instead of a screenshot: a small trait for the single
+/// real call, a `Real*` impl (`RealCdpVersion`, below) the route constructs
+/// inline, and a pure function (`desk_status`, below) tests drive against a
+/// scripted fake.
+///
+/// **Not a method on `Cdp`** (this ticket's own instruction, and the reason
+/// is concrete, not decorative): `Cdp::ready()` already hits this exact
+/// endpoint but throws away both the status code and the body, because its
+/// only caller (`wait_for_ready`) never needed more than a boolean - and
+/// `ready`'s `true` default exists so every fake `Cdp` already written for
+/// this crate's other tests (none of which model a broken desk) keeps
+/// compiling unchanged. A `version()` method added to `Cdp` itself would
+/// need that same kind of default, and the only truthful one for "did the
+/// browser answer with a name" is `Unreachable` - which would make every
+/// one of those existing fakes silently start claiming a dead browser the
+/// moment anything called the new method, unless each was hand-edited
+/// first. A second, one-method trait costs those fakes nothing at all.
+#[async_trait]
+pub trait CdpVersion: Send + Sync {
+    async fn version(&self) -> VersionAnswer;
+}
+
+/// TS's `AbortSignal.timeout(5_000)` (`desk.ts:450`) - short on purpose.
+/// `desk_status` exists so Josh can find out a machine is NOT answering
+/// without waiting on the same slow endpoint that is the problem; the desk
+/// tools' own 10s/30s connect/call timeouts (`SOCKET_CONNECT_TIMEOUT`/
+/// `CALL_TIMEOUT`, above) are tuned for a DevTools round trip that may
+/// legitimately take a while, which is the opposite of what a status check
+/// should wait out.
+pub const STATUS_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// S8c-01: the real `CdpVersion` - `GET {cdp}/json/version` over its own
+/// `reqwest::Client`.
+///
+/// **Judgment call, not `HttpCdp` itself** (the ticket left this as "your
+/// call, state it" - see this ticket's Results for the short version).
+/// `HttpCdp` holds a client too, but its `connect_timeout`/`call_timeout`
+/// fields exist for the WebSocket path (`create_window`/`call`) and are
+/// tuned accordingly (10s/30s) - reusing them for a status probe would mean
+/// either changing what every OTHER `HttpCdp` caller waits on (wrong:
+/// adding a status route must not change how long `browse`/`click`/
+/// `type_text` wait for anything) or bolting a second, probe-only timeout
+/// field onto a struct whose every other field is WebSocket plumbing this
+/// probe never touches. A four-line struct built fresh from the
+/// `DeskConfig` a route already has is simpler than either, and it is the
+/// ONLY thing `desk_status` depends on through `CdpVersion` - nothing here
+/// needs `HttpCdp`'s socket machinery at all.
+pub struct RealCdpVersion {
+    cdp: String,
+    http: reqwest::Client,
+    timeout: Duration,
+}
+
+impl RealCdpVersion {
+    /// `timeout` is a parameter, not hardwired to `STATUS_PROBE_TIMEOUT`,
+    /// so a test can prove a slow/silent endpoint reads as unreachable
+    /// without waiting out 5 real seconds - the same reasoning
+    /// `HttpCdp::with_timeouts` already gives for its own pair. The one
+    /// production call site (`routes/vms.rs`'s `get_desk_status`) always
+    /// passes `STATUS_PROBE_TIMEOUT`.
+    pub fn new(config: &DeskConfig, timeout: Duration) -> Self {
+        Self {
+            cdp: config.cdp.clone(),
+            http: reqwest::Client::new(),
+            timeout,
+        }
+    }
+}
+
+#[async_trait]
+impl CdpVersion for RealCdpVersion {
+    async fn version(&self) -> VersionAnswer {
+        // TS's `{ Browser?: string }` cast of the `/json/version` body
+        // (`desk.ts:453`) - only the one field this port reads.
+        #[derive(serde::Deserialize)]
+        struct VersionBody {
+            #[serde(rename = "Browser")]
+            browser: Option<String>,
+        }
+
+        let response = match self
+            .http
+            .get(format!("{}/json/version", self.cdp))
+            .timeout(self.timeout)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            // Refused connection, DNS failure, or `self.timeout` elapsing -
+            // reqwest folds all three into one `Err`, matching TS's own
+            // single `catch` around `fetchImpl` + `AbortSignal.timeout`
+            // (`desk.ts:448-461`): nothing here needs to tell them apart,
+            // because `desk_status` reports the same sentence for all of
+            // them either way.
+            Err(_) => return VersionAnswer::Unreachable,
+        };
+
+        if !response.status().is_success() {
+            return VersionAnswer::Status(response.status().as_u16());
+        }
+
+        match response.json::<VersionBody>().await {
+            Ok(body) => VersionAnswer::Ok {
+                browser: body.browser,
+            },
+            // Non-JSON 2xx - see `VersionAnswer::Unreachable`'s own doc for
+            // why this is deliberately NOT a fourth outcome.
+            Err(_) => VersionAnswer::Unreachable,
+        }
+    }
+}
+
+/// TS `deskStatus`'s own return shape (`desk.ts:447`: `Promise<{ ok:
+/// boolean; detail: string }>`), named rather than an inline tuple so
+/// `routes/vms.rs`'s `get_desk_status` can build its JSON body from named
+/// fields instead of `.0`/`.1`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeskStatus {
+    pub ok: bool,
+    pub detail: String,
+}
+
+/// S8c-01: port of TS `deskStatus` (`desk.ts:444-461`). The 2xx / non-2xx /
+/// unreachable STRUCTURE is ported verbatim, per this ticket. Two of the
+/// three sentences are NOT verbatim: TS's originals name the ONE shared
+/// desk ("Chromium **on the shared desk**", "Is the **bullpen-desk
+/// container** running?") that S8a-02 already removed from this codebase -
+/// see this file's own header and this ticket's Results for the exact
+/// wording chosen instead and why. The non-2xx sentence needed no change:
+/// it names only the browser's own HTTP answer, never the shared desk.
+///
+/// 🔴 This function itself never resolves a `DeskConfig` - it only turns
+/// whatever `probe` already answers into a sentence. Every production
+/// caller MUST build `probe` from a bot's own machine
+/// (`vm::vm_desk(&row, &cfg)`, never `desk_config(env)`) - see
+/// `routes/vms.rs`'s `get_desk_status` for why calling `desk_config` here
+/// would reach LIVE Bullpen's own browser, not an orphaned one.
+pub async fn desk_status(probe: &dyn CdpVersion) -> DeskStatus {
+    match probe.version().await {
+        VersionAnswer::Ok { browser } => DeskStatus {
+            ok: true,
+            detail: format!(
+                "{} on this bot's machine.",
+                browser.as_deref().unwrap_or("Chromium")
+            ),
+        },
+        // TS: `The desk browser answered ${res.status}.` (`desk.ts:452`) -
+        // kept verbatim, see this function's own doc.
+        VersionAnswer::Status(status) => DeskStatus {
+            ok: false,
+            detail: format!("The desk browser answered {status}."),
+        },
+        VersionAnswer::Unreachable => DeskStatus {
+            ok: false,
+            detail: "This bot's browser is not answering.".to_string(),
+        },
+    }
+}
+
 /* ------------------------------------------------------------- scope cuts */
 //
 // What TS `desk.ts` exports that this file does NOT port, and why - per the
@@ -1118,10 +1307,14 @@ pub async fn desk_config_for_bot(
 //   meridian smoke test (S6-SMOKE) is the only thing that can prove that.
 // - (S8b-02, CLOSED) `deskShell` ("the terminal" section, `desk.ts:382-440`)
 //   is now ported - `desk_config_for_bot` above resolves the routing,
-//   `tools::desk_shell::run_desk_shell` runs the command. Still scoped out:
-//   `deskShellStdin`/`deskStatus` (the rest of "the terminal"/"status",
-//   `desk.ts:390-461`) and `deskAction`/`DeskAction` ("coordinate-level
+//   `tools::desk_shell::run_desk_shell` runs the command.
+// - (S8c-01, CLOSED) `deskStatus` ("status", `desk.ts:444-461`) is now
+//   ported - `desk_status`/`CdpVersion`/`RealCdpVersion` above, exposed as
+//   `GET /api/bots/{id}/desk` (`routes/vms.rs`), not TS's `GET /api/desk` -
+//   see this ticket for why the path moved.
+//   Still scoped out: `deskShellStdin` (the rest of "the terminal",
+//   `desk.ts:390-440`) and `deskAction`/`DeskAction` ("coordinate-level
 //   input", `desk.ts:463-660`, the `xdotool` computer-use surface) - each a
 //   separable subsystem TS itself marks off with its own `/* ---- */`
 //   banner, none of them this ticket's title, and together a second
-//   ticket's worth of validation-heavy surface.
+//   ticket's worth of validation-heavy surface (S8c-02, S8c-03).

@@ -9,6 +9,9 @@
 //! (redirect) and `ALL /api/bots/:id/vm/view/*` (the HTTP half of the
 //! desktop; `vm_proxy::serve` already routes the WebSocket half - see its
 //! own module doc for why an upgrade never reaches an axum route at all).
+//! Plus `GET /api/bots/:id/desk` (S8c-01, `get_desk_status`): NOT a port of
+//! TS `vm-routes.ts` at all, but of TS `desk.ts`'s `deskStatus`, moved onto
+//! a per-bot path - see that handler's own doc for why.
 //!
 //! 🔴 Every route here is `/api/*`, gated by `auth::require_session`
 //! (`lib.rs::build_app` wraps `routes::router()` in it) exactly like every
@@ -47,6 +50,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use crate::AppState;
+use crate::desk::{self, RealCdpVersion};
 use crate::vm::{self, RealFrameCapture};
 use crate::vm_proxy;
 use store::vms::{VmRow, get_vm, list_vms};
@@ -56,6 +60,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/vms", get(list_all))
         .route("/api/vms/hibernate", post(post_hibernate))
         .route("/api/bots/{id}/vm", get(get_status))
+        .route("/api/bots/{id}/desk", get(get_desk_status))
         .route("/api/bots/{id}/vm/ensure", post(post_ensure))
         .route("/api/bots/{id}/vm/thumbnail.png", get(get_thumbnail))
         .route("/api/bots/{id}/vm/view", get(view_redirect))
@@ -75,6 +80,17 @@ fn no_such_bot() -> Response {
 
 const OFF_DETAIL: &str =
     "Per-bot machines are off on this server. Set BULLPEN_VM=on where they are wanted.";
+
+/// S8c-01: what `GET /api/bots/:id/desk` answers when there is no machine
+/// to probe at all - no `vms` row, or a row not in state `running` (most
+/// commonly `stopped`, the reaper's own hibernated state, `b010c30`).
+/// Deliberately the SAME sentence for every one of those cases: Josh does
+/// not need to know WHICH not-running state a bot is in from this route,
+/// only that there is currently no browser to check - and this must never
+/// itself wake the machine to find out more (see `get_desk_status`'s own
+/// doc, and this ticket's bite (a)).
+const NOT_RUNNING_DETAIL: &str =
+    "This bot's machine is not running, so there is no browser to check.";
 
 /// Port of TS `encodeURIComponent`'s one job here: a path SEGMENT. Used only
 /// for `viewPath`/the redirect target, both single segments (a bot id),
@@ -205,6 +221,86 @@ async fn get_status(State(state): State<AppState>, Path(bot_id): Path<String>) -
             }
         }
     }
+}
+
+/// `GET /api/bots/:id/desk` - S8c-01. Port of TS `GET /api/desk`
+/// (`app.ts:3968`, `desk.ts:444-461`'s `deskStatus`), moved to a PER-BOT
+/// path: S8a-02 already deleted the "every bot shares one desk" routing
+/// this crate had, so a verbatim `/api/desk` would report the health of a
+/// machine no bot's tools route through any more - see
+/// `.scratch/bullpen-rs/tickets/S8c-01-desk-status.md` for the full
+/// reasoning (orchestrator's decision, not re-litigated here). Answers
+/// "is THIS bot's own browser actually there" - `GET .../vm` (above)
+/// already answers "is the container up", and the two come apart: a
+/// container can be `running` while Chromium inside it is dead.
+///
+/// 🔴 **Stronger than "reports on an irrelevant machine": that machine is
+/// LIVE BULLPEN'S, not an orphan.** Verified on meridian 2026-09-17:
+/// `bullpen.service` (the TS server, node pid 2218) listens on :4360;
+/// `bullpen-desk`'s rootlesskit binds CDP on :9223 and noVNC on :6101 -
+/// exactly `desk::desk_config`'s own hardcoded defaults
+/// (`BULLPEN_DESK_CDP`/`BULLPEN_DESK_VIEW` are unset on the box, so those
+/// defaults are what a caller of `desk_config` would actually get). A
+/// verbatim `GET /api/desk` here would therefore not just describe a
+/// machine no bullpen-rs bot uses - it would reach into LIVE Bullpen's own
+/// browser and report on ITS state from bullpen-rs, crossing this
+/// project's own "never touch live Bullpen" line (`CLAUDE.md`), not merely
+/// a usefulness one. This is why this handler builds its `DeskConfig`
+/// ONLY from `vm::vm_desk(&vm, &state.vm_config)` (below) - a bot's own
+/// VM row - and never calls `desk::desk_config` at all: there is no path
+/// from this route to :9223/:6101.
+///
+/// Branch order matches `get_thumbnail`, below: no-such-bot -> off ->
+/// no-machine-or-not-running (no probe, and no docker call beyond a plain
+/// settle read - a status check must never itself wake a machine, bite
+/// (a)) -> running (probe for real, bite (b)).
+///
+/// **Decision: `refresh_vm_in`, not a bare `get_vm`** (the ticket's own
+/// "your call, state it"). A `starting` row's real container state can
+/// already be `running` by the time anyone opens this diagnostic page;
+/// `refresh_vm_in` settles that ONE ambiguous case with a plain `docker
+/// inspect` (never `start`/`run`/`create` - see its own doc, `vm.rs`), the
+/// SAME call `get_status` just above already makes for `/vm` on this
+/// identical row. Leaving `/desk` on a bare `get_vm` would let the two
+/// endpoints disagree about a bot whose container finished starting
+/// between one poll and the next. For a row that is `None` or already
+/// `stopped`, `refresh_vm_in` makes NO docker call at all (its own early
+/// return, `vm.rs`) - which is exactly what bite (a) below proves.
+async fn get_desk_status(State(state): State<AppState>, Path(bot_id): Path<String>) -> Response {
+    let bot = {
+        let db = state.db();
+        store::get_bot(&db, &bot_id)
+    };
+    match bot {
+        Err(e) => return crate::AppError::from(e).into_response(),
+        Ok(None) => return no_such_bot(),
+        Ok(Some(_)) => {}
+    }
+
+    if !state.vm_enabled {
+        return Json(json!({ "ok": false, "detail": OFF_DETAIL })).into_response();
+    }
+
+    let db = state.db_handle();
+    let vm = match vm::refresh_vm_in(&db, state.vm_docker.clone(), &bot_id).await {
+        Ok(vm) => vm,
+        Err(e) => return crate::AppError::from(e).into_response(),
+    };
+
+    // Only a settled `running` row is probed. Everything else - no row,
+    // `stopped`, or a `starting` row `refresh_vm_in` could not settle -
+    // answers `NOT_RUNNING_DETAIL` without ever touching `Cdp`.
+    let vm = match vm {
+        Some(v) if v.state == "running" => v,
+        _ => {
+            return Json(json!({ "ok": false, "detail": NOT_RUNNING_DETAIL })).into_response();
+        }
+    };
+
+    let config = vm::vm_desk(&vm, &state.vm_config);
+    let probe = RealCdpVersion::new(&config, desk::STATUS_PROBE_TIMEOUT);
+    let status = desk::desk_status(&probe).await;
+    Json(json!({ "ok": status.ok, "detail": status.detail })).into_response()
 }
 
 /// `POST /api/bots/:id/vm/ensure` - port of TS `app.post(".../vm/ensure",
