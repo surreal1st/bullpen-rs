@@ -52,6 +52,17 @@ fn run_status(db: &Arc<Mutex<Db>>, run_id: &str) -> String {
         .expect("read run row")
 }
 
+fn run_model(db: &Arc<Mutex<Db>>, run_id: &str) -> String {
+    let db = db.lock().expect("db mutex poisoned");
+    db.conn()
+        .query_row(
+            "SELECT model FROM runs WHERE id = ?1",
+            rusqlite::params![run_id],
+            |row| row.get(0),
+        )
+        .expect("read run model")
+}
+
 fn run_messages_json(db: &Arc<Mutex<Db>>, run_id: &str) -> String {
     let db = db.lock().expect("db mutex poisoned");
     db.conn()
@@ -405,6 +416,125 @@ async fn approving_runs_the_tool_and_the_run_finishes_with_the_result_in_the_tra
 
     let (_, _, _, status) = pending_approval(&db, &run_id).expect("approval row still exists");
     assert_eq!(status, "approved");
+}
+
+#[tokio::test]
+async fn escalated_requested_model_survives_approval_without_replacing_provider_model() {
+    let db = open_db();
+    seed_bot(&db, "arthur", "Arthur");
+    let conversation_id = own_conversation(&db, "arthur");
+    seed_user_message(
+        &db,
+        &conversation_id,
+        "fix this build error, then ask which target",
+    );
+
+    let requested_before = "test/unconfigured-model";
+    let requested_after = model::ladder::DEFAULT_TIER1.code;
+    let first_provider_model = "provider/actual-before-approval";
+    let final_provider_model = "provider/actual-after-approval";
+    let port = Arc::new(ScriptedPort::new(vec![
+        vec![
+            ModelEvent::ToolCalls {
+                calls: vec![
+                    ToolCall {
+                        id: "call-escalate".to_string(),
+                        name: "escalate".to_string(),
+                        arguments: json!({
+                            "reason": "need the code model",
+                            "kind": "code"
+                        })
+                        .to_string(),
+                    },
+                    ToolCall {
+                        id: "call-question".to_string(),
+                        name: "ask_josh".to_string(),
+                        arguments: json!({
+                            "question": "Which target should I use?",
+                            "wait": true
+                        })
+                        .to_string(),
+                    },
+                ],
+                usage: None,
+            },
+            ModelEvent::Done {
+                model: first_provider_model.to_string(),
+                usage: None,
+                finish_reason: None,
+            },
+        ],
+        vec![
+            ModelEvent::Delta {
+                text: "Using the blue target.".to_string(),
+            },
+            ModelEvent::Done {
+                model: final_provider_model.to_string(),
+                usage: None,
+                finish_reason: None,
+            },
+        ],
+    ]));
+    let manager = Arc::new(RunManager::new(Arc::clone(&db), port.clone()));
+    let run_id = manager.start(StartOptions {
+        bot_id: "arthur".to_string(),
+        conversation_id: conversation_id.clone(),
+        model: requested_before.to_string(),
+        messages: vec![ModelMessage::user(
+            "fix this build error, then ask which target",
+        )],
+        trigger: Trigger::Chat,
+        room: false,
+    });
+
+    drain_until_paused_or_done(manager.subscribe(&run_id)).await;
+    assert_eq!(wait_for_status(&db, &run_id, "waiting").await, "waiting");
+    assert_eq!(
+        run_model(&db, &run_id),
+        requested_after,
+        "approval persistence must keep the escalated requested model, not the provider's actual model"
+    );
+
+    let (approval_id, tool_name, _, status) =
+        pending_approval(&db, &run_id).expect("ask_josh approval");
+    assert_eq!(tool_name, "ask_josh");
+    assert_eq!(status, "pending");
+    let resumed_events = manager.subscribe(&run_id);
+    assert!(
+        manager
+            .decide_approval(&approval_id, true, Some("the blue target".to_string()))
+            .await
+    );
+    assert_eq!(wait_for_status(&db, &run_id, "done").await, "done");
+    let resumed_events = common::drain(resumed_events).await;
+    assert!(
+        resumed_events.iter().any(|event| matches!(
+            event,
+            RunEvent::Done { model, .. } if model == final_provider_model
+        )),
+        "the done event must retain the provider's actual responding model: {resumed_events:?}"
+    );
+
+    let requests = port.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].model, requested_before);
+    assert_eq!(
+        requests[1].model, requested_after,
+        "approval resume must request the escalated model"
+    );
+    assert_eq!(run_model(&db, &run_id), requested_after);
+
+    let thread = {
+        let db = db.lock().expect("db mutex poisoned");
+        store::list_messages(&db, &conversation_id).expect("list conversation messages")
+    };
+    let last = thread.last().expect("assistant response");
+    assert_eq!(last.role, "assistant");
+    assert_eq!(
+        last.model.as_deref(),
+        Some(final_provider_model),
+        "the assistant message must retain the provider's actual responding model"
+    );
 }
 
 // 3. Reject: the model is told IN WORDS that Josh refused, and the run

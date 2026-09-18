@@ -149,7 +149,14 @@ struct ActivityState {
 struct RunState {
     messages: Vec<ModelMessage>,
     text: String,
-    model: String,
+    /// The model selected by Bullpen for the next request. This is the value
+    /// persisted on the run row so an approval resume keeps routing and
+    /// escalation decisions.
+    effective_requested_model: String,
+    /// The provider-reported model that produced the latest response. This
+    /// remains the model attributed to the saved assistant message and done
+    /// event, even when the provider served a different model than requested.
+    responding_model: String,
     usage: Option<ModelUsage>,
     steps: i64,
 }
@@ -1073,7 +1080,7 @@ impl RunManager {
         run_id: &str,
         bot_id: &str,
         trigger: Trigger,
-        mut model: String,
+        mut effective_requested_model: String,
         mut messages: Vec<ModelMessage>,
         toolbox: &ToolBox,
         starting_steps: i64,
@@ -1081,7 +1088,7 @@ impl RunManager {
         starting_usage: Option<ModelUsage>,
     ) -> Outcome {
         let mut text = starting_text;
-        let mut resolved_model = model.clone();
+        let mut responding_model = effective_requested_model.clone();
         let mut usage: Option<ModelUsage> = starting_usage;
         let mut steps: i64 = starting_steps;
 
@@ -1118,7 +1125,8 @@ impl RunManager {
                     state: RunState {
                         messages,
                         text,
-                        model: resolved_model,
+                        effective_requested_model,
+                        responding_model,
                         usage,
                         steps,
                     },
@@ -1147,7 +1155,7 @@ were doing unless he changed it."
             steps += 1;
 
             let request = ModelRequest {
-                model: model.clone(),
+                model: effective_requested_model.clone(),
                 messages: messages.clone(),
                 tools: if toolbox.specs.is_empty() {
                     None
@@ -1187,7 +1195,7 @@ were doing unless he changed it."
                     ModelEvent::Done {
                         model: m, usage: u, ..
                     } => {
-                        resolved_model = m;
+                        responding_model = m;
                         usage = add_usage(usage, u);
                     }
                     ModelEvent::Error { message, status } => {
@@ -1195,7 +1203,8 @@ were doing unless he changed it."
                             state: RunState {
                                 messages,
                                 text,
-                                model: resolved_model,
+                                effective_requested_model,
+                                responding_model,
                                 usage,
                                 steps,
                             },
@@ -1210,7 +1219,8 @@ were doing unless he changed it."
                 return Outcome::Answered(RunState {
                     messages,
                     text,
-                    model: resolved_model,
+                    effective_requested_model,
+                    responding_model,
                     usage,
                     steps,
                 });
@@ -1608,7 +1618,8 @@ were doing unless he changed it."
                             state: RunState {
                                 messages,
                                 text,
-                                model: resolved_model,
+                                effective_requested_model,
+                                responding_model,
                                 usage,
                                 steps,
                             },
@@ -1686,7 +1697,7 @@ were doing unless he changed it."
                         if call.name == "escalate"
                             && let Some(step) = toolbox.take_escalated()
                         {
-                            model = step.model.clone();
+                            effective_requested_model = step.model.clone();
                             self.emit(
                                 run_id,
                                 RunEvent::Notice {
@@ -1706,7 +1717,8 @@ were doing unless he changed it."
             state: RunState {
                 messages,
                 text,
-                model: resolved_model,
+                effective_requested_model,
+                responding_model,
                 usage,
                 steps,
             },
@@ -1776,7 +1788,7 @@ were doing unless he changed it."
                     status,
                     messages_json,
                     state.text,
-                    state.model,
+                    state.effective_requested_model,
                     state.steps,
                     usage.cost_usd,
                     usage.input_tokens,
@@ -1878,7 +1890,7 @@ were doing unless he changed it."
                 })
                 .map(|c| c.bot_id);
             let extra = store::NewMessage {
-                model: Some(state.model.clone()),
+                model: Some(state.responding_model.clone()),
                 error: failure.clone(),
                 attachment_id: None,
                 // Stamped only when this bot is a GUEST in the thread - left
@@ -1944,7 +1956,7 @@ were doing unless he changed it."
             self.emit(
                 run_id,
                 RunEvent::Done {
-                    model: state.model.clone(),
+                    model: state.responding_model.clone(),
                     message_id: saved_id,
                 },
             );
@@ -2030,7 +2042,7 @@ is looking at."
                 rusqlite::params![
                     messages_json,
                     state.text,
-                    state.model,
+                    state.effective_requested_model,
                     state.steps,
                     usage.cost_usd,
                     usage.input_tokens,
