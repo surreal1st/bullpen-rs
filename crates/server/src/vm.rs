@@ -1378,6 +1378,40 @@ fn spawn_observation_frame_collection(
 /// ffmpeg.
 const THUMB_TTL_MS: i64 = 5_000;
 
+/// THUMB-01: caps for the module-level thumbnail cache below.
+///
+/// Nothing used to bound this map: an expired entry was bypassed but never
+/// removed, so a bot that is renamed, archived or retired left its last
+/// frame resident for the life of the process, and per-bot VMs mean
+/// containers come and go continuously. `COMPLETION.md` flagged "aggregate
+/// thumbnail cache and response bounds" as OPEN and required before
+/// acceptance; this is that fix, confirmed against the code at
+/// `vm.rs:1364-1470` (2026-09-18) rather than trusted from the document.
+///
+/// 64 entries is deliberately generous for a card list of per-bot VMs - the
+/// hot path (one entry per currently-viewed bot, refreshed on a 5s timer)
+/// never gets near it - while still bounding the renamed/retired-bot leak
+/// that motivated this ticket to a fixed, small number instead of "however
+/// many containers ever existed".
+pub const THUMB_CACHE_MAX_ENTRIES: usize = 64;
+
+/// 64 MiB aggregate. A single captured frame is already bounded at
+/// `MAX_FRAME_PNG_BYTES` (4 MiB) by `validate_frame`, so 64 MiB is 16 frames
+/// at that worst case - room for every entry to be an unusually
+/// hard-to-compress desktop without the cache becoming the next unbounded
+/// reservation (the S8d observation pipeline's own 128 MiB budget covers
+/// only itself, per the ticket, not this cache). In the ordinary case
+/// (compressed desktop PNGs of a few hundred KB) this cap never binds and
+/// the 64-entry cap above does the bounding instead; it exists for the
+/// adversarial case where frames are large.
+///
+/// This is also the cache's worst-case resident byte count: the eviction
+/// loop in `thumbnail()` never lets aggregate bytes exceed it after an
+/// insert, and a single frame larger than this cap is deliberately never
+/// inserted at all (see the comment at that check) so it can never be the
+/// exception that pushes the total over.
+pub const THUMB_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
+
 struct CachedThumb {
     at: i64,
     png: Vec<u8>,
@@ -1387,6 +1421,20 @@ static THUMBS: OnceLock<Mutex<HashMap<String, CachedThumb>>> = OnceLock::new();
 
 fn thumbs() -> &'static Mutex<HashMap<String, CachedThumb>> {
     THUMBS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Removes the single oldest (smallest `at`) entry, if any. Shared by the
+/// two eviction loops in `thumbnail()` below.
+fn evict_oldest_thumb(cache: &mut HashMap<String, CachedThumb>) -> bool {
+    let Some(oldest_key) = cache
+        .iter()
+        .min_by_key(|(_, entry)| entry.at)
+        .map(|(key, _)| key.clone())
+    else {
+        return false;
+    };
+    cache.remove(&oldest_key);
+    true
 }
 
 /// The real capture behind `thumbnail`'s cache, for production callers.
@@ -1450,16 +1498,44 @@ pub async fn thumbnail(
 
     let frame = capture.capture(container, cfg).await?;
     let png = frame.png;
-    thumbs()
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .insert(
-            container.to_string(),
-            CachedThumb {
-                at: now_ms,
-                png: png.clone(),
-            },
-        );
+    {
+        let mut cache = thumbs().lock().unwrap_or_else(PoisonError::into_inner);
+
+        // THUMB-01 point 1: drop every expired entry, not just the one
+        // being replaced - cheap while the lock is already held, and the
+        // only thing that keeps a retired bot's last frame from staying
+        // resident forever.
+        cache.retain(|_, entry| now_ms - entry.at < THUMB_TTL_MS);
+
+        // THUMB-01 point 3: a single frame larger than the byte cap is
+        // still returned to the caller below (never withheld - that would
+        // break the VM card for exactly the machines most worth looking
+        // at) but is deliberately NOT cached. Caching it would either blow
+        // the aggregate cap by itself (defeating the bound this ticket
+        // exists to add) or force evicting every other entry just to fit
+        // one oversized frame, trading a whole cache of hits for one. An
+        // oversized desktop just recaptures every request, same as an
+        // empty cache would - a correctness cost, not a memory one.
+        if png.len() <= THUMB_CACHE_MAX_BYTES {
+            // THUMB-01 point 2: evict oldest-by-`at` until the entry about
+            // to be inserted fits under both caps.
+            while cache.len() + 1 > THUMB_CACHE_MAX_ENTRIES
+                || cache.values().map(|entry| entry.png.len()).sum::<usize>() + png.len()
+                    > THUMB_CACHE_MAX_BYTES
+            {
+                if !evict_oldest_thumb(&mut cache) {
+                    break;
+                }
+            }
+            cache.insert(
+                container.to_string(),
+                CachedThumb {
+                    at: now_ms,
+                    png: png.clone(),
+                },
+            );
+        }
+    }
     Some(png)
 }
 
@@ -1470,6 +1546,16 @@ pub fn clear_thumbnail_cache() {
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .clear();
+}
+
+/// THUMB-01: the cache's current entry count and aggregate byte size, so a
+/// test can assert the bound directly instead of inferring it from capture
+/// call counts. Exists for tests today and as a future health readout (a
+/// `/health` or admin endpoint could report this the same way).
+pub fn thumbnail_cache_stats() -> (usize, usize) {
+    let cache = thumbs().lock().unwrap_or_else(PoisonError::into_inner);
+    let bytes = cache.values().map(|entry| entry.png.len()).sum();
+    (cache.len(), bytes)
 }
 
 #[cfg(test)]

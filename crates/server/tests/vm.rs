@@ -16,9 +16,10 @@
 use axum::http::{HeaderMap, HeaderValue};
 use server::desk::DeskConfig;
 use server::vm::{
-    CapturedFrame, DockerRun, FrameCapture, create_args, desk_for, ensure_vm, ensure_vm_in_owned,
-    hibernate_idle, hibernate_idle_in_tracked, is_png, refresh_vm, start_vm_reaper, thumbnail,
-    touch_vm, validate_frame, vm_desk,
+    CapturedFrame, DockerRun, FrameCapture, THUMB_CACHE_MAX_BYTES, THUMB_CACHE_MAX_ENTRIES,
+    create_args, desk_for, ensure_vm, ensure_vm_in_owned, hibernate_idle,
+    hibernate_idle_in_tracked, is_png, refresh_vm, start_vm_reaper, thumbnail,
+    thumbnail_cache_stats, touch_vm, validate_frame, vm_desk,
 };
 use server::vm_proxy::{
     ProxyOutcome, attach_vm_proxy, build_upgrade_request, proxy_response_headers, viewer_target,
@@ -764,6 +765,139 @@ async fn thumbnail_recaptures_once_the_ttl_expires() {
         capture.calls.lock().unwrap().len(),
         2,
         "an expired entry must be recaptured"
+    );
+}
+
+/// Records every call (by container) and returns a frame of a fixed byte
+/// size the test chooses. THUMB-01's cap/eviction tests care about
+/// `png.len()`, not a real decodable image, so this skips PNG encoding
+/// entirely (unlike `FakeFrameCapture` above, which real callers of
+/// `validate_frame` need a genuine PNG from).
+struct SizedFrameCapture {
+    calls: Mutex<Vec<String>>,
+    frame_bytes: usize,
+}
+
+impl SizedFrameCapture {
+    fn new(frame_bytes: usize) -> Self {
+        Self {
+            calls: Mutex::new(Vec::new()),
+            frame_bytes,
+        }
+    }
+
+    fn call_count_for(&self, container: &str) -> usize {
+        self.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.as_str() == container)
+            .count()
+    }
+}
+
+#[async_trait::async_trait]
+impl FrameCapture for SizedFrameCapture {
+    async fn capture(&self, container: &str, _cfg: &VmConfig) -> Option<CapturedFrame> {
+        self.calls.lock().unwrap().push(container.to_string());
+        Some(CapturedFrame {
+            png: vec![0xAB; self.frame_bytes],
+            width: 1,
+            height: 1,
+        })
+    }
+}
+
+#[tokio::test]
+async fn thumbnail_caps_entry_count_at_the_configured_bound() {
+    server::vm::clear_thumbnail_cache();
+    let cfg = test_config();
+    // 1 KiB frames: far under the byte cap, so only the entry cap can bind.
+    let capture = SizedFrameCapture::new(1_024);
+
+    for i in 0..THUMB_CACHE_MAX_ENTRIES + 5 {
+        let container = format!("bullpen-vm-count-{i}");
+        thumbnail(&container, &cfg, &capture, 1_000).await;
+    }
+
+    let (entries, _bytes) = thumbnail_cache_stats();
+    assert!(
+        entries <= THUMB_CACHE_MAX_ENTRIES,
+        "entry count {entries} exceeded the cap of {THUMB_CACHE_MAX_ENTRIES}"
+    );
+}
+
+#[tokio::test]
+async fn thumbnail_caps_aggregate_bytes_at_the_configured_bound() {
+    server::vm::clear_thumbnail_cache();
+    let cfg = test_config();
+    // 8 frames at a quarter of the byte cap each guarantee the byte cap
+    // trips (32 MiB net demand at 4x the cap) long before the 64-entry
+    // count cap would ever matter.
+    let frame_bytes = THUMB_CACHE_MAX_BYTES / 4;
+    let capture = SizedFrameCapture::new(frame_bytes);
+
+    for i in 0..8 {
+        let container = format!("bullpen-vm-bytes-{i}");
+        thumbnail(&container, &cfg, &capture, 1_000).await;
+    }
+
+    let (_entries, bytes) = thumbnail_cache_stats();
+    assert!(
+        bytes <= THUMB_CACHE_MAX_BYTES,
+        "aggregate bytes {bytes} exceeded the cap of {THUMB_CACHE_MAX_BYTES}"
+    );
+}
+
+#[tokio::test]
+async fn thumbnail_evicts_the_oldest_entry_first() {
+    server::vm::clear_thumbnail_cache();
+    let cfg = test_config();
+    let capture = SizedFrameCapture::new(1_024);
+
+    // Fill to exactly the entry cap, each with a distinct `at` so "oldest"
+    // is unambiguous: container 0 is the oldest, container cap-1 the
+    // newest.
+    for i in 0..THUMB_CACHE_MAX_ENTRIES {
+        let container = format!("bullpen-vm-evict-{i}");
+        thumbnail(&container, &cfg, &capture, 1_000 + i as i64).await;
+    }
+    assert_eq!(capture.call_count_for("bullpen-vm-evict-0"), 1);
+
+    // One more distinct container must evict the oldest entry to fit.
+    let evict_at = 1_000 + THUMB_CACHE_MAX_ENTRIES as i64;
+    thumbnail("bullpen-vm-evict-new", &cfg, &capture, evict_at).await;
+
+    // Still inside "bullpen-vm-evict-0"'s original TTL window (its `at` was
+    // 1_000, TTL is 5_000ms) - if it were still cached this would be a
+    // cache hit with zero new capture calls. It is not: it was evicted.
+    thumbnail("bullpen-vm-evict-0", &cfg, &capture, evict_at + 1).await;
+    assert_eq!(
+        capture.call_count_for("bullpen-vm-evict-0"),
+        2,
+        "the oldest entry must have been evicted, not served stale"
+    );
+}
+
+#[tokio::test]
+async fn thumbnail_sweeps_expired_entries_on_insert() {
+    server::vm::clear_thumbnail_cache();
+    let cfg = test_config();
+    let capture = SizedFrameCapture::new(1_024);
+
+    thumbnail("bullpen-vm-sweep-old", &cfg, &capture, 1_000).await;
+    let (entries_before, _bytes) = thumbnail_cache_stats();
+    assert_eq!(entries_before, 1);
+
+    // Past the 5s TTL relative to the first insert. Inserting a second,
+    // different container must sweep the first out rather than let it
+    // linger resident alongside the new one for the life of the process.
+    thumbnail("bullpen-vm-sweep-new", &cfg, &capture, 6_001).await;
+
+    let (entries_after, _bytes) = thumbnail_cache_stats();
+    assert_eq!(
+        entries_after, 1,
+        "the expired entry must be swept, not left resident alongside the new one"
     );
 }
 
