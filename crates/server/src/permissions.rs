@@ -817,6 +817,7 @@ pub fn cannot_be_remembered_as_allow(tool_name: &str) -> bool {
 /// with no spec in `tools::all_specs()` would imply coverage that does not
 /// exist. Revisit this list when any of them lands.
 const TAINT_TIGHTEN_SET: &[&str] = &[
+    "snap_desk",
     "browse",
     "read_page",
     "message_bot",

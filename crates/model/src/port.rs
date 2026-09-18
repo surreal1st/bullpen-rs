@@ -41,9 +41,17 @@ pub enum ContentPart {
     ImageUrl { image_url: ImageUrl },
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct ImageUrl {
     pub url: String,
+}
+
+impl std::fmt::Debug for ImageUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ImageUrl")
+            .field("url", &"<redacted image data>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -280,6 +288,7 @@ impl ModelPort for OpenRouterPort {
     fn stream(&self, request: ModelRequest) -> EventStream {
         let client = self.client.clone();
         let key_source = self.key_source.clone();
+        let image_request = carries_image(&request);
 
         Box::pin(async_stream::stream! {
             let mut attempts: Vec<String> = std::iter::repeat_n(request.model.clone(), BUSY_TRIES).collect();
@@ -350,7 +359,7 @@ impl ModelPort for OpenRouterPort {
                     let status = res.status().as_u16();
                     let text = res.text().await.unwrap_or_default();
                     let raw = if text.is_empty() { format!("OpenRouter returned {status}") } else { text };
-                    let message: String = redact(&raw, Some(&key)).chars().take(2000).collect();
+                    let message = provider_error(&raw, Some(&key), image_request);
                     yield ModelEvent::Error { status: Some(status), message };
                     return;
                 }
@@ -360,7 +369,13 @@ impl ModelPort for OpenRouterPort {
                 let byte_stream = res
                     .bytes_stream()
                     .map(move |r| r.map(|b| b.to_vec()).map_err(|e| redact(&e.to_string(), Some(&key_for_stream))));
-                let mut inner = parse_sse_stream(byte_stream, model, Some(key), None);
+                let mut inner = parse_sse_stream_inner(
+                    byte_stream,
+                    model,
+                    Some(key),
+                    None,
+                    image_request,
+                );
                 while let Some(event) = inner.next().await {
                     yield event;
                 }
@@ -387,7 +402,7 @@ impl ModelPort for OpenRouterPort {
                 upstream
             );
             let key_for_final = key_source.resolve();
-            let message: String = redact(&raw, key_for_final.as_deref()).chars().take(2000).collect();
+            let message = provider_error(&raw, key_for_final.as_deref(), image_request);
             yield ModelEvent::Error { status: Some(429), message };
         })
     }
@@ -443,6 +458,24 @@ pub fn parse_sse_stream(
     model: String,
     key: Option<String>,
     idle_timeout: Option<Duration>,
+) -> EventStream {
+    parse_sse_stream_inner(body, model, key, idle_timeout, false)
+}
+
+fn provider_error(raw: &str, key: Option<&str>, image_request: bool) -> String {
+    if image_request {
+        return "The model provider rejected the screen observation without exposing its payload."
+            .to_string();
+    }
+    redact(raw, key).chars().take(2000).collect()
+}
+
+fn parse_sse_stream_inner(
+    body: impl Stream<Item = Result<Vec<u8>, String>> + Send + 'static,
+    model: String,
+    key: Option<String>,
+    idle_timeout: Option<Duration>,
+    redact_image_errors: bool,
 ) -> EventStream {
     Box::pin(async_stream::stream! {
         let mut body = Box::pin(body);
@@ -517,7 +550,7 @@ pub fn parse_sse_stream(
             let chunk = match chunk {
                 Ok(c) => c,
                 Err(e) => {
-                    yield ModelEvent::Error { message: redact(&e, key.as_deref()), status: None };
+                    yield ModelEvent::Error { message: provider_error(&e, key.as_deref(), redact_image_errors), status: None };
                     return;
                 }
             };
@@ -559,7 +592,9 @@ pub fn parse_sse_stream(
                 // run that provably called the model, filed as one that
                 // never ran. Cost is the one field Bullpen must never
                 // estimate (see `build_body`'s `usage.include`), so an
-                // absent cost still records 0.0 - but it no longer takes the
+                // absent cost leaves the legacy numeric field with a 0.0
+                // placeholder - it does NOT establish that the call was free -
+                // but it no longer takes the
                 // token counts down with it, because "we do not know what it
                 // cost" and "nothing happened" are different facts and only
                 // one of them is true here.
@@ -568,7 +603,7 @@ pub fn parse_sse_stream(
                         tracing::warn!(
                             model = %resolved_model,
                             prompt_tokens = u.prompt_tokens.unwrap_or(0),
-                            "usage frame carried no cost; recording tokens with cost 0.0"
+                            "usage frame carried no cost; legacy numeric cost placeholder is 0.0 but actual cost is unknown"
                         );
                     }
                     usage = Some(ModelUsage {
@@ -579,7 +614,7 @@ pub fn parse_sse_stream(
                     });
                 }
                 if let Some(err) = &frame.error {
-                    yield ModelEvent::Error { message: redact(err.message.as_deref().unwrap_or("upstream error"), key.as_deref()), status: None };
+                    yield ModelEvent::Error { message: provider_error(err.message.as_deref().unwrap_or("upstream error"), key.as_deref(), redact_image_errors), status: None };
                     return;
                 }
 
@@ -714,5 +749,25 @@ mod tests {
     fn busy_wait_ms_prefers_the_body_over_the_header() {
         let body = r#"{"error":{"metadata":{"retry_after_seconds":4}}}"#;
         assert_eq!(busy_wait_ms(429, body, Some("1")), 4_000);
+    }
+
+    #[test]
+    fn image_request_provider_errors_never_echo_the_payload() {
+        let secret = "data:image/png;base64,TOPSECRET";
+        let message = provider_error(&format!("bad request: {secret}"), None, true);
+        assert!(!message.contains("data:image"));
+        assert!(!message.contains("TOPSECRET"));
+    }
+
+    #[test]
+    fn image_url_debug_is_metadata_only() {
+        let debug = format!(
+            "{:?}",
+            ImageUrl {
+                url: "data:image/png;base64,TOPSECRET".into()
+            }
+        );
+        assert!(!debug.contains("data:image"));
+        assert!(!debug.contains("TOPSECRET"));
     }
 }

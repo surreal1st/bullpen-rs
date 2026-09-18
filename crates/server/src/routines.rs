@@ -195,6 +195,13 @@ async fn fire_routine_tool(state: &AppState, row: &RoutineRow) -> Option<String>
         return Some(run_id);
     }
 
+    if tool_name == "snap_desk" {
+        let run_id = record_failure(
+            "Screen capture requires a following model step and cannot run as a direct tool routine.",
+        );
+        return Some(run_id);
+    }
+
     // (b) F2: `tool_args` must parse as a JSON object before it reaches
     // the toolbox - port of the TS `JSON.parse(argsText)` wrapped in
     // `fireRoutine`'s own try/catch (`routines.ts:846-864`), which records

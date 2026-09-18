@@ -328,3 +328,18 @@ async fn app_retains_the_configured_capability_catalog() {
     assert!(Arc::ptr_eq(&catalog, &state.catalog));
     // Private manager identity is covered by the app module wiring test.
 }
+
+#[test]
+fn shared_png_handle_keeps_the_retained_reservation_until_last_handle_drops() {
+    let admission = Arc::new(ObservationAdmission::new());
+    let observation = retain(&admission, "run-shared", "obs-shared", 79);
+    let png = observation.png_arc();
+    let another = png.clone();
+    drop(observation);
+    assert_eq!(png.as_ref(), &[79; 32]);
+    assert_eq!(admission.snapshot().retained_in_use, 1);
+    drop(png);
+    assert_eq!(admission.snapshot().retained_in_use, 1);
+    drop(another);
+    assert_eq!(admission.snapshot().retained_in_use, 0);
+}

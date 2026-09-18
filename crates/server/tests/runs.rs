@@ -378,13 +378,13 @@ async fn working_reports_thinking_then_tool_phrasing_then_empties_and_gates_the_
     };
     let at_start = working_touches(&kinds);
 
-    // Let turn 1 through; it asks for `list_tasks` and turn 2 stays held, so
+    // Let turn 1 through; it asks for `search_memory` and turn 2 stays held, so
     // the run sits on the tool-call activity line until released below.
     let _ = gate_tx.send(());
     let mut phrased = false;
     for _ in 0..200 {
         let seen = manager.working(&conversation_id).expect("working query");
-        if seen.first().map(|b| b.activity.as_str()) == Some("Reading its checklist") {
+        if seen.first().map(|b| b.activity.as_str()) == Some("Searching its memory") {
             phrased = true;
             break;
         }
@@ -392,7 +392,7 @@ async fn working_reports_thinking_then_tool_phrasing_then_empties_and_gates_the_
     }
     assert!(
         phrased,
-        "expected the activity line to read 'Reading its checklist'"
+        "expected the activity line to read 'Searching its memory'"
     );
 
     let after_tool = working_touches(&kinds);
@@ -466,7 +466,7 @@ async fn stop_before_first_step_fails_the_run_with_stopped_and_writes_no_message
 //    call runs to completion, but step 2 (the final answer, held behind its
 //    own gate) never starts - `take_stop` catches it at the top of the next
 //    iteration. Status failed, error "Stopped.", and (F6) still no
-//    assistant message: `list_tasks` produced a tool call but no text, so
+//    assistant message: `search_memory` produced a tool call but no text, so
 //    `state.text` is empty exactly as it is in test 5.
 //
 //    The version of this test that used to live here started `stop` before
@@ -507,7 +507,7 @@ async fn stop_between_steps_fails_the_run_with_stopped_and_writes_no_message() {
     // which is test 5 above, not this.
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     manager.stop(&run_id);
-    // Step 1 now runs: it asks for `list_tasks`, which completes (proving
+    // Step 1 now runs: it asks for `search_memory`, which completes (proving
     // `take_stop` is a per-iteration check, not a one-time guard) - step 2
     // is what the stop actually catches, and it is held behind `held_rx`,
     // never signaled here, so it must never be reached.

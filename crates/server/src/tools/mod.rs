@@ -51,6 +51,7 @@ mod remember_shared;
 mod say;
 mod search_memory;
 mod shell;
+mod snap_desk;
 
 use std::future::Future;
 use std::pin::Pin;
@@ -169,6 +170,7 @@ impl ToolOutcome {
 }
 
 type ToolFuture = Pin<Box<dyn Future<Output = ToolOutcome> + Send>>;
+pub type ObservationCapture = Arc<dyn Fn() -> ToolFuture + Send + Sync>;
 
 /// What a run offers the model: the specs it sees, one executor keyed by
 /// name. Port of the TS `ToolBox`.
@@ -257,6 +259,7 @@ pub struct BuildParams {
     /// same as before this field existed.
     pub only: Option<Vec<String>>,
     pub execution_context: RunExecutionContext,
+    pub capture_observation: ObservationCapture,
 }
 
 /// F1: the full spec list this crate's toolbox can offer, before either
@@ -315,6 +318,7 @@ fn all_specs() -> Vec<ToolSpec> {
         // never a second path to docker - see `tools::desk_act`'s own
         // module doc.
         desk_act::desk_act_spec(),
+        snap_desk::spec(),
     ]
 }
 
@@ -360,6 +364,7 @@ pub fn build(params: BuildParams) -> ToolBox {
     let vm_enabled = params.vm_enabled;
     let only = params.only;
     let execution_context = params.execution_context;
+    let capture_observation = params.capture_observation;
     let toolbox_bot_id = bot_id.clone();
     // F3: `always_on_set()` rides through any `only` narrowing whatever it
     // says (TS `app.ts:5783`) - a routine's phrasing turn narrowed to `[]`
@@ -400,7 +405,11 @@ pub fn build(params: BuildParams) -> ToolBox {
             let sandbox = Arc::clone(&sandbox);
             let vm_docker = Arc::clone(&vm_docker);
             let vm_config = Arc::clone(&vm_config);
+            let capture_observation = Arc::clone(&capture_observation);
             Box::pin(async move {
+                if name == "snap_desk" {
+                    return snap_desk::run(&args, &capture_observation).await;
+                }
                 let legacy = match name.as_str() {
                     "say" => (say::run(&db, &bot_id, &args), None),
                     "ask_josh" => (ask_josh::run(&db, &bot_id, &args, changes), None),

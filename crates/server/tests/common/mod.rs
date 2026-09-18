@@ -117,7 +117,7 @@ impl ModelPort for GatedPort {
             Box::pin(async_stream::stream! {
                 if let Some(rx) = rx { let _ = rx.await; }
                 yield ModelEvent::ToolCalls {
-                    calls: vec![ToolCall { id: "c1".to_string(), name: "list_tasks".to_string(), arguments: "{}".to_string() }],
+                    calls: vec![ToolCall { id: "c1".to_string(), name: "search_memory".to_string(), arguments: "{\"query\":\"checklist\"}".to_string() }],
                     usage: None,
                 };
             })

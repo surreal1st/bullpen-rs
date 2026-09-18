@@ -881,6 +881,37 @@ async fn permission_gate_records_a_failed_run_with_no_toolbox_call() {
 }
 
 #[tokio::test]
+async fn direct_snap_routine_fails_before_toolbox_execution() {
+    let db = open_db();
+    let session = common::seed_session(&db);
+    seed_bot(&db, "bot1", "Bot 1");
+    let now = chrono::Utc::now();
+    let id = seed_tool_routine(
+        &db,
+        "bot1",
+        "Take screenshot",
+        "Report it.",
+        "snap_desk",
+        "{}",
+        now,
+    );
+    let scripted = Arc::new(ScriptedPort::new(vec![text_script("must not run")]));
+    let port: Arc<dyn model::ModelPort> = scripted.clone();
+    let app_state = AppState::with_port(db, port);
+    let app = build_app(app_state.clone());
+
+    assert_eq!(server::routines::fire_due(&app_state, now).await.len(), 1);
+    let (_, body) = get_json(&app, &format!("/api/routines/{id}/runs"), &session).await;
+    let run = &body["runs"][0];
+    assert_eq!(run["status"], "failed");
+    assert_eq!(
+        run["error"],
+        "Screen capture requires a following model step and cannot run as a direct tool routine."
+    );
+    assert!(scripted.requests().is_empty());
+}
+
+#[tokio::test]
 async fn unknown_tool_name_fails_at_fire_time_and_pauses_after_three_ticks() {
     let db = open_db();
     let session = common::seed_session(&db);

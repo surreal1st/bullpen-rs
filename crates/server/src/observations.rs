@@ -168,19 +168,20 @@ impl RetainedFrameReservation {
         captured_at: impl Into<String>,
         desktop_generation: u64,
     ) -> ScreenObservation {
+        let CapturedFrame { png, width, height } = frame;
         ScreenObservation {
             metadata: ObservationMetadata {
                 run_id: run_id.into(),
                 bot_id: bot_id.into(),
                 observation_id: observation_id.into(),
                 captured_at: captured_at.into(),
-                width: frame.width,
-                height: frame.height,
+                width,
+                height,
                 desktop_generation,
-                encoded_bytes: frame.png.len(),
+                encoded_bytes: png.len(),
             },
             payload: Arc::new(FramePayload {
-                frame,
+                png: Arc::from(png),
                 _retained: self.retained,
             }),
         }
@@ -216,8 +217,21 @@ pub struct ScreenObservation {
 }
 
 struct FramePayload {
-    frame: CapturedFrame,
+    png: Arc<[u8]>,
     _retained: OwnedSemaphorePermit,
+}
+
+/// A shared PNG handle keeps the frame's admission reservation alive.
+/// Byte access borrows the handle, so it cannot escape its owner.
+#[derive(Clone)]
+pub struct SharedPng {
+    payload: Arc<FramePayload>,
+}
+
+impl AsRef<[u8]> for SharedPng {
+    fn as_ref(&self) -> &[u8] {
+        &self.payload.png
+    }
 }
 
 impl ScreenObservation {
@@ -226,7 +240,68 @@ impl ScreenObservation {
     }
 
     pub fn png(&self) -> &[u8] {
-        &self.payload.frame.png
+        &self.payload.png
+    }
+
+    pub fn png_arc(&self) -> SharedPng {
+        SharedPng {
+            payload: Arc::clone(&self.payload),
+        }
+    }
+}
+
+pub struct ObservationDispatch {
+    observation: Option<ScreenObservation>,
+    registry: Arc<ObservationRegistry>,
+    run_id: String,
+    completed: bool,
+    _reservation: DispatchReservation,
+}
+
+impl ObservationDispatch {
+    pub fn new(
+        observation: ScreenObservation,
+        registry: Arc<ObservationRegistry>,
+        reservation: DispatchReservation,
+    ) -> Self {
+        let run_id = observation.metadata.run_id.clone();
+        Self {
+            observation: Some(observation),
+            registry,
+            run_id,
+            completed: false,
+            _reservation: reservation,
+        }
+    }
+
+    pub fn observation(&self) -> &ScreenObservation {
+        self.observation
+            .as_ref()
+            .expect("dispatch observation consumed only during drop")
+    }
+
+    pub fn complete(mut self) {
+        self.observation.take();
+        self.completed = true;
+    }
+}
+
+impl fmt::Debug for ObservationDispatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ObservationDispatch")
+            .field("metadata", &self.observation().metadata)
+            .finish()
+    }
+}
+
+impl Drop for ObservationDispatch {
+    fn drop(&mut self) {
+        self.observation.take();
+        if self.completed {
+            self.registry.release_bytes(&self.run_id);
+        } else {
+            self.registry.release(&self.run_id);
+        }
     }
 }
 
