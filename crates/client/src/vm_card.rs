@@ -351,7 +351,14 @@ fn to_data_uri(bytes: &[u8]) -> String {
 /// but nothing in this workspace exposes it to `client` today, and adding
 /// a direct dependency for one ~20-line, directly-testable function was
 /// judged not worth it - see `## Results`'s judgment-call note.
-fn base64_encode(bytes: &[u8]) -> String {
+///
+/// `pub(crate)`: EXPORT-01 reuses this for the same reason it exists here.
+/// `thread.rs`'s export download builds a `data:text/markdown` URI off the
+/// same "authenticated fetch, hand the bytes to a declarative element"
+/// shape `to_data_uri` above already established for the desktop-401 trap,
+/// rather than a second hand-rolled encoder that would drift from this one
+/// the first time either is touched.
+pub(crate) fn base64_encode(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {

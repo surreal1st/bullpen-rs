@@ -258,6 +258,15 @@ pub fn ChatPane(
     // five now, still only one busy at a time).
     let mut avatar_busy = use_signal(|| false);
     let mut shape_busy = use_signal(|| false);
+    // EXPORT-01: the "Export" action - same direct-action, no-confirm
+    // posture, `rail_error` shared with the five above. `export_ready`
+    // holds the `data:` URI once a fetch completes; see the closure below
+    // that fills it for why this is two signals rather than one `Result`
+    // (busy and "there is a ready download" are not mutually exclusive
+    // with error - a fresh click clears `export_ready` immediately so a
+    // stale download never sits next to a new in-flight fetch).
+    let mut export_busy = use_signal(|| false);
+    let mut export_ready = use_signal(|| None::<String>);
 
     rsx! {
         div { class: "pane",
@@ -439,6 +448,47 @@ pub fn ChatPane(
                     };
                     let current_shape = current.shape.clone().unwrap_or_default();
 
+                    // EXPORT-01: fetches the bot's markdown export through
+                    // `api::export_bot_markdown` (the transport layer that
+                    // carries the desktop build's Bearer token - a bare
+                    // `<a href>` to the raw route would 401 there, see that
+                    // function's own doc) and hands the bytes to a `data:`
+                    // URI once they arrive - the same "authenticated fetch,
+                    // then a fully declarative element" split `vm_card.rs`
+                    // already uses for the thumbnail. `export_ready` holds
+                    // that URI; the `<a download>` below only appears once
+                    // it is set, and clicking it is the platform's own
+                    // save-file UI, not anything this app drives itself.
+                    // `rail_error` is shared by every control in this
+                    // header, same posture as pin/hide/move/avatar/shape
+                    // above.
+                    let export_bot_id = bot_id.clone();
+                    let export_filename = format!("{bot_id}.md");
+                    let on_export_click = move |_| {
+                        if *export_busy.read() {
+                            return;
+                        }
+                        export_busy.set(true);
+                        rail_error.set(None);
+                        export_ready.set(None);
+                        let bot_id = export_bot_id.clone();
+                        spawn(async move {
+                            match api::export_bot_markdown(&bot_id).await {
+                                Ok(bytes) => {
+                                    export_busy.set(false);
+                                    export_ready.set(Some(format!(
+                                        "data:text/markdown;charset=utf-8;base64,{}",
+                                        crate::vm_card::base64_encode(&bytes)
+                                    )));
+                                }
+                                Err(err) => {
+                                    export_busy.set(false);
+                                    rail_error.set(Some(err));
+                                }
+                            }
+                        });
+                    };
+
                     rsx! {
                         div { class: "pane-head",
                             div { class: "pane-head-who",
@@ -508,6 +558,21 @@ pub fn ChatPane(
                                     option { value: "", "Auto shape" }
                                     for (key , shape) in SHAPES.iter() {
                                         option { key: "{key}", value: "{key}", "{shape.label}" }
+                                    }
+                                }
+                                button {
+                                    class: "pane-perms-btn",
+                                    disabled: *export_busy.read(),
+                                    onclick: on_export_click,
+                                    if *export_busy.read() { "Exporting…" } else { "Export" }
+                                }
+                                if let Some(href) = export_ready.read().clone() {
+                                    a {
+                                        class: "pane-perms-btn",
+                                        href: "{href}",
+                                        download: "{export_filename}",
+                                        onclick: move |_| export_ready.set(None),
+                                        "Download .md"
                                     }
                                 }
                                 button {

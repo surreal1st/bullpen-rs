@@ -1146,6 +1146,33 @@ pub async fn set_bot_shape(bot_id: &str, shape: Option<&str>) -> Result<(), Stri
     patch_rail(bot_id, serde_json::json!({ "shape": shape })).await
 }
 
+/* --------------------------------------------------------------- EXPORT-01 */
+
+/// `GET /api/bots/:id/export` - `thread.rs`'s header "Export" action. Reads
+/// the bot's markdown export as raw bytes through this crate's own
+/// `Request`/`into_body_stream()`, the same route `fetch_vm_thumbnail`
+/// above takes for the same reason: the desktop build's session lives only
+/// in this transport layer's own Bearer header, never a browser cookie, so
+/// a bare `<a href="/api/bots/:id/export">` would carry no credential at
+/// all on desktop and 401 - the exact trap `fetch_vm_thumbnail`'s own doc
+/// names. `thread.rs` turns the returned bytes into a `data:` URI (reusing
+/// `vm_card::base64_encode`, the same encoder that trick already needed)
+/// and renders a real `<a download>` from it, so the actual save-file UI is
+/// still the platform's own, not a hand-rolled one.
+pub async fn export_bot_markdown(bot_id: &str) -> Result<Vec<u8>, String> {
+    let url = format!("/api/bots/{bot_id}/export");
+    let resp = Request::get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("{url} -> {}", resp.status()));
+    }
+    let mut stream = resp.into_body_stream();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = stream.next_chunk().await? {
+        bytes.extend(chunk);
+    }
+    Ok(bytes)
+}
+
 /* --------------------------------------------------------------- S3-05: memory */
 
 /// `GET /api/bots/:id/memory[?q=...]` - core, its token budget, and the log,

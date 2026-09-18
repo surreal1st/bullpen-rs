@@ -5,7 +5,7 @@
 
 use axum::Router;
 use axum::body::Body;
-use axum::http::Request;
+use axum::http::{HeaderMap, Request};
 use serde_json::{Value, json};
 use server::AppState;
 use std::sync::Arc;
@@ -1365,4 +1365,192 @@ async fn avatar_and_shape_apply_together_with_pinned_in_one_request() {
     assert_eq!(bot["avatar"], "🚀");
     assert_eq!(bot["shape"], known);
     assert_eq!(bot["pinned"], true);
+}
+
+/* --------------------------------------------------------------- EXPORT-01 */
+//
+// `GET /api/bots/:id/export` - the response is `text/markdown`, not JSON,
+// so this block reads the raw response directly rather than through
+// `get_route`/`patch_route` above (both of those parse every body as JSON
+// and fold a parse failure into `json!({})` - exactly the wrong thing for
+// a route whose body is deliberately not JSON).
+
+async fn export_route(app: &Router, path: &str, session: &str) -> (u16, HeaderMap, String) {
+    let request = Request::get(path)
+        .header("cookie", session)
+        .body(Body::empty())
+        .unwrap();
+
+    let response = app.clone().oneshot(request).await.unwrap();
+    let status = response.status().as_u16();
+    let headers = response.headers().clone();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8(bytes.to_vec()).expect("export body must be valid utf-8");
+    (status, headers, text)
+}
+
+/// Parses the export route's own frontmatter shape back apart - finds the
+/// `---` delimiters and JSON-decodes each value - rather than eyeballing
+/// the raw string, so a quote or an embedded newline in a value is proven
+/// to round-trip rather than just "the substring looks present". Returns
+/// the decoded key/value map and the body text after the blank line that
+/// follows the closing `---`.
+fn split_frontmatter(text: &str) -> (std::collections::HashMap<String, String>, String) {
+    let mut lines = text.lines();
+    assert_eq!(
+        lines.next(),
+        Some("---"),
+        "export must open with a --- line: {text:?}"
+    );
+    let mut map = std::collections::HashMap::new();
+    for line in &mut lines {
+        if line == "---" {
+            break;
+        }
+        let (key, value) = line
+            .split_once(": ")
+            .unwrap_or_else(|| panic!("frontmatter line must be key: value: {line:?}"));
+        let decoded: String = serde_json::from_str(value)
+            .unwrap_or_else(|e| panic!("frontmatter value must be JSON-encoded: {value:?}: {e}"));
+        map.insert(key.to_string(), decoded);
+    }
+    let rest: Vec<&str> = lines.collect();
+    // The export route always writes a blank line right after the closing
+    // `---` (the ticket's own "then a blank line, then the instructions
+    // verbatim") - `rest[0]` is that blank line, not part of the body.
+    assert_eq!(
+        rest.first(),
+        Some(&""),
+        "a blank line must separate frontmatter from instructions: {text:?}"
+    );
+    (map, rest[1..].join("\n"))
+}
+
+/// Bite: a bot with a model pin exports `name`, `description` and `model`
+/// in the frontmatter, then the instructions verbatim - and both headers
+/// this route promises (`Content-Type`, `Content-Disposition` with the
+/// filename) are present and exactly right. Covers the ticket's third
+/// mutation target (the `Content-Disposition` header dropped) directly:
+/// dropping it fails this test's header assertion, not just a vibe check.
+#[tokio::test]
+async fn export_with_a_model_pin_includes_name_description_model_then_instructions() {
+    let db = open_db();
+    db.conn()
+        .execute(
+            "INSERT INTO bots (id, name, purpose, instructions, model, created_at, permissions)
+             VALUES ('test-bot', 'Test Bot', 'helps with tests', 'Be helpful.',
+                     'anthropic/claude-sonnet-5', '2026-01-01T00:00:00Z', '{}')",
+            [],
+        )
+        .expect("seed bot with a model pin");
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let (status, headers, text) = export_route(&app, "/api/bots/test-bot/export", &session).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        headers.get("content-type").unwrap(),
+        "text/markdown; charset=utf-8"
+    );
+    assert_eq!(
+        headers.get("content-disposition").unwrap(),
+        "attachment; filename=\"test-bot.md\""
+    );
+
+    let (frontmatter, body) = split_frontmatter(&text);
+    assert_eq!(frontmatter.get("name").unwrap(), "Test Bot");
+    assert_eq!(frontmatter.get("description").unwrap(), "helps with tests");
+    assert_eq!(
+        frontmatter.get("model").unwrap(),
+        "anthropic/claude-sonnet-5"
+    );
+    assert_eq!(body, "Be helpful.");
+}
+
+/// Bite: an unpinned bot's export carries NO `model:` line at all - not an
+/// empty one, not a `null` one, absent - checked both through the parsed
+/// frontmatter map (no `model` key) and directly against the raw text (no
+/// line starting `model:`), so a route that emitted `model: null` would
+/// fail this even if `split_frontmatter` were ever loosened to tolerate a
+/// null value. Covers the ticket's first mutation target (the `model` line
+/// emitted unconditionally).
+#[tokio::test]
+async fn export_with_no_model_pin_has_no_model_line_at_all() {
+    let db = open_db();
+    seed_bot(&db, "unpinned-bot", "Unpinned Bot");
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let (status, _headers, text) =
+        export_route(&app, "/api/bots/unpinned-bot/export", &session).await;
+    assert_eq!(status, 200);
+
+    let (frontmatter, _body) = split_frontmatter(&text);
+    assert!(
+        !frontmatter.contains_key("model"),
+        "an unpinned bot's frontmatter must carry no model key at all: {text:?}"
+    );
+    assert!(
+        !text.lines().any(|l| l.starts_with("model:")),
+        "raw text must not contain a model: line either: {text:?}"
+    );
+}
+
+/// Bite: a name AND a purpose containing both a quote and an embedded
+/// newline round-trip correctly through the JSON-encoded frontmatter -
+/// parsed back out by `split_frontmatter`'s real JSON decode, not eyeballed.
+/// Covers the ticket's second mutation target (the JSON encoding of values
+/// dropped, so a quote breaks the frontmatter): dropping the encoding would
+/// either panic `split_frontmatter`'s `serde_json::from_str` or, if the
+/// dropped quote itself corrupts the `---` structure, fail the very first
+/// `assert_eq!(lines.next(), Some("---"))` check.
+#[tokio::test]
+async fn a_name_and_purpose_with_a_quote_and_a_newline_round_trip_through_the_frontmatter() {
+    let db = open_db();
+    let tricky_name = "Weird \"Bot\"\nName";
+    let tricky_purpose = "a \"purpose\"\nwith an embedded line";
+    db.conn()
+        .execute(
+            "INSERT INTO bots (id, name, purpose, instructions, model, created_at, permissions)
+             VALUES ('tricky-bot', ?1, ?2, 'instructions here', NULL, '2026-01-01T00:00:00Z', '{}')",
+            rusqlite::params![tricky_name, tricky_purpose],
+        )
+        .expect("seed tricky bot");
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let (status, _headers, text) =
+        export_route(&app, "/api/bots/tricky-bot/export", &session).await;
+    assert_eq!(status, 200);
+
+    let (frontmatter, body) = split_frontmatter(&text);
+    assert_eq!(frontmatter.get("name").unwrap(), tricky_name);
+    assert_eq!(frontmatter.get("description").unwrap(), tricky_purpose);
+    assert_eq!(body, "instructions here");
+}
+
+/// Bite: an unknown bot id is 404 JSON (`{"error": "no such bot"}`), not a
+/// markdown body - the same shape every other route in this file answers
+/// an unknown id with, so a client's generic error handling still works
+/// for this one non-JSON-on-success route.
+#[tokio::test]
+async fn export_unknown_id_is_404_json_not_markdown() {
+    let db = open_db();
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let (status, headers, text) =
+        export_route(&app, "/api/bots/does-not-exist/export", &session).await;
+    assert_eq!(status, 404);
+    assert!(
+        headers
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.starts_with("application/json")),
+        "a 404 must be JSON, not markdown: {headers:?}"
+    );
+    let parsed: Value = serde_json::from_str(&text).expect("404 body must be JSON");
+    assert_eq!(parsed["error"], "no such bot");
 }

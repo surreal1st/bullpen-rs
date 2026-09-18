@@ -65,9 +65,28 @@
 //! `store::set_avatar`/`store::set_shape`, not here - this handler only
 //! decides "did the client send a string to set, or anything else to
 //! clear."
+//!
+//! EXPORT-01 adds `GET /api/bots/:id/export` (port of `app.ts:1254-1278`),
+//! the first route in this crate whose success body is not JSON: `text/
+//! markdown`, with a `Content-Disposition` filename so a plain browser
+//! fetch offers a save-as. Checked, not assumed, that this survives the
+//! session gate: `auth::require_session` (wired over every `/api/*` route
+//! in `lib.rs::build_app`) only ever inspects the incoming `Request` (a
+//! header/cookie check) and returns `next.run(req).await` untouched on
+//! success - it never re-wraps, re-encodes, or content-type-sniffs the
+//! handler's own `Response`, so a non-JSON body here rides through exactly
+//! as this handler builds it. The id embedded in the filename is the bot's
+//! own row id, always a `slug_for`/`slug_base` output (`store/src/
+//! bots.rs`) - that alphabet is `[a-z0-9-]` only (every other character
+//! collapsed to a single `-`, leading/trailing `-` trimmed, capped at 40
+//! chars), so it is already safe inside a filename and inside a `Content-
+//! Disposition` header value with no escaping needed, unlike `name`/
+//! `description`/the instructions body, which is why only those three are
+//! JSON-encoded per the ticket's contract.
 
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
+use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
@@ -85,6 +104,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/bots/{id}", patch(patch_bot))
         .route("/api/bots/{id}/archive", post(archive_bot))
         .route("/api/bots/{id}/rail", patch(patch_rail))
+        .route("/api/bots/{id}/export", get(export_bot))
 }
 
 /// F7b-01: `POST /api/bots`. The body is read as a raw JSON object, same
@@ -288,6 +308,59 @@ async fn archive_bot(
         Some(bot) => Ok(Json(json!({ "bot": bot })).into_response()),
         None => Ok(no_such_bot()),
     }
+}
+
+/// EXPORT-01: `GET /api/bots/:id/export` - port of `app.ts:1254-1278`.
+/// Renders a bot as open-format markdown: `---`-delimited frontmatter
+/// (`name`, `description` always; `model` only when `bot.model` is
+/// `Some`, so an unpinned bot's file never grows a `model:` line claiming
+/// a pin it does not have), each value run through `serde_json::to_string`,
+/// which gives the same escaping `JSON.stringify` gives the TS route, so a
+/// quote or an embedded newline in a name cannot break the frontmatter's
+/// own `---` delimiters. Then a blank line, then `bot.instructions`
+/// verbatim (never JSON-encoded - it is the body of the file, not a
+/// frontmatter value).
+///
+/// See this file's top doc comment for why the body can safely be
+/// `text/markdown` rather than JSON (the session gate never touches a
+/// handler's response) and why `bot.id` needs no escaping in the
+/// `Content-Disposition` filename.
+async fn export_bot(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, crate::AppError> {
+    let db = state.db();
+    let Some(bot) = store::get_bot(&db, &id)? else {
+        return Ok(no_such_bot());
+    };
+
+    let mut markdown = String::from("---\n");
+    markdown.push_str(&format!("name: {}\n", serde_json::to_string(&bot.name)?));
+    markdown.push_str(&format!(
+        "description: {}\n",
+        serde_json::to_string(&bot.purpose)?
+    ));
+    if let Some(model) = &bot.model {
+        markdown.push_str(&format!("model: {}\n", serde_json::to_string(model)?));
+    }
+    markdown.push_str("---\n\n");
+    markdown.push_str(&bot.instructions);
+
+    let mut response = (StatusCode::OK, markdown).into_response();
+    response.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("text/markdown; charset=utf-8"),
+    );
+    // `bot.id` is always a `slug_for`/`slug_base` output - `[a-z0-9-]`
+    // only, see this file's top doc comment - so this can never fail; the
+    // `expect` documents that invariant instead of silently swallowing a
+    // header this route promises the client.
+    response.headers_mut().insert(
+        CONTENT_DISPOSITION,
+        HeaderValue::from_str(&format!("attachment; filename=\"{}.md\"", bot.id))
+            .expect("a slug-shaped bot id is always a valid header value"),
+    );
+    Ok(response)
 }
 
 /// ARCH-01: `GET /api/bots/archived` - the archived-bot listing an
