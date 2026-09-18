@@ -1,0 +1,418 @@
+# bullpen-rs
+
+**A self-hosted AI agent platform Josh runs on his own hardware, because the
+work it does involves client, employer and financial data he will not put into
+Grok Bot or Cursor.**
+
+Written 2026-09-18. Every number in the "Current state" section was measured,
+not recalled. If you are an agent picking this up cold, read this file, then
+`.scratch/bullpen-rs/HANDOFF.md` for the live cursor, and nothing else until
+you need it.
+
+---
+
+## 1. What it is
+
+A roster of named bots. You talk to one in a thread, or put several in a room
+and they take turns. Each bot has its own persistent Linux machine with a
+browser, its own memory, its own permissions, and its own model.
+
+The thing that makes it worth building rather than buying: **every model call
+goes through Josh's own OpenRouter key, under controls he sets** — per-bot
+model pins, an escalation ladder a bot climbs when it is out of its depth, a
+routing classifier that picks a cheap model for cheap work, a hard cheap floor
+for anything running unattended, spend ceilings, and a permission set that
+automatically tightens when he is not watching.
+
+It is a full Rust rewrite of an earlier TypeScript product ("Bullpen", still
+live and untouched). The rewrite target was set by Josh on 2026-09-14:
+
+> *"I'm not satisfied with Bullpen. Grok Bot fits all of my needs except for
+> the model controls. I believe you can get this done."*
+
+So the goal is **Grok Bot's shape with Bullpen's model controls** — not
+"Bullpen again in Rust". Where the two products differ, Grok Bot's behaviour
+wins, unless the difference *is* a model control, in which case Bullpen's
+wins and ports exactly, tests and all.
+
+---
+
+## 2. Current state (measured 2026-09-18)
+
+| | |
+|---|---|
+| HEAD | `241c750` on `main`, tree clean |
+| Live at | `https://meridian.tail74afb5.ts.net:8452` |
+| Gate | 76 suites, **1064 tests**, exit 0 |
+| Code | **90,703 lines of Rust** across 5 crates, 220 commits since 2026-09-14 |
+| Deployed | meridian, `bullpen-rs.service` on :4380, binary hash-verified on both ends |
+| Tools | 23 registered |
+| API | 63 routes |
+| Schema | 20 migrations, byte-compatible with the TS product's `bullpen.db` |
+
+Crate sizes: `server` 56,467 · `client` 21,817 · `store` 8,236 ·
+`model` 3,207 · `shared` 976.
+
+**It runs on a copy of the live database, beside the live TS product, and Josh
+uses it.** It has not replaced anything yet.
+
+### What works end to end
+
+- Threads, rooms (up to 6 bots), the round engine, SSE streaming.
+- The full model-control pillar (section 4).
+- Memory: profile/log/note tiers, project memory, bot-writable shared memory,
+  `search_memory`.
+- Auto Review — a second cheap model judges risky calls before they run.
+- Routines, goals, schedules, Slack.
+- Per-bot VMs: a real Linux desktop per bot, hibernated when idle, woken on
+  demand, viewable in the app.
+- **Computer use, including past the browser** — see section 5.
+
+---
+
+## 3. Architecture
+
+```
+crates/
+  shared/   types both halves use — phrasing, faces, mentions
+  model/    OpenRouter port, ladder, routing, floors, spend.  THE PILLAR
+  store/    rusqlite schema + queries.  No HTTP, no model calls
+  server/   axum app, run manager, tools, prompt, permissions, scheduler
+  client/   Dioxus app (web + desktop + mobile targets)
+```
+
+**Stack:** Axum 0.8 + tokio, rusqlite (bundled), Dioxus 0.7 (webview desktop),
+reqwest streaming to OpenRouter with a hand-rolled SSE parser, Docker for
+sandboxes and per-bot VMs, edition 2024.
+
+**The test seam is `build_app(state) -> Router`.** Every integration test
+drives the real HTTP API through it, never internals. 54 test files under
+`crates/server/tests/`.
+
+**Database.** The same SQLite file and schema as the TS product, so a cutover
+is a file copy. Migrations 1..16 are byte-for-byte equivalent; new work adds
+17+. Do not renumber, do not "tidy" the old ones.
+
+**Client.** One Dioxus codebase for desktop (webview), web (wasm), and mobile.
+The desktop build signs in Rust-side and carries a Bearer token on every
+request — it has no session cookie, which is a trap worth knowing (section 7).
+
+---
+
+## 4. The pillar: model controls
+
+This is the part that must never regress. It is the entire reason the product
+exists rather than being replaced by something off the shelf.
+
+- **Per-bot pins** — a bot can be pinned to a specific model.
+- **The ladder** — a bot that is out of its depth calls `escalate` and climbs
+  cheap → mid → premium. It cannot climb past the top rung.
+- **Routing classifier** — picks a cheap model for cheap work, with a log and
+  a settings panel.
+- **Floors** — `modelForRun` enforces a hard cheap floor for unattended runs,
+  regardless of what anything else asked for.
+- **Spend ceilings** — checked against the account's real OpenRouter balance,
+  not a local guess.
+- **`TIGHTEN`** — the permission set narrows automatically when a run is
+  unattended. A tool that is `Allow` while Josh is watching a chat becomes
+  `Ask` when nobody is.
+
+`TIGHTEN` is the key idea and it recurs: **the approval that means something is
+the unattended one.** An approval prompt in front of every keystroke is not a
+decision Josh is making, it is a prompt he clears to get the thing he already
+asked for.
+
+---
+
+## 5. Computer use, and what it can and cannot do
+
+A bot drives its **own** VM. Never a shared one — that boundary is the point,
+because one bot running an errand on a machine holding every other bot's
+cookies is exactly the failure this design exists to prevent.
+
+**Two layers, and the difference matters:**
+
+| Layer | Tools | Reaches |
+|---|---|---|
+| Browser, via Chrome DevTools | `browse`, `read_page`, `click`, `type_text` | only what Chromium can see, by reading the page |
+| The whole screen, via `xdotool` | `desk_act` | any window at all — a terminal, a file manager, a native dialog |
+| The machine, via a shell | `desk_shell` | the container's filesystem and network |
+
+**`desk_act` is half-blind, on purpose, and its spec text says so.** Its
+keyboard actions (`key`, `type`, `wait`) work today — proven on a real VM: a
+bot pressed `ctrl+l`, typed `example.com`, and the page navigated
+(`shots/s8c-03-desk-act-typed-example-com.png`). Its **mouse** actions
+(`click`, `move`, `drag`, `scroll`) take pixel coordinates that **nothing can
+currently read**, because no bot can see its own screen. Section 9 is the spec
+for fixing that.
+
+**Security properties that hold this together.** If you touch this area, these
+are the ones to not break:
+
+1. **Typed text goes over stdin, never into a command string.** The text
+   reaches `bash -lc` inside the container; interpolating it would make every
+   character a bot types a shell command. `xdotool type --file -` with the text
+   piped.
+2. **`keys` is interpolated, and is safe only because its pattern is anchored
+   at both ends.** Rust's `Regex::is_match` is a *search*, not a full match —
+   an unanchored port silently accepts `a; rm -rf /`. This is tested by
+   mutation; the unanchored version demonstrably builds
+   `bash -lc "DISPLAY=:1 xdotool key a; touch /tmp/pwned"`.
+3. **Every URL is re-validated on every hop**, including after redirects. An
+   earlier version fenced only the first hop, so a 302 to a link-local address
+   walked straight through.
+4. **Every tool result that carries machine- or web-derived text is fenced** as
+   data before it reaches a prompt (`fence_tool_output`). A page that says
+   "ignore your previous instructions" is a finding to report, never a command
+   to run. Server-generated text (refusals, numbered prefixes) stays unfenced,
+   deliberately.
+5. **Secrets never reach a `Debug` impl.** PEM keys once printed through one.
+
+---
+
+## 6. The build spec
+
+### Prerequisites
+
+- Rust (rustup), edition 2024 toolchain — see `rust-toolchain.toml`.
+- `zig` (via winget) for cross-compilation.
+- Target `x86_64-unknown-linux-musl` (`ship.sh` adds it if missing).
+- Node, for the screenshot and smoke scripts.
+- The OpenRouter key at `C:\Users\rain\.bullpen\openrouter.key`. Never on a
+  command line, never in a workspace file.
+
+### The gate — this is what "done" means
+
+```bash
+bash scripts/gate.sh          # run from a CLEAN worktree
+echo "GATE EXIT=$?"           # the EXIT CODE is the verdict
+```
+
+It runs, in order: `cargo fmt --all --check`, `cargo clippy --all-targets
+--all-features -- -D warnings`, `cargo test --all-features --no-fail-fast`,
+`cargo build --release -p server`, and `cargo check -p client --target
+wasm32-unknown-unknown` (default features — `default = ["web"]` *is* the
+browser configuration; turning desktop and mobile on under wasm32 would check a
+target that does not exist).
+
+Three things about it that were each learned the hard way and are written into
+the script's own comments:
+
+- `--no-fail-fast`, because one red suite used to hide every suite after it.
+- The **release** build is in the gate, because `main.rs` has real
+  `#[cfg(debug_assertions)]` behaviour — debug and release are genuinely
+  different programs, and a release-only compile error would otherwise pass the
+  gate and fail the deploy.
+- The **wasm** check is in the gate, because every other line runs on the
+  native host and nothing used to compile the browser client at all.
+
+🔴 **Never pipe the gate through `grep`/`tail`/`head`.** The pipeline's exit
+status replaces the gate's, so a red suite reports success. Redirect to a file
+and grep the file afterwards.
+
+### Shipping
+
+```bash
+bash scripts/ship.sh
+# then, on meridian, as printed by the script:
+sudo bash /home/rainmade/bullpen-rs-incoming/<timestamp>/install.sh
+```
+
+**The build happens on the workstation; meridian only runs what it is handed.**
+An uncapped build on that box once saturated it and took every service down.
+The transfer is sha256-verified on both ends, because a silent transcode has
+corrupted a file move between these two machines before and a copy command's
+exit code would not have caught it.
+
+After installing, verify the running service *is* your commit by hash, not by
+assumption:
+
+```bash
+ssh meridian "sudo sha256sum /home/bullpen/bullpen-rs/bullpen"
+# compare against the "Binary SHA256:" line ship.sh printed
+```
+
+### Configuration
+
+Set in `deploy/bullpen-rs.service`. Two that matter most:
+
+- `BULLPEN_VM=on` — **this is what makes computer use exist.** It defaults OFF,
+  and with it unset every desk tool refuses with "Per-bot machines are off
+  here" while the gate stays green, because nothing in the test suite reads the
+  real env var.
+- `RUST_LOG=info,server=debug,model=debug,bullpen=debug` — without it the
+  server is completely silent, because `tracing` emits nothing by default. A
+  server that discards its own evidence cannot be diagnosed, only guessed at.
+
+🔴 `systemctl show -p Environment` does **not** list `EnvironmentFile`
+contents. To see what a running service actually has, read
+`/proc/<MainPID>/environ` — and print variable **names** only, never values.
+
+---
+
+## 7. Rules that bind every agent working here
+
+These are not style preferences. Each one is a scar.
+
+- **Never build on meridian.** Cross-compile here, ship the binary.
+- **Never touch live Bullpen** — `bullpen.service`, port :4360. It is a
+  different, running product. bullpen-rs is :4380.
+- **Run git only from `projects/bullpen-rs`, never from the gate worktree at
+  `projects/bullpen-rs-gate`.** A commit there lands on a detached HEAD. This
+  has eaten a commit twice.
+- **Never `git add -A`, never a bare `git commit`.** Builders share one working
+  tree, so either sweeps in whatever another builder has staged. Name every
+  file: `git commit -m "..." -- <file> <file>`.
+- **No recursive deletes under `d:\rainmade`.** It is not backed up and Git
+  Bash deletes skip the Recycle Bin.
+- **No secrets on command lines or in workspace files.**
+- **Prove every test bites.** Break what it guards, watch it go red, restore,
+  confirm the restore is byte-identical, watch it go green. A mutation that
+  stays green is a defective test until proven otherwise — five out of five
+  were.
+- **Restore mutations in BINARY mode.** Python's text mode on Windows rewrites
+  every line ending; the result is an empty `git diff` against a dirty
+  `git status`. Check `git status --porcelain` after every restore.
+- **`bullpen-desk` is live Bullpen's machine, not an orphan.** It binds
+  :9223/:6101, which are exactly `desk::desk_config`'s hardcoded defaults, and
+  the overriding env vars are unset on the box. Never let new code reach
+  `desk_config(env)` — a per-bot `DeskConfig` comes from
+  `vm::vm_desk(&row, &cfg)`, only.
+- **`.scratch/bullpen-rs/tickets/DEFERRED.md` rots by the day.** Ten entries
+  were stale on 09-17; four more went stale within the next twenty hours. Read
+  the code before believing anything in it.
+
+### Verification posture
+
+- **"(done)", "exit 0" and "healthy" prove nothing.** `desk_act` returns
+  `1. (done)` whether or not `xdotool` did anything. A check that shares its
+  target's blind spot returns green and certifies the bug.
+- **A green gate cannot prove a log line appears.** Instrumentation once
+  shipped that never fired; only reading the journal caught it.
+- **Verify from a different angle than the implementation.** For anything
+  touching a screen, that means taking a screenshot and opening it.
+- **Check which function is actually dispatched before writing a ticket.** Two
+  tickets in one session named code that did not do what they claimed; both
+  builders caught it. Read the code, not the last handoff's summary of it.
+
+---
+
+## 8. What is NOT built
+
+Honest inventory against the TS product, which has **229 routes, 63 bot tools
+and 52 tables**. bullpen-rs has 63 routes and 23 tools. The gap is real and
+mostly deliberate — slices land vertically, in order.
+
+**Built:** tracer bullet, rooms, model controls, memory, auto review, routines
+and goals, sandbox/desk/VMs/workers/egress, computer use (in progress),
+desktop client.
+
+**Not started:**
+
+| Slice | What |
+|---|---|
+| S7 | Connectors — MCP gateway + OAuth 2.1, tokens never on the VM |
+| S9 | Jobs, repo tools + PR, spawn_helper, second Docker host |
+| S10 | Skills, marketplace, templates, duplicate bot, `hire_bot` |
+| S11 | People and channels — users/roles/invites, Telegram, Teams, push |
+| S12 | Media and money — deliverables, imagegen, transcribe, voice, video, purchasing, databases |
+| S13 | Mobile (iOS via Dioxus, with push). Desktop is done |
+| S14 | Cutover — parity checklist signed, `rainmade.io/bullpen/` repointed |
+
+---
+
+## 9. The spec for the next work
+
+### 9a. "A bot sees its own screen" — DESIGN PASS FIRST, not a ticket
+
+**Decided by Josh, 2026-09-17:** a bot should get its own screenshot back.
+Video stays out for now.
+
+**This is the single highest-value piece of unbuilt work**, because it converts
+`desk_act` from half-blind to the full computer-use surface. Every mouse action
+is waiting on it.
+
+**Why it is a design pass and not a port.** The model port has
+`ContentPart::ImageUrl` and `MessageContent::Parts`, but **nothing in
+`crates/server` has ever constructed a `Parts` message.** There is no image
+path to a model at all today. So the real question has no obvious answer:
+
+- Does the screenshot come back as the **tool result**? Tool messages are
+  text-only in the OpenAI/OpenRouter shape, and support for an image there is
+  not universal.
+- Or as a **following user message** carrying an image part, which is how most
+  computer-use loops do it, at the cost of a synthetic turn in the transcript?
+- Which models in the roster actually accept an image, and what happens to the
+  ones that do not? (`model/src/port.rs:238-240` already detects that a message
+  carries an image — start there.)
+- What does it cost per screenshot, and does the cheap floor still hold for an
+  unattended run that is taking pictures in a loop?
+
+**Do not ship `snap_desk` first.** The rejected shortcut, recorded so nobody
+re-proposes it: writing a PNG into the VM and telling the model to open it with
+`review_media` points the model at a tool that is a permission row with **no
+implementation**, and leaves the file unviewable in the VM's own filesystem.
+That is why the tool was held back rather than ported.
+
+**What exists to build on:** `vm::capture_frame` already produces PNG bytes and
+already serves them to the app at `/api/bots/{id}/vm/thumbnail.png`, with a 5s
+server-side cache. The capture half is solved; the "how does a model receive
+it" half is the design.
+
+**Deliverable:** a design doc in `.scratch/bullpen-rs/designs/`, reviewed before
+any ticket is written. Precedent for why: S15 skipped this and collected five
+independent BLOCKER verdicts.
+
+### 9b. `tool_choice`, with a per-model capability flag
+
+**Decided by Josh, 2026-09-17.** Insurance, not a blocker — computer use works
+without it.
+
+Measured behaviour, which is the whole reason it needs a flag:
+
+| Model | `tool_choice: required` |
+|---|---|
+| `gemini-3.8-flash` | obeys — called a tool it had ignored on an adversarial prompt |
+| `qwen3.8-flash` | HTTP 400 |
+| `gpt-oss-120b` | ignores the force |
+
+So it cannot be a global setting. It needs a per-model capability flag, a
+caller that wants it, and a fallback path for the models that 400.
+
+### 9c. Smaller open items
+
+- **S8b-F1 — ~9% of chat runs finish with no text.** Cause unknown. Instrumented
+  but **not fixed**. Look for `model stream produced no text and no tool call`
+  in `journalctl -u bullpen-rs`. Re-checked 2026-09-18: zero occurrences and 23
+  of 23 streams completed, but those are tool-call runs, not the chat mix the
+  9% was measured on. **Not recurred is not fixed.**
+- **`message_bot`'s `ModelEvent::Error` branch is unfenced.** Probably correct —
+  that text is the model port's error surface, not a bot's answer — but nobody
+  has decided it deliberately.
+- **`vm.rs:183` interpolates a raw `bot_id`** into a volume name while
+  `sandbox.rs:86 volume_for` sanitizes. Hygiene, not a vulnerability: there is
+  no bot-creation route (`routes/bots.rs` is PATCH-only) and every real id is a
+  server-assigned lowercase slug.
+
+---
+
+## 10. Where things live
+
+| | |
+|---|---|
+| Repo | `d:\rainmade\projects\bullpen-rs` |
+| Gate worktree | `d:\rainmade\projects\bullpen-rs-gate` (never run git here) |
+| Live cursor | `.scratch/bullpen-rs/HANDOFF.md` — read the top block first |
+| Plan | `.scratch/bullpen-rs/PLAN.md` — slices, rationale |
+| Parity checklist | `.scratch/bullpen-rs/INVENTORY.md` |
+| Tickets | `.scratch/bullpen-rs/tickets/` |
+| Deferred findings | `.scratch/bullpen-rs/tickets/DEFERRED.md` — rots by the day |
+| Designs | `.scratch/bullpen-rs/designs/` |
+| Screenshots | `shots/` (gitignored) |
+| TS original | `projects/bullpen-night` — read-only reference, LIVE product, never edit |
+
+**Working method.** Tickets are written by an orchestrator and built one
+builder at a time — every new tool touches `tools/mod.rs`, so parallel builders
+deadlock on the pre-commit hook. The orchestrator re-runs every bite by hand
+and runs the gate itself; a pasted red from a builder is not evidence. Each
+slice ends in something Josh can open.
