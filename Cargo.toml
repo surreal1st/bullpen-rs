@@ -77,6 +77,22 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # resolved.
 tokio-tungstenite = "0.28"
 
+# Tests and dev builds run UNOPTIMISED, and scrypt at N=2^15 costs seconds
+# per hash there instead of the ~100ms it costs in release. Measured: one
+# auth test that hashes twice took 5.92s, and tests/auth.rs as a whole took
+# 33s of the gate's 183s of test time - about 18% of it, for one file.
+#
+# Optimising ONLY this dependency leaves the production parameters and
+# every assertion exactly as they are. The alternative - cheapening the
+# scrypt parameters in test fixtures - would make the tests stop exercising
+# the hashing Bullpen actually ships, which is the wrong thing to trade for
+# 30 seconds.
+[profile.dev.package.scrypt]
+opt-level = 3
+
+[profile.test.package.scrypt]
+opt-level = 3
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
