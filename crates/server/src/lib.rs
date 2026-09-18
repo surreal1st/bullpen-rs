@@ -120,6 +120,8 @@ pub struct AppState {
     /// read once at construction, same convention `sandbox`'s `BULLPEN_SANDBOX`
     /// check already uses.
     pub vm_enabled: bool,
+    pub desktop_states: Arc<observations::DesktopStateRegistry>,
+    pub observations: Arc<observations::ObservationRegistry>,
 }
 
 impl AppState {
@@ -373,6 +375,8 @@ impl AppState {
             tracing::error!("failed to ensure desk_windows table exists: {err}");
         }
         let db = Arc::new(Mutex::new(db));
+        let desktop_states = Arc::new(observations::DesktopStateRegistry::new());
+        let observations = Arc::new(observations::ObservationRegistry::new());
         // S6L-02: threaded through so a `with_sandbox` test double (or a
         // real `on` server) actually reaches `shell`/`sandbox_read` - without
         // this, `AppState.sandbox` was stored but never read, and
@@ -384,7 +388,7 @@ impl AppState {
         // through here rather than left to its own `BULLPEN_SANDBOX`
         // default. Cloned rather than moved: `vm_docker`/`vm_config` are
         // still needed below, for `AppState`'s own fields.
-        let runs = Arc::new(runs::RunManager::with_sandbox_vm_and_catalog(
+        let runs = Arc::new(runs::RunManager::with_shared_desktop_state(
             Arc::clone(&db),
             port,
             Arc::clone(&sandbox),
@@ -392,6 +396,8 @@ impl AppState {
             Arc::clone(&vm_config),
             vm_enabled,
             Arc::clone(&catalog),
+            Arc::clone(&observations),
+            Arc::clone(&desktop_states),
         ));
         let room_engine = rooms::RoomEngine::install(Arc::clone(&db), Arc::clone(&runs));
 
@@ -417,6 +423,8 @@ impl AppState {
             vm_docker,
             vm_config,
             vm_enabled,
+            desktop_states,
+            observations,
         };
 
         // S5b-04b: chains `settle_goal_run` onto `on_run_done` ADDITIVELY,
@@ -712,5 +720,50 @@ mod screen_catalog_tests {
             Arc::new(model::FixtureCatalog::from_json("[]").unwrap());
         let state = AppState::with_catalog(Db::open(":memory:").unwrap(), Arc::clone(&catalog));
         assert!(Arc::ptr_eq(&catalog, &state.runs.catalog()));
+    }
+
+    #[tokio::test]
+    async fn app_desktop_mutation_invalidates_a_run_owned_observation() {
+        let state = AppState::with_catalog(
+            Db::open(":memory:").unwrap(),
+            Arc::new(model::FixtureCatalog::from_json("[]").unwrap()),
+        );
+        let admission = Arc::new(observations::ObservationAdmission::new());
+        let observation = admission.try_begin_capture().unwrap().retain(
+            vm::CapturedFrame {
+                png: vec![1],
+                width: 1,
+                height: 1,
+            },
+            "shared-run",
+            "shared-bot",
+            "shared-observation",
+            "2026-09-18T00:00:00Z",
+            0,
+        );
+        state.runs.observation_registry().store(&observation);
+        let desktop = state.desktop_states.for_bot("shared-bot");
+        let mut guard = desktop.lock().await;
+        state
+            .observations
+            .record_desktop_mutation("shared-bot", &mut guard);
+        drop(guard);
+        assert!(
+            state
+                .runs
+                .observation_registry()
+                .metadata("shared-run")
+                .is_none()
+        );
+        assert_eq!(
+            state
+                .runs
+                .desktop_state_registry()
+                .for_bot("shared-bot")
+                .lock()
+                .await
+                .generation(),
+            1
+        );
     }
 }

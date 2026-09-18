@@ -191,10 +191,21 @@ async fn post_hibernate(State(state): State<AppState>) -> Response {
         )
             .into_response();
     }
-    let db = state.db_handle();
-    match vm::hibernate_idle_in(&db, state.vm_docker.clone(), &state.vm_config).await {
+    match vm::hibernate_idle_in_tracked(
+        state.db_handle(),
+        state.vm_docker.clone(),
+        state.vm_config.clone(),
+        state.desktop_states.clone(),
+        state.observations.clone(),
+    )
+    .await
+    {
         Ok(stopped) => Json(json!({ "stopped": stopped })).into_response(),
-        Err(e) => crate::AppError::from(e).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e })),
+        )
+            .into_response(),
     }
 }
 
@@ -214,10 +225,21 @@ async fn get_status(State(state): State<AppState>, Path(bot_id): Path<String>) -
             if !state.vm_enabled {
                 return Json(vm_view_json(None, false, "")).into_response();
             }
-            let db = state.db_handle();
-            match vm::refresh_vm_in(&db, state.vm_docker.clone(), &bot_id).await {
+            match vm::refresh_vm_in_tracked(
+                state.db_handle(),
+                state.vm_docker.clone(),
+                bot_id,
+                state.desktop_states.clone(),
+                state.observations.clone(),
+            )
+            .await
+            {
                 Ok(vm) => Json(vm_view_json(vm.as_ref(), true, "")).into_response(),
-                Err(e) => crate::AppError::from(e).into_response(),
+                Err(e) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": e })),
+                )
+                    .into_response(),
             }
         }
     }
@@ -281,10 +303,23 @@ async fn get_desk_status(State(state): State<AppState>, Path(bot_id): Path<Strin
         return Json(json!({ "ok": false, "detail": OFF_DETAIL })).into_response();
     }
 
-    let db = state.db_handle();
-    let vm = match vm::refresh_vm_in(&db, state.vm_docker.clone(), &bot_id).await {
+    let vm = match vm::refresh_vm_in_tracked(
+        state.db_handle(),
+        state.vm_docker.clone(),
+        bot_id.clone(),
+        state.desktop_states.clone(),
+        state.observations.clone(),
+    )
+    .await
+    {
         Ok(vm) => vm,
-        Err(e) => return crate::AppError::from(e).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e })),
+            )
+                .into_response();
+        }
     };
 
     // Only a settled `running` row is probed. Everything else - no row,
@@ -323,18 +358,25 @@ async fn post_ensure(State(state): State<AppState>, Path(bot_id): Path<String>) 
         )
             .into_response();
     }
-    let db = state.db_handle();
-    let outcome = match vm::ensure_vm_in(
-        &db,
+    let outcome = match vm::ensure_vm_in_owned(
+        state.db_handle(),
         state.vm_docker.clone(),
-        &bot_id,
-        &bot.name,
-        &state.vm_config,
+        bot_id,
+        bot.name,
+        state.vm_config.clone(),
+        state.desktop_states.clone(),
+        state.observations.clone(),
     )
     .await
     {
-        Ok(o) => o,
-        Err(e) => return crate::AppError::from(e).into_response(),
+        Ok((o, _desktop_guard)) => o,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e })),
+            )
+                .into_response();
+        }
     };
     let status = if outcome.ok {
         StatusCode::OK

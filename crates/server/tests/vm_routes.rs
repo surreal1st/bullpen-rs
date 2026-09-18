@@ -13,7 +13,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use common::seed_session;
 use serde_json::{Value, json};
-use server::vm::DockerRun;
+use server::vm::{CapturedFrame, DockerRun};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -855,4 +855,74 @@ async fn desk_status_route_answers_ok_when_the_bots_browser_is_up() {
     assert_eq!(status, StatusCode::OK, "body: {body:?}");
     assert_eq!(body["ok"], true, "body: {body:?}");
     assert_eq!(body["detail"], "Chrome/128.0.0.0 on this bot's machine.");
+}
+
+fn store_route_observation(state: &server::AppState, run_id: &str) {
+    let admission = Arc::new(server::observations::ObservationAdmission::new());
+    let observation = admission
+        .try_begin_capture()
+        .expect("route observation admission")
+        .retain(
+            CapturedFrame {
+                png: vec![1, 2, 3],
+                width: 10,
+                height: 10,
+            },
+            run_id,
+            "arthur",
+            format!("obs-{run_id}"),
+            "2026-09-18T12:00:00Z",
+            0,
+        );
+    state.observations.store(&observation);
+}
+
+#[tokio::test]
+async fn ensure_and_hibernate_routes_invalidate_the_app_shared_observation_registry() {
+    let db = Db::open(":memory:").unwrap();
+    let session = seed_session(&db);
+    seed_bot(&db, "arthur", "Arthur");
+    let docker = Arc::new(RecordingDockerRun::new());
+    docker.push_response(true, "", "no such container");
+    docker.push_response(true, "", "");
+    let state = server::AppState::with_vm(
+        db,
+        Arc::clone(&docker) as Arc<dyn DockerRun>,
+        test_config(),
+        true,
+    );
+    store_route_observation(&state, "route-ensure");
+    let router = server::build_app(state.clone());
+    let (status, _) = send(post("/api/bots/arthur/vm/ensure", &session), router).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(state.observations.metadata("route-ensure").is_none());
+
+    let hibernate_db = Db::open(":memory:").unwrap();
+    let hibernate_session = seed_session(&hibernate_db);
+    seed_bot(&hibernate_db, "arthur", "Arthur");
+    insert_vm_row(
+        &hibernate_db,
+        &VmRow {
+            bot_id: "arthur".into(),
+            container: "bullpen-vm-arthur".into(),
+            cdp_port: 9301,
+            web_port: 6201,
+            state: "running".into(),
+            last_used_at: "2020-01-01T00:00:00Z".into(),
+        },
+    );
+    let hibernate_docker = Arc::new(RecordingDockerRun::new());
+    hibernate_docker.push_response(true, "", "");
+    let hibernate_state =
+        server::AppState::with_vm(hibernate_db, hibernate_docker, test_config(), true);
+    store_route_observation(&hibernate_state, "route-hibernate");
+    let router = server::build_app(hibernate_state.clone());
+    let (status, _) = send(post("/api/vms/hibernate", &hibernate_session), router).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        hibernate_state
+            .observations
+            .metadata("route-hibernate")
+            .is_none()
+    );
 }

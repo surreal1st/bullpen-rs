@@ -121,6 +121,8 @@ async fn main() {
             state.vm_docker.clone(),
             state.vm_config.clone(),
             std::time::Duration::from_secs(60),
+            state.desktop_states.clone(),
+            state.observations.clone(),
         );
         tracing::info!(
             slots = state.vm_config.slots,

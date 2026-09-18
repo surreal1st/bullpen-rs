@@ -367,9 +367,30 @@ impl fmt::Debug for ScreenObservation {
     }
 }
 
-#[derive(Default)]
+pub trait ObservationClock: Send + Sync {
+    fn now(&self) -> Instant;
+}
+
+struct MonotonicClock;
+
+impl ObservationClock for MonotonicClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+}
+
 pub struct ObservationRegistry {
     frames: Mutex<HashMap<String, RegistryObservation>>,
+    clock: Arc<dyn ObservationClock>,
+}
+
+impl Default for ObservationRegistry {
+    fn default() -> Self {
+        Self {
+            frames: Mutex::new(HashMap::new()),
+            clock: Arc::new(MonotonicClock),
+        }
+    }
 }
 
 struct RegistryObservation {
@@ -381,6 +402,18 @@ struct RegistryObservation {
 impl ObservationRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    #[doc(hidden)]
+    pub fn with_clock(clock: Arc<dyn ObservationClock>) -> Self {
+        Self {
+            frames: Mutex::new(HashMap::new()),
+            clock,
+        }
+    }
+
+    fn now(&self) -> Instant {
+        self.clock.now()
     }
 
     fn frames(&self) -> MutexGuard<'_, HashMap<String, RegistryObservation>> {
@@ -395,7 +428,7 @@ impl ObservationRegistry {
                 RegistryObservation {
                     metadata: observation.metadata,
                     payload: Some(observation.payload),
-                    captured_monotonic: Instant::now(),
+                    captured_monotonic: self.now(),
                 },
             )
             .is_some()
@@ -409,7 +442,7 @@ impl ObservationRegistry {
                 RegistryObservation {
                     metadata: observation.metadata.clone(),
                     payload: Some(Arc::clone(&observation.payload)),
-                    captured_monotonic: Instant::now(),
+                    captured_monotonic: self.now(),
                 },
             )
             .is_some()
@@ -446,6 +479,11 @@ impl ObservationRegistry {
         before - frames.len()
     }
 
+    pub fn record_desktop_mutation(&self, bot_id: &str, state: &mut BotDesktopState) -> u64 {
+        self.invalidate_bot(bot_id);
+        state.advance()
+    }
+
     pub fn consume_coordinates(
         &self,
         run_id: &str,
@@ -460,7 +498,7 @@ impl ObservationRegistry {
             observation_id,
             desktop_generation,
             points,
-            Instant::now(),
+            self.now(),
         )
     }
 

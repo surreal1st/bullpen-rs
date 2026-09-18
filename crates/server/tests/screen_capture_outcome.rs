@@ -716,3 +716,56 @@ async fn cancelled_callers_keep_both_capture_budgets_until_detached_cleanup_fini
             .unwrap_or_else(|_| panic!("detached cleanup did not release {bot}'s desktop lock"));
     }
 }
+
+#[tokio::test]
+async fn stopped_capture_aborts_a_lifecycle_worker_still_queued_for_the_desktop() {
+    let db = Arc::new(Mutex::new(Db::open(":memory:").unwrap()));
+    insert_run(&db, "run-queued-stop", "arthur", "vision/model");
+    insert_vm(&db, "arthur");
+    let docker = Arc::new(RunningDocker::default());
+    let capture = Arc::new(CountingCapture::new(true));
+    let manager = manager(
+        Arc::clone(&db),
+        catalog("vision/model", true, true),
+        Arc::clone(&docker) as Arc<dyn DockerRun>,
+        capture.clone(),
+        true,
+    );
+    let desktop = manager.desktop_state_registry().for_bot("arthur");
+    let held = desktop.clone().lock_owned().await;
+    let toolbox = toolbox(&manager, "arthur", "run-queued-stop", "vision/model");
+    let call = tokio::spawn(async move { toolbox.run("snap_desk", "{}").await });
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if manager
+                .observation_admission()
+                .snapshot()
+                .capture_decode_in_use
+                == 1
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("capture reserved admission before queuing for desktop");
+
+    manager.stop("run-queued-stop");
+    let outcome = tokio::time::timeout(Duration::from_secs(2), call)
+        .await
+        .expect("stopped queued capture returned")
+        .expect("capture caller joined");
+    assert!(outcome.text.contains("stopped"), "{}", outcome.text);
+    drop(held);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    assert_eq!(
+        docker.calls.load(Ordering::SeqCst),
+        0,
+        "a lifecycle worker cancelled before acquiring the desktop lock must not inspect or wake"
+    );
+    assert_eq!(capture.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(desktop.lock().await.generation(), 0);
+}

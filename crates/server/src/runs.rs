@@ -474,6 +474,33 @@ impl RunManager {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub fn with_shared_desktop_state(
+        db: Arc<Mutex<Db>>,
+        port: Arc<dyn ModelPort>,
+        sandbox: Arc<dyn sandbox::Sandbox>,
+        vm_docker: Arc<dyn vm::DockerRun>,
+        vm_config: Arc<store::vms::VmConfig>,
+        vm_enabled: bool,
+        catalog: Arc<dyn Catalog>,
+        observations: Arc<ObservationRegistry>,
+        desktop_states: Arc<DesktopStateRegistry>,
+    ) -> Self {
+        Self::build_with_shared(
+            db,
+            port,
+            sandbox,
+            vm_docker,
+            vm_config,
+            vm_enabled,
+            BACKLOG_TTL,
+            catalog,
+            Arc::new(vm::RealFrameCapture),
+            observations,
+            desktop_states,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn build(
         db: Arc<Mutex<Db>>,
         port: Arc<dyn ModelPort>,
@@ -485,13 +512,42 @@ impl RunManager {
         catalog: Arc<dyn Catalog>,
         frame_capture: Arc<dyn vm::FrameCapture>,
     ) -> Self {
+        Self::build_with_shared(
+            db,
+            port,
+            sandbox,
+            vm_docker,
+            vm_config,
+            vm_enabled,
+            backlog_ttl,
+            catalog,
+            frame_capture,
+            Arc::new(ObservationRegistry::new()),
+            Arc::new(DesktopStateRegistry::new()),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_with_shared(
+        db: Arc<Mutex<Db>>,
+        port: Arc<dyn ModelPort>,
+        sandbox: Arc<dyn sandbox::Sandbox>,
+        vm_docker: Arc<dyn vm::DockerRun>,
+        vm_config: Arc<store::vms::VmConfig>,
+        vm_enabled: bool,
+        backlog_ttl: Duration,
+        catalog: Arc<dyn Catalog>,
+        frame_capture: Arc<dyn vm::FrameCapture>,
+        observations: Arc<ObservationRegistry>,
+        desktop_states: Arc<DesktopStateRegistry>,
+    ) -> Self {
         Self {
             db,
             port,
             catalog,
             observation_admission: Arc::new(ObservationAdmission::new()),
-            observations: Arc::new(ObservationRegistry::new()),
-            desktop_states: Arc::new(DesktopStateRegistry::new()),
+            observations,
+            desktop_states,
             frame_capture,
             sandbox,
             vm_docker,
@@ -677,30 +733,22 @@ impl RunManager {
             );
         };
 
-        let desktop = self.desktop_states.for_bot(bot_id);
-        let stop = self.wait_for_stop(run_id);
-        tokio::pin!(stop);
-        let desktop_guard = tokio::select! {
-            biased;
-            _ = &mut stop => return tools::ToolOutcome::new("Screen capture stopped.", None),
-            guard = desktop.lock_owned() => guard,
-        };
-        let worker_lease = reservation.into_worker(desktop_guard);
-
         let stop = self.wait_for_stop(run_id);
         tokio::pin!(stop);
         let desk = tokio::select! {
             biased;
             _ = &mut stop => return tools::ToolOutcome::new("Screen capture stopped.", None),
-            desk = crate::desk::desk_config_for_bot(
-                &self.db,
+            desk = crate::desk::desk_config_for_bot_owned(
+                Arc::clone(&self.db),
                 Arc::clone(&self.vm_docker),
-                &self.vm_config,
+                Arc::clone(&self.vm_config),
                 self.vm_enabled,
-                bot_id,
+                bot_id.to_string(),
+                Arc::clone(&self.desktop_states),
+                Arc::clone(&self.observations),
             ) => desk,
         };
-        let desk = match desk {
+        let (desk, desktop_guard) = match desk {
             Ok(desk) => desk,
             Err(reason) => {
                 return tools::ToolOutcome::new(
@@ -712,6 +760,7 @@ impl RunManager {
         if self.stop_requested(run_id) {
             return tools::ToolOutcome::new("Screen capture stopped.", None);
         }
+        let worker_lease = reservation.into_worker(desktop_guard);
 
         let stop = self.wait_for_stop(run_id);
         tokio::pin!(stop);

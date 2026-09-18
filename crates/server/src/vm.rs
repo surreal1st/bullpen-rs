@@ -590,6 +590,17 @@ pub async fn ensure_vm_in(
     bot_name: &str,
     cfg: &VmConfig,
 ) -> rusqlite::Result<EnsureOutcome> {
+    ensure_vm_in_with_mutation_hook(db, docker, bot_id, bot_name, cfg, || {}).await
+}
+
+async fn ensure_vm_in_with_mutation_hook(
+    db: &Arc<Mutex<Db>>,
+    docker: Arc<dyn DockerRun>,
+    bot_id: &str,
+    bot_name: &str,
+    cfg: &VmConfig,
+    mut before_mutation: impl FnMut(),
+) -> rusqlite::Result<EnsureOutcome> {
     let now = Utc::now().to_rfc3339();
 
     let row = {
@@ -672,6 +683,7 @@ pub async fn ensure_vm_in(
     if !state.exists {
         let args = create_args(&row, bot_name, cfg);
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        before_mutation();
         let made = docker.call(&arg_refs, 180_000).await;
 
         let guard = db.lock().unwrap_or_else(PoisonError::into_inner);
@@ -703,6 +715,7 @@ pub async fn ensure_vm_in(
     }
 
     if !state.running {
+        before_mutation();
         let started = docker.call(&["start", &row.container], 90_000).await;
 
         let guard = db.lock().unwrap_or_else(PoisonError::into_inner);
@@ -749,6 +762,58 @@ pub async fn ensure_vm_in(
 
 /// `refresh_vm`, reimplemented for a route handler's `Arc<Mutex<Db>>` - see
 /// this section's header doc.
+/// Ensures a VM while the caller owns this bot's desktop lock.
+pub async fn ensure_vm_in_locked(
+    db: &Arc<Mutex<Db>>,
+    docker: Arc<dyn DockerRun>,
+    bot_id: &str,
+    bot_name: &str,
+    cfg: &VmConfig,
+    desktop: &mut crate::observations::BotDesktopState,
+    observations: &crate::observations::ObservationRegistry,
+) -> rusqlite::Result<EnsureOutcome> {
+    ensure_vm_in_with_mutation_hook(db, docker, bot_id, bot_name, cfg, || {
+        observations.record_desktop_mutation(bot_id, desktop);
+    })
+    .await
+}
+
+pub async fn ensure_vm_in_owned(
+    db: Arc<Mutex<Db>>,
+    docker: Arc<dyn DockerRun>,
+    bot_id: String,
+    bot_name: String,
+    cfg: Arc<VmConfig>,
+    desktop_states: Arc<crate::observations::DesktopStateRegistry>,
+    observations: Arc<crate::observations::ObservationRegistry>,
+) -> Result<
+    (
+        EnsureOutcome,
+        tokio::sync::OwnedMutexGuard<crate::observations::BotDesktopState>,
+    ),
+    String,
+> {
+    let desktop = desktop_states.for_bot(&bot_id);
+    let guard = desktop.lock_owned().await;
+    tokio::spawn(async move {
+        let mut guard = guard;
+        let outcome = ensure_vm_in_locked(
+            &db,
+            docker,
+            &bot_id,
+            &bot_name,
+            &cfg,
+            &mut guard,
+            &observations,
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+        Ok((outcome, guard))
+    })
+    .await
+    .map_err(|err| format!("VM lifecycle worker failed: {err}"))?
+}
+
 pub async fn refresh_vm_in(
     db: &Arc<Mutex<Db>>,
     docker: Arc<dyn DockerRun>,
@@ -804,9 +869,35 @@ pub async fn refresh_vm_in(
     Ok(Some(row))
 }
 
-/// `hibernate_idle`, reimplemented for a route handler's `Arc<Mutex<Db>>` -
-/// see this section's header doc. Same cutoff/stop/write logic as
-/// `hibernate_idle` (and `start_vm_reaper`'s own inlined copy of it).
+/// Refreshes one VM while serializing the state transition with desktop work.
+pub async fn refresh_vm_in_tracked(
+    db: Arc<Mutex<Db>>,
+    docker: Arc<dyn DockerRun>,
+    bot_id: String,
+    desktop_states: Arc<crate::observations::DesktopStateRegistry>,
+    observations: Arc<crate::observations::ObservationRegistry>,
+) -> Result<Option<VmRow>, String> {
+    tokio::spawn(async move {
+        let desktop = desktop_states.for_bot(&bot_id);
+        let mut guard = desktop.lock_owned().await;
+        let before = {
+            let db_guard = db.lock().unwrap_or_else(PoisonError::into_inner);
+            get_vm(&db_guard, &bot_id).map_err(|err| err.to_string())?
+        };
+        let refreshed = refresh_vm_in(&db, docker, &bot_id)
+            .await
+            .map_err(|err| err.to_string())?;
+        if before.as_ref().is_some_and(|vm| vm.state != "stopped")
+            && refreshed.as_ref().is_some_and(|vm| vm.state == "stopped")
+        {
+            observations.record_desktop_mutation(&bot_id, &mut guard);
+        }
+        Ok(refreshed)
+    })
+    .await
+    .map_err(|err| format!("VM refresh worker failed: {err}"))?
+}
+
 pub async fn hibernate_idle_in(
     db: &Arc<Mutex<Db>>,
     docker: Arc<dyn DockerRun>,
@@ -854,14 +945,74 @@ pub async fn hibernate_idle_in(
     Ok(stopped)
 }
 
-/// What a bot's tools should act on, resolved by `desk_for_in`. Not a
-/// `DeskConfig` alone: the "every slot is taken" case (`ensure_vm_in`'s own
-/// `EnsureOutcome::detail`) has no machine to hand back at all, and
-/// `desk_for`'s own caller-supplied `fallback: DeskConfig` would have to
-/// invent one to fill that slot - silently pointing at SOME desk being the
-/// exact multi-bot-collision bug this ticket (S8a-02) exists to close. An
-/// explicit `Unavailable(reason)` lets the caller refuse with a message a
-/// model can act on instead.
+/// Stops idle VMs while serializing each stop with that bot's desktop work.
+pub async fn hibernate_idle_in_tracked(
+    db: Arc<Mutex<Db>>,
+    docker: Arc<dyn DockerRun>,
+    cfg: Arc<VmConfig>,
+    desktop_states: Arc<crate::observations::DesktopStateRegistry>,
+    observations: Arc<crate::observations::ObservationRegistry>,
+) -> Result<Vec<String>, String> {
+    let cutoff = Utc::now().timestamp_millis() - cfg.idle_ms;
+    let candidates = {
+        let guard = db.lock().unwrap_or_else(PoisonError::into_inner);
+        list_vms(&guard).map_err(|err| err.to_string())?
+    };
+    let mut stopped = Vec::new();
+    for candidate in candidates {
+        if candidate.state != "running" && candidate.state != "starting" {
+            continue;
+        }
+        let db = Arc::clone(&db);
+        let docker = Arc::clone(&docker);
+        let states = Arc::clone(&desktop_states);
+        let observations = Arc::clone(&observations);
+        let bot_id = candidate.bot_id.clone();
+        let desktop = states.for_bot(&bot_id);
+        let state = desktop.lock_owned().await;
+        let result = tokio::spawn(async move {
+            let mut state = state;
+            let current = {
+                let guard = db.lock().unwrap_or_else(PoisonError::into_inner);
+                get_vm(&guard, &bot_id).map_err(|err| err.to_string())?
+            };
+            let Some(current) = current else {
+                return Ok::<bool, String>(false);
+            };
+            if current.state != "running" && current.state != "starting" {
+                return Ok(false);
+            }
+            let used = chrono::DateTime::parse_from_rfc3339(&current.last_used_at)
+                .ok()
+                .map(|dt| dt.timestamp_millis())
+                .unwrap_or(0);
+            if used > cutoff {
+                return Ok(false);
+            }
+            observations.record_desktop_mutation(&bot_id, &mut state);
+            let result = docker
+                .call(&["stop", "-t", "10", &current.container], 60_000)
+                .await;
+            let guard = db.lock().unwrap_or_else(PoisonError::into_inner);
+            guard
+                .conn()
+                .execute(
+                    "UPDATE vms SET state = 'stopped' WHERE bot_id = ?",
+                    rusqlite::params![&bot_id],
+                )
+                .map_err(|err| err.to_string())?;
+            Ok(result.ok)
+        })
+        .await
+        .map_err(|err| format!("VM hibernate worker failed: {err}"))??;
+        if result {
+            stopped.push(candidate.bot_id);
+        }
+    }
+    Ok(stopped)
+}
+
+/// What a bot's tools should act on, resolved by `desk_for_in`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeskResolution {
     /// The bot's own machine.
@@ -933,49 +1084,25 @@ fn next_slot(used: &[i32], cfg: &VmConfig) -> Option<i32> {
 pub fn start_vm_reaper(
     db: Arc<Mutex<Db>>,
     docker: Arc<dyn DockerRun>,
-    // `Arc`, not a bare `VmConfig`: `AppState` holds its config as
-    // `Arc<store::vms::VmConfig>` (the struct derives no `Clone`, see
-    // `lib.rs:114-117`), so taking it by value gave `main.rs` no way to hand
-    // the reaper the SAME config every route already shares - which is how
-    // this ended up ported-but-never-started.
     cfg: Arc<VmConfig>,
     every: Duration,
+    desktop_states: Arc<crate::observations::DesktopStateRegistry>,
+    observations: Arc<crate::observations::ObservationRegistry>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(every);
         loop {
             interval.tick().await;
-
-            let cutoff = Utc::now().timestamp_millis() - cfg.idle_ms;
-            let candidates = {
-                let guard = db.lock().unwrap_or_else(PoisonError::into_inner);
-                list_vms(&guard).unwrap_or_default()
-            };
-
-            for vm in candidates {
-                if vm.state != "running" && vm.state != "starting" {
-                    continue;
-                }
-                let used = chrono::DateTime::parse_from_rfc3339(&vm.last_used_at)
-                    .ok()
-                    .map(|dt| dt.timestamp_millis())
-                    .unwrap_or(0);
-                if used > cutoff {
-                    continue;
-                }
-
-                // A container that is already gone is also not running,
-                // which is the state this is trying to reach, so both
-                // outcomes record the same thing (matches `hibernate_idle`).
-                let _ = docker
-                    .call(&["stop", "-t", "10", &vm.container], 60_000)
-                    .await;
-
-                let guard = db.lock().unwrap_or_else(PoisonError::into_inner);
-                let _ = guard.conn().execute(
-                    "UPDATE vms SET state = 'stopped' WHERE bot_id = ?",
-                    rusqlite::params![&vm.bot_id],
-                );
+            if let Err(err) = hibernate_idle_in_tracked(
+                Arc::clone(&db),
+                Arc::clone(&docker),
+                Arc::clone(&cfg),
+                Arc::clone(&desktop_states),
+                Arc::clone(&observations),
+            )
+            .await
+            {
+                tracing::warn!("VM reaper failed: {err}");
             }
         }
     })

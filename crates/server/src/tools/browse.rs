@@ -282,6 +282,7 @@ async fn navigate_and_read(
     cdp.call(&target_id, "Page.enable", json!({}))
         .await
         .map_err(NavigateOutcome::Transport)?;
+    cdp.before_desktop_mutation();
     cdp.call(&target_id, "Page.navigate", json!({ "url": url }))
         .await
         .map_err(NavigateOutcome::Transport)?;
@@ -303,6 +304,7 @@ async fn navigate_and_read(
         // later `read_page`/`click`/`type_text` call on the same window. Its
         // own outcome is discarded - a failed blank-out must not turn a
         // successful refusal into a reported transport error.
+        cdp.before_desktop_mutation();
         let _ = cdp
             .call(&target_id, "Page.navigate", json!({ "url": "about:blank" }))
             .await;
@@ -339,6 +341,7 @@ async fn refusal_for_url(
     // just stops it sitting there for a LATER read_page/click/type_text on
     // the same window. Its own outcome is discarded - a failed blank-out
     // must not turn a successful refusal into a reported transport error.
+    cdp.before_desktop_mutation();
     let _ = cdp
         .call(target_id, "Page.navigate", json!({ "url": "about:blank" }))
         .await;

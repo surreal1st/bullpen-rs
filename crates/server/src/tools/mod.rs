@@ -55,12 +55,16 @@ mod snap_desk;
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+
+use async_trait::async_trait;
 
 use model::ladder::Trigger;
 use model::{ModelPort, ModelUsage, ToolSpec};
 use store::Db;
 
+use crate::desk::Cdp;
 use crate::observations::{DesktopStateRegistry, ObservationRegistry, ScreenObservation};
 use crate::permissions::{Decision, Permissions, always_on_set};
 use crate::sandbox::Sandbox;
@@ -469,101 +473,20 @@ pub fn build(params: BuildParams) -> ToolBox {
                     // `BULLPEN_DESK` and handed every bot the SAME shared
                     // desk regardless of bot_id - see `cdp_for_bot`'s own
                     // doc for the three routing decisions this closes.
-                    "browse" => {
-                        let cdp = crate::desk::cdp_for_bot(
-                            &db,
-                            Arc::clone(&vm_docker),
-                            &vm_config,
+                    "browse" | "read_page" | "click" | "type_text" => {
+                        let text = run_browser_guarded(
+                            name,
+                            args,
+                            db,
+                            vm_docker,
+                            vm_config,
                             vm_enabled,
-                            &bot_id,
+                            bot_id,
+                            observations,
+                            desktop_states,
                         )
                         .await;
-                        let resolver = crate::desk::RealResolver;
-                        (
-                            crate::tools::browse::run_browse(
-                                &db,
-                                cdp.as_ref(),
-                                &resolver,
-                                &bot_id,
-                                &args,
-                                None,
-                            )
-                            .await,
-                            None,
-                        )
-                    }
-                    "read_page" => {
-                        let cdp = crate::desk::cdp_for_bot(
-                            &db,
-                            Arc::clone(&vm_docker),
-                            &vm_config,
-                            vm_enabled,
-                            &bot_id,
-                        )
-                        .await;
-                        let resolver = crate::desk::RealResolver;
-                        (
-                            crate::tools::browse::run_read_page(
-                                &db,
-                                cdp.as_ref(),
-                                &resolver,
-                                &bot_id,
-                            )
-                            .await,
-                            None,
-                        )
-                    }
-                    // S8a-03: same `cdp_for_bot` resolution as `browse`/
-                    // `read_page` above, for the same reason - the calling
-                    // bot's own machine, re-resolved at call time since it
-                    // can start/stop/hibernate between calls. Registering
-                    // these on anything else (a shared desk) is exactly
-                    // the bug S8a-02 removed; these two must not reopen it.
-                    // S8b-04: both now take the same `RealResolver` `browse`/
-                    // `read_page` do, to run the same post-action fence.
-                    "click" => {
-                        let cdp = crate::desk::cdp_for_bot(
-                            &db,
-                            Arc::clone(&vm_docker),
-                            &vm_config,
-                            vm_enabled,
-                            &bot_id,
-                        )
-                        .await;
-                        let resolver = crate::desk::RealResolver;
-                        (
-                            crate::tools::browse::run_click(
-                                &db,
-                                cdp.as_ref(),
-                                &resolver,
-                                &bot_id,
-                                &args,
-                            )
-                            .await,
-                            None,
-                        )
-                    }
-                    "type_text" => {
-                        let cdp = crate::desk::cdp_for_bot(
-                            &db,
-                            Arc::clone(&vm_docker),
-                            &vm_config,
-                            vm_enabled,
-                            &bot_id,
-                        )
-                        .await;
-                        let resolver = crate::desk::RealResolver;
-                        (
-                            crate::tools::browse::run_type_text(
-                                &db,
-                                cdp.as_ref(),
-                                &resolver,
-                                &bot_id,
-                                &args,
-                            )
-                            .await,
-                            None,
-                        )
+                        (text, None)
                     }
                     // S8b-02: routing follows `browse`/`read_page`/`click`/
                     // `type_text` above, but resolves a `DeskConfig`
@@ -576,27 +499,17 @@ pub fn build(params: BuildParams) -> ToolBox {
                     // class of refusal - see `desk_config_for_bot`'s own
                     // doc.
                     "desk_shell" => {
-                        let text = match crate::desk::desk_config_for_bot(
-                            &db,
-                            Arc::clone(&vm_docker),
-                            &vm_config,
+                        let text = run_desk_shell_guarded(
+                            db,
+                            vm_docker,
+                            vm_config,
                             vm_enabled,
-                            &bot_id,
+                            bot_id,
+                            observations,
+                            desktop_states,
+                            args,
                         )
-                        .await
-                        {
-                            Ok(config) => {
-                                crate::tools::desk_shell::run_desk_shell(
-                                    vm_docker.as_ref(),
-                                    &config,
-                                    &args,
-                                )
-                                .await
-                            }
-                            Err(reason) => {
-                                format!("The shared computer did not answer: {reason}")
-                            }
-                        };
+                        .await;
                         (text, None)
                     }
                     // S8c-03: same `desk_config_for_bot` resolution as
@@ -665,9 +578,10 @@ async fn run_desk_act_guarded(
         }
         (None, _) => None,
     };
+    let desktop = desktop_states.for_bot(&bot_id);
+    let state = desktop.lock_owned().await;
     let worker = tokio::spawn(async move {
-        let desktop = desktop_states.for_bot(&bot_id);
-        let mut state = desktop.lock().await;
+        let mut state = state;
         if let Some(run_id) = run_id.as_deref() {
             let ownership: rusqlite::Result<(String, String)> = lock_db(&db).conn().query_row(
                 "SELECT bot_id, status FROM runs WHERE id = ?1",
@@ -704,20 +618,24 @@ async fn run_desk_act_guarded(
         {
             return reason;
         }
-        observations.invalidate_bot(&bot_id);
-        state.advance();
-        let config = match crate::desk::desk_config_for_bot(
+        let action_generation = observations.record_desktop_mutation(&bot_id, &mut state);
+        let config = match crate::desk::desk_config_for_bot_locked(
             &db,
             Arc::clone(&vm_docker),
             &vm_config,
             vm_enabled,
             &bot_id,
+            &mut state,
+            &observations,
         )
         .await
         {
             Ok(config) => config,
             Err(reason) => return format!("The shared computer did not answer: {reason}"),
         };
+        if observation_use.is_some() && state.generation() != action_generation {
+            return "The desktop changed after that observation. Capture again.".to_string();
+        }
         desk_act::run_desk_act(vm_docker.as_ref(), &config, &args, &desk_act::RealSleeper).await
     });
     match worker.await {
@@ -725,6 +643,166 @@ async fn run_desk_act_guarded(
         Err(err) => {
             tracing::error!("desk_act worker failed: {err}");
             "The desktop action failed.".to_string()
+        }
+    }
+}
+
+struct MutationTrackingCdp {
+    inner: Arc<dyn Cdp>,
+    mutated: Arc<AtomicBool>,
+    observations: Arc<ObservationRegistry>,
+    bot_id: String,
+}
+
+impl MutationTrackingCdp {
+    fn before_mutation(&self) {
+        self.observations.invalidate_bot(&self.bot_id);
+        self.mutated.store(true, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl Cdp for MutationTrackingCdp {
+    async fn create_window(&self, url: &str) -> Result<String, String> {
+        self.before_mutation();
+        self.inner.create_window(url).await
+    }
+
+    async fn has_target(&self, target_id: &str) -> bool {
+        self.inner.has_target(target_id).await
+    }
+
+    async fn call(
+        &self,
+        target_id: &str,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        self.inner.call(target_id, method, params).await
+    }
+
+    async fn close_target(&self, target_id: &str) {
+        self.before_mutation();
+        self.inner.close_target(target_id).await;
+    }
+
+    fn before_desktop_mutation(&self) {
+        self.before_mutation();
+    }
+
+    async fn ready(&self) -> bool {
+        self.inner.ready().await
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_browser_guarded(
+    name: String,
+    args: String,
+    db: Arc<Mutex<Db>>,
+    vm_docker: Arc<dyn vm::DockerRun>,
+    vm_config: Arc<store::vms::VmConfig>,
+    vm_enabled: bool,
+    bot_id: String,
+    observations: Arc<ObservationRegistry>,
+    desktop_states: Arc<DesktopStateRegistry>,
+) -> String {
+    let desktop = desktop_states.for_bot(&bot_id);
+    let desktop = desktop.lock_owned().await;
+    let worker = tokio::spawn(async move {
+        let mut desktop = desktop;
+        let cdp = match crate::desk::cdp_for_bot_locked(
+            &db,
+            Arc::clone(&vm_docker),
+            &vm_config,
+            vm_enabled,
+            &bot_id,
+            &mut desktop,
+            &observations,
+        )
+        .await
+        {
+            Ok(cdp) => cdp,
+            Err(reason) => return format!("The shared computer did not answer: {reason}"),
+        };
+        let mutated = Arc::new(AtomicBool::new(false));
+        let tracked = MutationTrackingCdp {
+            inner: cdp,
+            mutated: Arc::clone(&mutated),
+            observations: Arc::clone(&observations),
+            bot_id: bot_id.clone(),
+        };
+        let resolver = crate::desk::RealResolver;
+        let text = match name.as_str() {
+            "browse" => browse::run_browse(&db, &tracked, &resolver, &bot_id, &args, None).await,
+            "read_page" => browse::run_read_page(&db, &tracked, &resolver, &bot_id).await,
+            "click" => browse::run_click(&db, &tracked, &resolver, &bot_id, &args).await,
+            "type_text" => browse::run_type_text(&db, &tracked, &resolver, &bot_id, &args).await,
+            _ => unreachable!("guarded browser tool name"),
+        };
+        if mutated.load(Ordering::SeqCst) {
+            observations.record_desktop_mutation(&bot_id, &mut desktop);
+        }
+        text
+    });
+    match worker.await {
+        Ok(text) => text,
+        Err(err) => {
+            tracing::error!("browser worker failed: {err}");
+            "The shared computer did not answer: browser worker failed.".to_string()
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_desk_shell_guarded(
+    db: Arc<Mutex<Db>>,
+    vm_docker: Arc<dyn vm::DockerRun>,
+    vm_config: Arc<store::vms::VmConfig>,
+    vm_enabled: bool,
+    bot_id: String,
+    observations: Arc<ObservationRegistry>,
+    desktop_states: Arc<DesktopStateRegistry>,
+    args: String,
+) -> String {
+    let desktop = desktop_states.for_bot(&bot_id);
+    let state = desktop.lock_owned().await;
+    let worker = tokio::spawn(async move {
+        let mut state = state;
+        let config = match crate::desk::desk_config_for_bot_locked(
+            &db,
+            Arc::clone(&vm_docker),
+            &vm_config,
+            vm_enabled,
+            &bot_id,
+            &mut state,
+            &observations,
+        )
+        .await
+        {
+            Ok(config) => config,
+            Err(reason) => return format!("The shared computer did not answer: {reason}"),
+        };
+        let command_present = serde_json::from_str::<serde_json::Value>(&args)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("command")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .map(str::to_owned)
+            })
+            .is_some_and(|command| !command.is_empty());
+        if command_present {
+            observations.record_desktop_mutation(&bot_id, &mut state);
+        }
+        desk_shell::run_desk_shell(vm_docker.as_ref(), &config, &args).await
+    });
+    match worker.await {
+        Ok(text) => text,
+        Err(err) => {
+            tracing::error!("desk_shell worker failed: {err}");
+            "The desktop command failed.".to_string()
         }
     }
 }

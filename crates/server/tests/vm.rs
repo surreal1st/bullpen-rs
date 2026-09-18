@@ -16,13 +16,15 @@
 use axum::http::{HeaderMap, HeaderValue};
 use server::desk::DeskConfig;
 use server::vm::{
-    CapturedFrame, DockerRun, FrameCapture, create_args, desk_for, ensure_vm, hibernate_idle,
-    is_png, refresh_vm, start_vm_reaper, thumbnail, touch_vm, validate_frame, vm_desk,
+    CapturedFrame, DockerRun, FrameCapture, create_args, desk_for, ensure_vm, ensure_vm_in_owned,
+    hibernate_idle, hibernate_idle_in_tracked, is_png, refresh_vm, start_vm_reaper, thumbnail,
+    touch_vm, validate_frame, vm_desk,
 };
 use server::vm_proxy::{
     ProxyOutcome, attach_vm_proxy, build_upgrade_request, proxy_response_headers, viewer_target,
 };
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use store::{
@@ -508,6 +510,8 @@ async fn start_vm_reaper_stops_an_idle_vm_on_tick() {
         docker.clone(),
         Arc::new(cfg),
         Duration::from_millis(15),
+        Arc::new(server::observations::DesktopStateRegistry::new()),
+        Arc::new(server::observations::ObservationRegistry::new()),
     );
 
     // Real-time wait for at least one tick; this is timing-sensitive but
@@ -1108,4 +1112,227 @@ fn validate_frame_rejects_valid_compression_with_missing_pixels() {
         1, 137, 214, 174, 95, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
     ];
     assert!(validate_frame(png).is_none());
+}
+
+fn store_vm_observation(
+    observations: &server::observations::ObservationRegistry,
+    admission: &Arc<server::observations::ObservationAdmission>,
+    run_id: &str,
+    bot_id: &str,
+) {
+    let observation = admission
+        .try_begin_capture()
+        .expect("observation admission")
+        .retain(
+            CapturedFrame {
+                png: vec![1, 2, 3],
+                width: 10,
+                height: 10,
+            },
+            run_id,
+            bot_id,
+            "00000000-0000-4000-8000-000000000099",
+            "2026-09-18T12:00:00Z",
+            0,
+        );
+    observations.store(&observation);
+}
+
+#[tokio::test]
+async fn failed_create_and_start_attempts_invalidate_before_docker_mutates() {
+    for existing in [false, true] {
+        let db = Arc::new(Mutex::new(Db::open(":memory:").unwrap()));
+        if existing {
+            db.lock()
+                .unwrap()
+                .conn()
+                .execute(
+                    "INSERT INTO vms (bot_id, container, cdp_port, web_port, state, last_used_at)
+                     VALUES ('bot-1', 'bullpen-vm-bot-1', 9301, 6201, 'stopped', '2026-09-18T12:00:00Z')",
+                    [],
+                )
+                .unwrap();
+        }
+        let docker = Arc::new(RecordingDockerRun::new());
+        docker.push_response(
+            true,
+            if existing { "exited false" } else { "" },
+            if existing { "" } else { "no such container" },
+        );
+        docker.push_response(false, "", "fixture mutation failed");
+        let observations = Arc::new(server::observations::ObservationRegistry::new());
+        let admission = Arc::new(server::observations::ObservationAdmission::new());
+        let desktop_states = Arc::new(server::observations::DesktopStateRegistry::new());
+        store_vm_observation(&observations, &admission, "run-stale", "bot-1");
+
+        let (outcome, desktop) = ensure_vm_in_owned(
+            Arc::clone(&db),
+            docker.clone(),
+            "bot-1".into(),
+            "Bot One".into(),
+            Arc::new(test_config()),
+            desktop_states,
+            Arc::clone(&observations),
+        )
+        .await
+        .expect("tracked ensure returns an outcome");
+
+        assert!(!outcome.ok);
+        assert_eq!(desktop.generation(), 1);
+        assert!(observations.metadata("run-stale").is_none());
+        let calls = docker.recorded_calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[1][0], if existing { "start" } else { "run" });
+    }
+}
+
+#[tokio::test]
+async fn failed_hibernate_attempt_invalidates_before_docker_stop() {
+    let db = Arc::new(Mutex::new(Db::open(":memory:").unwrap()));
+    db.lock()
+        .unwrap()
+        .conn()
+        .execute(
+            "INSERT INTO vms (bot_id, container, cdp_port, web_port, state, last_used_at)
+             VALUES ('bot-1', 'bullpen-vm-bot-1', 9301, 6201, 'running', '2020-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+    let docker = Arc::new(RecordingDockerRun::new());
+    docker.push_response(false, "", "fixture stop failed");
+    let observations = Arc::new(server::observations::ObservationRegistry::new());
+    let admission = Arc::new(server::observations::ObservationAdmission::new());
+    let desktop_states = Arc::new(server::observations::DesktopStateRegistry::new());
+    store_vm_observation(&observations, &admission, "run-stale", "bot-1");
+    let mut cfg = test_config();
+    cfg.idle_ms = 0;
+
+    let stopped = hibernate_idle_in_tracked(
+        Arc::clone(&db),
+        docker.clone(),
+        Arc::new(cfg),
+        Arc::clone(&desktop_states),
+        Arc::clone(&observations),
+    )
+    .await
+    .expect("tracked hibernate");
+
+    assert!(
+        stopped.is_empty(),
+        "failed docker stop is not reported as stopped"
+    );
+    assert!(observations.metadata("run-stale").is_none());
+    assert_eq!(desktop_states.for_bot("bot-1").lock().await.generation(), 1);
+    assert_eq!(docker.recorded_calls()[0][0], "stop");
+}
+
+struct MutationTimingDocker {
+    observations: Arc<server::observations::ObservationRegistry>,
+    inspect_stdout: &'static str,
+    inspect_stderr: &'static str,
+    expected_mutation: &'static str,
+    checked_before_mutation: AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl DockerRun for MutationTimingDocker {
+    async fn call(&self, args: &[&str], _timeout_ms: u64) -> DockerResult {
+        match args.first().copied() {
+            Some("inspect") => DockerResult {
+                ok: true,
+                stdout: self.inspect_stdout.into(),
+                stderr: self.inspect_stderr.into(),
+            },
+            Some(command) if command == self.expected_mutation => {
+                assert!(
+                    self.observations.is_empty(),
+                    "{command} reached Docker while a pre-mutation observation was still valid"
+                );
+                self.checked_before_mutation.store(true, Ordering::SeqCst);
+                DockerResult {
+                    ok: false,
+                    stdout: String::new(),
+                    stderr: "fixture mutation failure".into(),
+                }
+            }
+            other => panic!("unexpected docker call: {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn create_start_and_stop_invalidate_before_the_docker_mutation_call() {
+    for (existing, inspect_stdout, inspect_stderr, expected) in [
+        (false, "", "no such container", "run"),
+        (true, "exited false", "", "start"),
+    ] {
+        let db = Arc::new(Mutex::new(Db::open(":memory:").unwrap()));
+        if existing {
+            db.lock()
+                .unwrap()
+                .conn()
+                .execute(
+                    "INSERT INTO vms (bot_id, container, cdp_port, web_port, state, last_used_at)
+                     VALUES ('bot-1', 'bullpen-vm-bot-1', 9301, 6201, 'stopped', '2026-09-18T12:00:00Z')",
+                    [],
+                )
+                .unwrap();
+        }
+        let observations = Arc::new(server::observations::ObservationRegistry::new());
+        let admission = Arc::new(server::observations::ObservationAdmission::new());
+        store_vm_observation(&observations, &admission, "run-timing", "bot-1");
+        let desktop_states = Arc::new(server::observations::DesktopStateRegistry::new());
+        let docker = Arc::new(MutationTimingDocker {
+            observations: Arc::clone(&observations),
+            inspect_stdout,
+            inspect_stderr,
+            expected_mutation: expected,
+            checked_before_mutation: AtomicBool::new(false),
+        });
+        let _ = ensure_vm_in_owned(
+            db,
+            Arc::clone(&docker) as Arc<dyn DockerRun>,
+            "bot-1".into(),
+            "Bot One".into(),
+            Arc::new(test_config()),
+            desktop_states,
+            observations,
+        )
+        .await
+        .expect("tracked ensure returns failed outcome");
+        assert!(docker.checked_before_mutation.load(Ordering::SeqCst));
+    }
+
+    let db = Arc::new(Mutex::new(Db::open(":memory:").unwrap()));
+    db.lock()
+        .unwrap()
+        .conn()
+        .execute(
+            "INSERT INTO vms (bot_id, container, cdp_port, web_port, state, last_used_at)
+             VALUES ('bot-1', 'bullpen-vm-bot-1', 9301, 6201, 'running', '2020-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+    let observations = Arc::new(server::observations::ObservationRegistry::new());
+    let admission = Arc::new(server::observations::ObservationAdmission::new());
+    store_vm_observation(&observations, &admission, "run-stop-timing", "bot-1");
+    let docker = Arc::new(MutationTimingDocker {
+        observations: Arc::clone(&observations),
+        inspect_stdout: "",
+        inspect_stderr: "",
+        expected_mutation: "stop",
+        checked_before_mutation: AtomicBool::new(false),
+    });
+    let mut cfg = test_config();
+    cfg.idle_ms = 0;
+    hibernate_idle_in_tracked(
+        db,
+        Arc::clone(&docker) as Arc<dyn DockerRun>,
+        Arc::new(cfg),
+        Arc::new(server::observations::DesktopStateRegistry::new()),
+        observations,
+    )
+    .await
+    .expect("tracked hibernate");
+    assert!(docker.checked_before_mutation.load(Ordering::SeqCst));
 }

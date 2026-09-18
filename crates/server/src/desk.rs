@@ -202,6 +202,11 @@ pub trait Cdp: Send + Sync {
     /// carries no failure at all.
     async fn close_target(&self, target_id: &str);
 
+    /// Signals that the next CDP operation may change the visible desktop.
+    /// Production transports need no bookkeeping; guarded run dispatch
+    /// overrides this to invalidate coordinate observations before the call.
+    fn before_desktop_mutation(&self) {}
+
     /// S8b-01: whether the endpoint is answering AT ALL right now - a
     /// cheap, side-effect-free probe (no window, no target, no
     /// navigation). Deliberately NOT `has_target`: that method's own
@@ -419,6 +424,7 @@ pub async fn browse(
     let target_id = window_for(db, cdp, bot_id).await?;
     cdp.call(&target_id, "Page.enable", serde_json::json!({}))
         .await?;
+    cdp.before_desktop_mutation();
     cdp.call(
         &target_id,
         "Page.navigate",
@@ -476,6 +482,7 @@ pub async fn browse(
 
 /// Clicks the first link or button whose visible text contains `text`.
 pub async fn click_text(cdp: &dyn Cdp, target_id: &str, text: &str) -> Result<String, String> {
+    cdp.before_desktop_mutation();
     let wanted = serde_json::to_string(&text.to_lowercase()).unwrap_or_else(|_| "\"\"".to_string());
     let script = format!(
         r#"(() => {{
@@ -504,6 +511,7 @@ pub async fn type_into(
     selector: &str,
     value: &str,
 ) -> Result<String, String> {
+    cdp.before_desktop_mutation();
     let selector_json = serde_json::to_string(selector).unwrap_or_else(|_| "\"\"".to_string());
     let value_json = serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string());
     let script = format!(
@@ -1071,6 +1079,155 @@ pub async fn cdp_for_bot(
 /// already produce for the identical class of refusal (`vm_enabled=false`,
 /// every slot taken) - one voice for "there is nothing to act on" across
 /// every desk tool, not a second wording invented for this one.
+pub async fn desk_config_for_bot_locked(
+    db: &Arc<Mutex<Db>>,
+    vm_docker: Arc<dyn crate::vm::DockerRun>,
+    vm_config: &store::vms::VmConfig,
+    vm_enabled: bool,
+    bot_id: &str,
+    desktop: &mut crate::observations::BotDesktopState,
+    observations: &crate::observations::ObservationRegistry,
+) -> Result<DeskConfig, String> {
+    if !vm_enabled {
+        return Err(
+            "Per-bot machines are off here. There is nothing to run a command on.".to_string(),
+        );
+    }
+    let bot_name = {
+        let guard = db.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        store::get_bot(&guard, bot_id)
+            .ok()
+            .flatten()
+            .map(|b| b.name)
+    }
+    .unwrap_or_else(|| bot_id.to_string());
+    let outcome = crate::vm::ensure_vm_in_locked(
+        db,
+        vm_docker,
+        bot_id,
+        &bot_name,
+        vm_config,
+        desktop,
+        observations,
+    )
+    .await
+    .map_err(|err| format!("Could not read this bot's machine: {err}"))?;
+    match outcome.vm {
+        Some(vm) => Ok(crate::vm::vm_desk(&vm, vm_config)),
+        None => Err(outcome.detail),
+    }
+}
+
+pub async fn desk_config_for_bot_owned(
+    db: Arc<Mutex<Db>>,
+    vm_docker: Arc<dyn crate::vm::DockerRun>,
+    vm_config: Arc<store::vms::VmConfig>,
+    vm_enabled: bool,
+    bot_id: String,
+    desktop_states: Arc<crate::observations::DesktopStateRegistry>,
+    observations: Arc<crate::observations::ObservationRegistry>,
+) -> Result<
+    (
+        DeskConfig,
+        tokio::sync::OwnedMutexGuard<crate::observations::BotDesktopState>,
+    ),
+    String,
+> {
+    if !vm_enabled {
+        return Err(
+            "Per-bot machines are off here. There is nothing to run a command on.".to_string(),
+        );
+    }
+    let bot_name = {
+        let guard = db.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        store::get_bot(&guard, &bot_id)
+            .ok()
+            .flatten()
+            .map(|b| b.name)
+    }
+    .unwrap_or_else(|| bot_id.clone());
+    let (outcome, guard) = crate::vm::ensure_vm_in_owned(
+        db,
+        vm_docker,
+        bot_id,
+        bot_name,
+        Arc::clone(&vm_config),
+        desktop_states,
+        observations,
+    )
+    .await?;
+    match outcome.vm {
+        Some(vm) => Ok((crate::vm::vm_desk(&vm, &vm_config), guard)),
+        None => Err(outcome.detail),
+    }
+}
+
+pub async fn cdp_for_bot_locked(
+    db: &Arc<Mutex<Db>>,
+    vm_docker: Arc<dyn crate::vm::DockerRun>,
+    vm_config: &store::vms::VmConfig,
+    vm_enabled: bool,
+    bot_id: &str,
+    desktop: &mut crate::observations::BotDesktopState,
+    observations: &crate::observations::ObservationRegistry,
+) -> Result<Arc<dyn Cdp>, String> {
+    if !vm_enabled {
+        return Err("Per-bot machines are off here. There is nothing to browse with.".to_string());
+    }
+    let config = desk_config_for_bot_locked(
+        db,
+        vm_docker,
+        vm_config,
+        vm_enabled,
+        bot_id,
+        desktop,
+        observations,
+    )
+    .await?;
+    let cdp = HttpCdp::new(config);
+    if wait_for_ready(&cdp, WAKE_POLL_BUDGET, WAKE_POLL_INTERVAL).await {
+        Ok(Arc::new(cdp))
+    } else {
+        Err(WAKING_UP_REASON.to_string())
+    }
+}
+
+pub async fn cdp_for_bot_owned(
+    db: Arc<Mutex<Db>>,
+    vm_docker: Arc<dyn crate::vm::DockerRun>,
+    vm_config: Arc<store::vms::VmConfig>,
+    vm_enabled: bool,
+    bot_id: String,
+    desktop_states: Arc<crate::observations::DesktopStateRegistry>,
+    observations: Arc<crate::observations::ObservationRegistry>,
+) -> Result<
+    (
+        Arc<dyn Cdp>,
+        tokio::sync::OwnedMutexGuard<crate::observations::BotDesktopState>,
+    ),
+    String,
+> {
+    if !vm_enabled {
+        return Err("Per-bot machines are off here. There is nothing to browse with.".to_string());
+    }
+    let (config, guard) = desk_config_for_bot_owned(
+        db,
+        vm_docker,
+        vm_config,
+        vm_enabled,
+        bot_id,
+        desktop_states,
+        observations,
+    )
+    .await?;
+    let cdp = HttpCdp::new(config);
+    if wait_for_ready(&cdp, WAKE_POLL_BUDGET, WAKE_POLL_INTERVAL).await {
+        Ok((Arc::new(cdp), guard))
+    } else {
+        Err(WAKING_UP_REASON.to_string())
+    }
+}
+
 pub async fn desk_config_for_bot(
     db: &Arc<Mutex<Db>>,
     vm_docker: Arc<dyn crate::vm::DockerRun>,
