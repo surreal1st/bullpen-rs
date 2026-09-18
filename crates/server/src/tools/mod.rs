@@ -26,6 +26,14 @@ mod ask_josh;
 // pattern S6-W-02 already uses for its own `main.rs` call site.
 pub mod browse;
 mod create_room;
+// S8c-03: private `mod`, NOT `pub` like `browse`/`desk_shell` above - this
+// ticket's own bite/table tests all live inside `desk_act.rs`'s own
+// `#[cfg(test)]` module (same crate, no visibility gap), and its ONE
+// cross-crate test (`tests/desk_act_routing.rs`, bite d) drives it the same
+// way `tests/desk_shell_routing.rs` drives `desk_shell` - through
+// `RunManager::toolbox_for(...).run("desk_act", ...)`, never by importing
+// this module directly. No external crate needs a name here yet.
+mod desk_act;
 // S8b-02: `pub`, same reasoning as `browse` above (this doc comment, just
 // up) - `crates/server/tests/desk_shell_routing.rs` is a separate crate and
 // needs to reach `run_desk_shell` directly, the same way
@@ -224,6 +232,15 @@ fn all_specs() -> Vec<ToolSpec> {
         // prerequisite `snap_desk`/`record_desk`/`desk_shell_stdin`/
         // `desk_act` (S8 items 4-8) all need before any of them can land.
         desk_shell::desk_shell_spec(),
+        // S8c-03: `desk_act` had the identical gap - a permission row
+        // (`permissions.rs:278`, `Allow`, already in the unattended
+        // tighten set too) and a working-bar label
+        // (`shared/src/working.rs:41`, "Using the desk"), but no spec here
+        // and no dispatch arm below until now. Runs THROUGH `desk_shell`'s
+        // own seams (`desk_shell::desk_shell_result`/`desk_shell_stdin`),
+        // never a second path to docker - see `tools::desk_act`'s own
+        // module doc.
+        desk_act::desk_act_spec(),
     ]
 }
 
@@ -480,6 +497,39 @@ pub fn build(params: BuildParams) -> ToolBox {
                                     vm_docker.as_ref(),
                                     &config,
                                     &args,
+                                )
+                                .await
+                            }
+                            Err(reason) => {
+                                format!("The shared computer did not answer: {reason}")
+                            }
+                        };
+                        (text, None)
+                    }
+                    // S8c-03: same `desk_config_for_bot` resolution as
+                    // `desk_shell` above, for the same reason - `desk_act`
+                    // runs `xdotool` through `desk_shell`'s own seams, in
+                    // the calling bot's own container, never a shared one.
+                    // `&desk_act::RealSleeper` is the ONLY place this
+                    // crate ever constructs one; every test in
+                    // `desk_act.rs` and `tests/desk_act_routing.rs` uses a
+                    // fake instead.
+                    "desk_act" => {
+                        let text = match crate::desk::desk_config_for_bot(
+                            &db,
+                            Arc::clone(&vm_docker),
+                            &vm_config,
+                            vm_enabled,
+                            &bot_id,
+                        )
+                        .await
+                        {
+                            Ok(config) => {
+                                crate::tools::desk_act::run_desk_act(
+                                    vm_docker.as_ref(),
+                                    &config,
+                                    &args,
+                                    &crate::tools::desk_act::RealSleeper,
                                 )
                                 .await
                             }

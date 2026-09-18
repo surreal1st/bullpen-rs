@@ -109,7 +109,44 @@ pub async fn run_desk_shell(docker: &dyn DockerRun, config: &DeskConfig, args: &
         return "No command was given.".to_string();
     }
 
-    let DockerResult { stdout, stderr, .. } = docker
+    let ShellResult { output, .. } = desk_shell_result(docker, config, command).await;
+    if output.is_empty() {
+        // TS `app.ts:7120`: `result.output === "" ? "(no output)" : ...`.
+        // Server-generated, not machine-derived - unfenced, same as every
+        // other refusal string in this module.
+        return "(no output)".to_string();
+    }
+
+    // Decision 3: arbitrary text off a machine with a network route MUST be
+    // marked as data before it ever reaches a prompt - same fence
+    // `browse`/`read_page`/`click`/`type_text` already put around page text
+    // (`tools/browse.rs`'s own header doc).
+    fence_tool_output(&output)
+}
+
+/// S8c-03's own gap, closed here rather than duplicated: TS has both
+/// `deskShell` and `deskShellStdin` return `ShellResult` (`desk.ts:384-434`,
+/// `:527-565`); the earlier port of `run_desk_shell` alone collapsed the
+/// non-stdin shape into an already-fenced, already-"(no output)"-substituted
+/// `String` - fine for a TOOL ENTRY POINT, useless for `desk_act`'s engine
+/// (`tools::desk_act::desk_action`), which needs the raw `ok` flag to decide
+/// whether to STOP its batch. `run_desk_shell` above is now a thin wrapper
+/// around this function (fence + "(no output)" are ITS decisions, not this
+/// function's); `desk_act` calls this function directly for every action
+/// but `type` (which needs `desk_shell_stdin` below instead, for the
+/// injection reason that function's own doc gives).
+///
+/// Same argv as `run_desk_shell`'s own (no `-i` - contrast `desk_shell_stdin`
+/// below, the ONLY caller that adds it) and the same `cap()`/`MAX_SHELL_BYTES`
+/// treatment. 🔴 `run_desk_shell`'s own observable behaviour is UNCHANGED by
+/// this split - its existing tests below were not touched and still pass;
+/// see this ticket's Result for the proof.
+pub async fn desk_shell_result(
+    docker: &dyn DockerRun,
+    config: &DeskConfig,
+    command: &str,
+) -> ShellResult {
+    let DockerResult { ok, stdout, stderr } = docker
         .call(
             &[
                 "exec",
@@ -128,29 +165,25 @@ pub async fn run_desk_shell(docker: &dyn DockerRun, config: &DeskConfig, args: &
         )
         .await;
 
-    let combined = cap(&format!("{stdout}{stderr}"));
-    if combined.is_empty() {
-        // TS `app.ts:7120`: `result.output === "" ? "(no output)" : ...`.
-        // Server-generated, not machine-derived - unfenced, same as every
-        // other refusal string in this module.
-        return "(no output)".to_string();
+    ShellResult {
+        ok,
+        output: cap(&format!("{stdout}{stderr}")),
     }
-
-    // Decision 3: arbitrary text off a machine with a network route MUST be
-    // marked as data before it ever reaches a prompt - same fence
-    // `browse`/`read_page`/`click`/`type_text` already put around page text
-    // (`tools/browse.rs`'s own header doc).
-    fence_tool_output(&combined)
 }
 
 /// Port of TS `ShellResult` (`desk.ts:384-387`). `run_desk_shell` above
 /// returns an already-fenced, already-"(no output)"-substituted `String`
-/// because it IS a tool result reaching the model directly. `desk_shell_stdin`
-/// below is explicitly NOT a tool (see this ticket's own header doc, S8c-02);
-/// its one caller, S8c-03's `deskAction` `type` branch, decides for itself
-/// whether/how to fence what comes back, so this hands `ok` and `output`
-/// back separately instead of collapsing them into one pre-formatted,
-/// model-facing string the way `run_desk_shell` does.
+/// because it IS a tool result reaching the model directly. `desk_shell_result`
+/// and `desk_shell_stdin` below are explicitly NOT tools (see this ticket's
+/// own header doc, S8c-02/S8c-03); their callers - `desk_act`'s engine -
+/// decide for themselves whether/how to fence what comes back, so both hand
+/// `ok` and `output` back separately instead of collapsing them into one
+/// pre-formatted, model-facing string the way `run_desk_shell` does.
+///
+/// `Debug`: S8c-03's own tests assert on this in failure messages
+/// (`{result:?}`) - no behavioural change, derived rather than hand-written
+/// since every field is already `Debug`.
+#[derive(Debug)]
 pub struct ShellResult {
     pub ok: bool,
     pub output: String,
