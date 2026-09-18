@@ -542,8 +542,8 @@ fn fixture_db_opens_with_routine_columns() {
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("get user_version");
     assert_eq!(
-        version, 21,
-        "schema version should be 21 (COST-01's migration 21)"
+        version, 22,
+        "schema version should be 22 (COST-02's migration 22)"
     );
 
     // F9: Round-trip one routine if any exist, proving the schema works

@@ -452,4 +452,24 @@ pub const MIGRATIONS: &[&str] = &[
     r#"
   ALTER TABLE messages ADD COLUMN cost_unknown INTEGER NOT NULL DEFAULT 0;
   "#,
+    // 22. COST-02: `runs` accumulates its usage across every step of a turn
+    //     (`server::runs::add_usage`), but until now only the numeric
+    //     columns landed on the row - never whether that accumulated total
+    //     was fully priced. A run that folded in an unpriced request, then
+    //     parked for an approval, read back as `cost_known: true` on resume
+    //     (`crates/server/src/runs.rs`'s `decide_approval` hardcoded it),
+    //     silently turning "unknown" into "priced" the moment Josh approved.
+    //     This column is where the accumulated `ModelUsage::cost_known`
+    //     lands per run, mirroring migration 21's column on `messages`.
+    //
+    //     Same no-backfill reasoning as migration 21: DEFAULT 0 applies to
+    //     every row that already exists when this migration runs, but that
+    //     is not a backfilled claim that every past run was priced - we have
+    //     no way to know that retroactively, and writing 1 (unknown) onto
+    //     them would be an equally invented claim in the other direction.
+    //     This migration only starts tracking the flag from here forward; it
+    //     does not and must not attempt to reconstruct history.
+    r#"
+  ALTER TABLE runs ADD COLUMN cost_unknown INTEGER NOT NULL DEFAULT 0;
+  "#,
 ];

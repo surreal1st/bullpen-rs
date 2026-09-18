@@ -22,7 +22,7 @@ use common::{
     ScriptedPort, as_port, own_conversation, run_row, seed_bot, seed_session, seed_user_message,
 };
 use model::ladder::Trigger;
-use model::{MessageContent, ModelEvent, ModelMessage, ToolCall};
+use model::{MessageContent, ModelEvent, ModelMessage, ModelUsage, ToolCall};
 use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
 use server::runs::{RunEvent, RunManager, StartOptions};
@@ -61,6 +61,20 @@ fn run_model(db: &Arc<Mutex<Db>>, run_id: &str) -> String {
             |row| row.get(0),
         )
         .expect("read run model")
+}
+
+/// COST-02: `runs.cost_unknown` (migration 22), read straight off the row -
+/// same posture as `run_status`/`run_model` above, never through an API
+/// response shape that could paper over what actually landed in the column.
+fn run_cost_unknown(db: &Arc<Mutex<Db>>, run_id: &str) -> i64 {
+    let db = db.lock().expect("db mutex poisoned");
+    db.conn()
+        .query_row(
+            "SELECT cost_unknown FROM runs WHERE id = ?1",
+            rusqlite::params![run_id],
+            |row| row.get(0),
+        )
+        .expect("read run cost_unknown")
 }
 
 fn run_messages_json(db: &Arc<Mutex<Db>>, run_id: &str) -> String {
@@ -1664,6 +1678,182 @@ async fn post_approvals_id_cannot_be_decided_twice() {
     )
     .await;
     assert_eq!(second, StatusCode::NOT_FOUND);
+}
+
+// ---- COST-02: `runs.cost_unknown` survives an approval resume. ----
+
+/// A `shell` call whose own `ToolCalls` event reports token counts but no
+/// cost (COST-01's `cost_known: false`), then a final answer whose `Done`
+/// usage IS fully priced. The run's accumulated usage must stay unknown
+/// end to end - `add_usage`'s AND-combination (COST-01) means one unpriced
+/// step infects the whole run, and this ticket exists so that fact survives
+/// the approval pause in the middle of it instead of being read back as
+/// `true` the moment Josh decides.
+fn shell_unpriced_then_priced_answer(answer: &str) -> ScriptedPort {
+    ScriptedPort::new(vec![
+        vec![ModelEvent::ToolCalls {
+            calls: vec![ToolCall {
+                id: "call-1".to_string(),
+                name: "shell".to_string(),
+                arguments: "{\"command\":\"rm -rf /work/x\"}".to_string(),
+            }],
+            usage: Some(ModelUsage {
+                cost_usd: 0.0,
+                input_tokens: 120,
+                output_tokens: 15,
+                cached_tokens: 0,
+                cost_known: false,
+            }),
+        }],
+        vec![
+            ModelEvent::Delta {
+                text: answer.to_string(),
+            },
+            ModelEvent::Done {
+                model: "test/model".to_string(),
+                usage: Some(ModelUsage {
+                    cost_usd: 0.02,
+                    input_tokens: 40,
+                    output_tokens: 10,
+                    cached_tokens: 0,
+                    cost_known: true,
+                }),
+                finish_reason: None,
+            },
+        ],
+    ])
+}
+
+/// Same shape as `shell_unpriced_then_priced_answer`, but BOTH usage frames
+/// are fully priced - the control case proving a genuinely known run still
+/// round-trips as known across the same pause/resume path.
+fn shell_priced_then_priced_answer(answer: &str) -> ScriptedPort {
+    ScriptedPort::new(vec![
+        vec![ModelEvent::ToolCalls {
+            calls: vec![ToolCall {
+                id: "call-1".to_string(),
+                name: "shell".to_string(),
+                arguments: "{\"command\":\"rm -rf /work/x\"}".to_string(),
+            }],
+            usage: Some(ModelUsage {
+                cost_usd: 0.01,
+                input_tokens: 120,
+                output_tokens: 15,
+                cached_tokens: 0,
+                cost_known: true,
+            }),
+        }],
+        vec![
+            ModelEvent::Delta {
+                text: answer.to_string(),
+            },
+            ModelEvent::Done {
+                model: "test/model".to_string(),
+                usage: Some(ModelUsage {
+                    cost_usd: 0.02,
+                    input_tokens: 40,
+                    output_tokens: 10,
+                    cached_tokens: 0,
+                    cost_known: true,
+                }),
+                finish_reason: None,
+            },
+        ],
+    ])
+}
+
+// COST-02, mutation target 1 & 2: a run whose accumulated usage folded in an
+// unpriced step persists `cost_unknown = 1` on its row the moment it parks
+// (the `park` write site), and the approval resume reads that flag back
+// instead of hardcoding `true` - so the FINAL settled row is still
+// `cost_unknown = 1` even though the step that ran after approval was fully
+// priced. Either the park write dropping the flag, or the resume path
+// re-hardcoding `true`, would turn this green for the wrong reason: this
+// test only passes when both halves are correct.
+#[tokio::test]
+async fn an_unpriced_run_stays_unpriced_across_an_approval_resume() {
+    let db = open_db();
+    seed_bot(&db, "arthur", "Arthur");
+    let conversation_id = own_conversation(&db, "arthur");
+    seed_user_message(&db, &conversation_id, "clean up");
+
+    let manager = Arc::new(RunManager::new(
+        Arc::clone(&db),
+        as_port(shell_unpriced_then_priced_answer("Cleaned it up.")),
+    ));
+    let run_id = manager.start(StartOptions {
+        bot_id: "arthur".to_string(),
+        conversation_id: conversation_id.clone(),
+        model: "test/model".to_string(),
+        messages: vec![ModelMessage::user("clean up")],
+        trigger: Trigger::Chat,
+        room: false,
+    });
+    drain_until_paused_or_done(manager.subscribe(&run_id)).await;
+    assert_eq!(wait_for_status(&db, &run_id, "waiting").await, "waiting");
+
+    // Parked: the unpriced step is already on the row before Josh decides
+    // anything.
+    assert_eq!(
+        run_cost_unknown(&db, &run_id),
+        1,
+        "a parked run carrying an unpriced step must persist cost_unknown = 1"
+    );
+
+    let (approval_id, ..) = pending_approval(&db, &run_id).expect("pending approval");
+    assert!(manager.decide_approval(&approval_id, true, None).await);
+    assert_eq!(wait_for_status(&db, &run_id, "done").await, "done");
+
+    // Resumed and settled: the later step was fully priced, but AND-combined
+    // usage (COST-01) means the run as a whole is still unknown - this is
+    // the resume path reading the flag back correctly instead of the old
+    // hardcoded `true`.
+    assert_eq!(
+        run_cost_unknown(&db, &run_id),
+        1,
+        "an approval resume must not silently turn an unpriced run priced"
+    );
+}
+
+// COST-02: the control case - a run with no unpriced step anywhere in it
+// round-trips as known (`cost_unknown = 0`) across the same pause/resume
+// path, proving the fix does not just flip the flag on unconditionally.
+#[tokio::test]
+async fn a_fully_priced_run_round_trips_as_known_across_an_approval_resume() {
+    let db = open_db();
+    seed_bot(&db, "arthur", "Arthur");
+    let conversation_id = own_conversation(&db, "arthur");
+    seed_user_message(&db, &conversation_id, "clean up");
+
+    let manager = Arc::new(RunManager::new(
+        Arc::clone(&db),
+        as_port(shell_priced_then_priced_answer("Cleaned it up.")),
+    ));
+    let run_id = manager.start(StartOptions {
+        bot_id: "arthur".to_string(),
+        conversation_id: conversation_id.clone(),
+        model: "test/model".to_string(),
+        messages: vec![ModelMessage::user("clean up")],
+        trigger: Trigger::Chat,
+        room: false,
+    });
+    drain_until_paused_or_done(manager.subscribe(&run_id)).await;
+    assert_eq!(wait_for_status(&db, &run_id, "waiting").await, "waiting");
+    assert_eq!(
+        run_cost_unknown(&db, &run_id),
+        0,
+        "a parked run with only priced usage must not be flagged unknown"
+    );
+
+    let (approval_id, ..) = pending_approval(&db, &run_id).expect("pending approval");
+    assert!(manager.decide_approval(&approval_id, true, None).await);
+    assert_eq!(wait_for_status(&db, &run_id, "done").await, "done");
+
+    assert_eq!(
+        run_cost_unknown(&db, &run_id),
+        0,
+        "a fully priced run must round-trip as known across an approval resume"
+    );
 }
 
 fn open_db_plain() -> Db {

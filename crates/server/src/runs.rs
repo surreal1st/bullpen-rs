@@ -2561,8 +2561,8 @@ were doing unless he changed it."
             db.conn().execute(
                 "UPDATE runs SET status = ?1, messages = ?2, text = ?3, model = ?4, steps = ?5,
                         cost_usd = ?6, input_tokens = ?7, output_tokens = ?8, cached_tokens = ?9,
-                        error = ?10, updated_at = ?11
-                   WHERE id = ?12",
+                        cost_unknown = ?10, error = ?11, updated_at = ?12
+                   WHERE id = ?13",
                 rusqlite::params![
                     status,
                     messages_json,
@@ -2573,6 +2573,7 @@ were doing unless he changed it."
                     usage.input_tokens,
                     usage.output_tokens,
                     usage.cached_tokens,
+                    !usage.cost_known,
                     failure,
                     now_iso(),
                     run_id,
@@ -2821,8 +2822,8 @@ is looking at."
             db.conn().execute(
                 "UPDATE runs SET status = 'waiting', messages = ?1, text = ?2, model = ?3, steps = ?4,
                         cost_usd = ?5, input_tokens = ?6, output_tokens = ?7, cached_tokens = ?8,
-                        updated_at = ?9
-                   WHERE id = ?10",
+                        cost_unknown = ?9, updated_at = ?10
+                   WHERE id = ?11",
                 rusqlite::params![
                     messages_json,
                     state.text,
@@ -2832,6 +2833,7 @@ is looking at."
                     usage.input_tokens,
                     usage.output_tokens,
                     usage.cached_tokens,
+                    !usage.cost_known,
                     now_iso(),
                     run_id,
                 ],
@@ -2956,6 +2958,7 @@ is looking at."
             i64,
             i64,
             i64,
+            i64,
             String,
             Option<String>,
         );
@@ -2964,7 +2967,8 @@ is looking at."
             db.conn()
                 .query_row(
                     "SELECT status, conversation_id, model, messages, text, steps,
-                            cost_usd, input_tokens, output_tokens, cached_tokens, trigger, tools
+                            cost_usd, input_tokens, output_tokens, cached_tokens, cost_unknown,
+                            trigger, tools
                        FROM runs WHERE id = ?1",
                     rusqlite::params![pending.run_id],
                     |row| {
@@ -2981,6 +2985,7 @@ is looking at."
                             row.get(9)?,
                             row.get(10)?,
                             row.get(11)?,
+                            row.get(12)?,
                         ))
                     },
                 )
@@ -3001,6 +3006,7 @@ is looking at."
             input_tokens,
             output_tokens,
             cached_tokens,
+            cost_unknown,
             trigger_str,
             tools_json,
         )) = run
@@ -3197,18 +3203,14 @@ is looking at."
                     input_tokens: input_tokens as u32,
                     output_tokens: output_tokens as u32,
                     cached_tokens: cached_tokens as u32,
-                    // The `runs` table only ever persisted the numeric
-                    // dollar total, never whether it was fully priced -
-                    // COST-01 added `cost_known` to `messages`, not to
-                    // `runs`. A run that parked mid-turn with an unpriced
-                    // step already folded into this total round-trips back
-                    // in as `true` here, which is a real gap: it can read as
-                    // priced again after an approval resume even though part
-                    // of it never was. Left as `true` (matching this run's
-                    // pre-COST-01 behaviour) rather than guessing; flagged
-                    // for the coordinator rather than adding a migration
-                    // outside this ticket's stated scope.
-                    cost_known: true,
+                    // COST-02: read back from the row instead of assuming
+                    // `true`. `settle`/`park` persist `cost_unknown` from the
+                    // accumulated `ModelUsage::cost_known` on every write
+                    // (migration 22), so a run that folded in an unpriced
+                    // step before parking stays unknown through the resume
+                    // instead of quietly becoming "priced" the moment Josh
+                    // approves.
+                    cost_known: cost_unknown == 0,
                 }),
                 resolved_usage,
             );
