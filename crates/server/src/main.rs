@@ -21,9 +21,14 @@ use model::{EventStream, ModelEvent, ModelPort, ModelRequest};
 /// `scripts/mock-roster.mjs`. A local type rather than `model::fake`, whose
 /// `FakePort` replays instantly with no delay and is `cfg(test)`-gated -
 /// this touches only this one file, nothing in `crates/model`.
+/// S8b-F1-01: `BULLPEN_FAKE_PORT=empty` is the same port with `reply: None`.
+/// It waits, then completes with no delta and no tool call at all, which is
+/// the shape a provider produced when a run settled as a silent empty
+/// success. Rendering that fix means driving a REAL run against THIS server,
+/// exactly as the working bar did above.
 #[cfg(debug_assertions)]
 struct DelayedFakePort {
-    reply: &'static str,
+    reply: Option<&'static str>,
     delay: Duration,
 }
 
@@ -34,7 +39,9 @@ impl ModelPort for DelayedFakePort {
         let delay = self.delay;
         Box::pin(async_stream::stream! {
             tokio::time::sleep(delay).await;
-            yield ModelEvent::Delta { text: reply.to_string() };
+            if let Some(reply) = reply {
+                yield ModelEvent::Delta { text: reply.to_string() };
+            }
             yield ModelEvent::Done {
                 model: "fake/delayed".to_string(),
                 usage: None,
@@ -63,10 +70,21 @@ async fn main() {
     tracing::info!(%data_dir, "bullpen data dir");
 
     #[cfg(debug_assertions)]
-    let state = if std::env::var("BULLPEN_FAKE_PORT").as_deref() == Ok("1") {
-        tracing::info!("BULLPEN_FAKE_PORT=1: model calls are scripted, no OpenRouter key needed");
+    let state = if matches!(
+        std::env::var("BULLPEN_FAKE_PORT").as_deref(),
+        Ok("1") | Ok("empty")
+    ) {
+        let empty = std::env::var("BULLPEN_FAKE_PORT").as_deref() == Ok("empty");
+        tracing::info!(
+            empty,
+            "BULLPEN_FAKE_PORT: model calls are scripted, no OpenRouter key needed"
+        );
         let fake_port: Arc<dyn ModelPort> = Arc::new(DelayedFakePort {
-            reply: "Working on it - give me a moment.",
+            reply: if empty {
+                None
+            } else {
+                Some("Working on it - give me a moment.")
+            },
             delay: Duration::from_secs(4),
         });
         server::AppState::with_port(db, fake_port)
