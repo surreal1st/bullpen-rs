@@ -190,6 +190,17 @@ pub fn BotRow(
             span { class: "bot-main",
                 span { class: "bot-line",
                     span { class: "bot-name",
+                        // RAIL-01: the ordering (`crate::store::roster::
+                        // list_roster`'s `ORDER BY pinned_at IS NULL, name`)
+                        // does most of the work of "shows a pinned bot in
+                        // the rail" - this glyph is the small, quiet mark
+                        // the ticket asks for on top of that, port of
+                        // Roster.tsx's `PinGlyph` (same `.bot-pin` class,
+                        // already in `assets/rail.css` from before this
+                        // ticket - unused until now).
+                        if bot.pinned {
+                            PinGlyph {}
+                        }
                         "{bot.name}"
                         if !bot.purpose.is_empty() {
                             span { class: "bot-role", " · {bot.purpose}" }
@@ -303,6 +314,28 @@ pub fn GroupAvatar(
             if extra > 0 {
                 span { class: "group-av-more", style: "{more_style}", "+{extra}" }
             }
+        }
+    }
+}
+
+/// RAIL-01: the small mark a pinned row wears, next to its name - exact
+/// port of Roster.tsx's `PinGlyph` (path and all), including its explicit
+/// `width`/`height` rather than leaning on `.bot-pin`'s own CSS for sizing
+/// (see that component's own doc comment on why: a static contact sheet
+/// that pastes this markup outside its stylesheet needs the icon to size
+/// itself either way).
+#[component]
+fn PinGlyph() -> Element {
+    rsx! {
+        svg {
+            class: "bot-pin",
+            view_box: "0 0 12 12",
+            fill: "currentColor",
+            "aria-label": "Pinned",
+            role: "img",
+            width: "10",
+            height: "10",
+            path { d: "M6 0.6 7.1 4l2.3.4-2 1.8.4 2.4L6 7.4 3.9 8.6l.4-2.4-2-1.8L4.6 4Z" }
         }
     }
 }

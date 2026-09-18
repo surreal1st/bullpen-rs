@@ -230,11 +230,23 @@ pub fn list_roster(db: &Db) -> rusqlite::Result<Vec<RosterEntry>> {
         .map(|r| (r.bot_id.clone(), r))
         .collect();
 
-    // Fetch all non-archived bots
+    // Fetch all non-archived bots. RAIL-01: `ORDER BY name`
+    // rather than plain `ORDER BY name` - `pinned_at IS NULL` is `0` for a
+    // pinned row (has a timestamp) and `1` for an unpinned one, so pinned
+    // bots sort first as a group, then everyone (pinned or not) falls back
+    // to name order within that group. A pin that left this ORDER BY alone
+    // would still flip `bots.pinned` to `true` but never move the row - the
+    // ticket's own "a pin that does not move the bot is not a pin." Hidden
+    // bots are NOT filtered out here on purpose: `rail.rs:44`'s
+    // `bots.iter().filter(|b| !b.hidden)` already drops them from what the
+    // client renders, and the roster response is also how the hidden-bots
+    // Settings section would notice a flag flipped without a page reload -
+    // narrowing this query the way `archived_at IS NULL` does would give
+    // the client nothing to filter.
     let mut stmt = db.conn().prepare(
         "SELECT id, name, purpose, instructions, model, archived_at, has_routine,
                 section_id, pinned_at, hidden_at, avatar, shape, effort, is_template, voice
-         FROM bots WHERE archived_at IS NULL ORDER BY name",
+         FROM bots WHERE archived_at IS NULL ORDER BY pinned_at IS NULL, name",
     )?;
 
     let bots = stmt

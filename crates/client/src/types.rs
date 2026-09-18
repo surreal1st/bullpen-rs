@@ -121,6 +121,15 @@ pub struct ArchivedBotsResponse {
     pub bots: Vec<Bot>,
 }
 
+/// RAIL-01: `GET /api/bots/hidden`'s response shape - `settings.rs`'s
+/// `HiddenBotsSection`'s only fetch, same reasoning `ArchivedBotsResponse`
+/// above already gives for reusing `Bot` rather than a narrower type.
+#[derive(Debug, Clone, PartialEq, Deserialize, Default)]
+pub struct HiddenBotsResponse {
+    #[serde(default)]
+    pub bots: Vec<Bot>,
+}
+
 /// A group chat, as the rail's GROUP CHATS section draws it. Mirrors
 /// `shared::RoomSummary` (`crates/shared/src/lib.rs`) - kept local for the
 /// same reason `Bot`/`Section` are: this crate does not depend on `shared`.

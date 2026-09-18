@@ -7,11 +7,11 @@ use crate::transport::{Request, Response};
 use crate::types::{
     ApprovalsResponse, ArchivedBotsResponse, AuthStatus, AutoReviewLogEntry, AutoReviewLogResponse,
     AutoReviewState, Bot, BotPatchResponse, BotToolsField, ConversationView, CoreStatus, Goal,
-    MadeTool, MemoryEntry, MemoryEntryField, MemoryView, ModelError, ModelField, ModelsResponse,
-    OpenQuestion, PendingApproval, PermissionsField, ProjectField, ProjectSummary, ProjectsField,
-    QuestionsResponse, RoomResponse, RoomSummary, RoomsResponse, Routine, RoutineRun, RoutingState,
-    RulesField, SharedCoreField, SharedLogField, SpendView, Tier1Models, Tier1Response, VmState,
-    WorkingBot, WorkingResponse,
+    HiddenBotsResponse, MadeTool, MemoryEntry, MemoryEntryField, MemoryView, ModelError,
+    ModelField, ModelsResponse, OpenQuestion, PendingApproval, PermissionsField, ProjectField,
+    ProjectSummary, ProjectsField, QuestionsResponse, RoomResponse, RoomSummary, RoomsResponse,
+    Routine, RoutineRun, RoutingState, RulesField, SharedCoreField, SharedLogField, SpendView,
+    Tier1Models, Tier1Response, VmState, WorkingBot, WorkingResponse,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -969,6 +969,73 @@ pub async fn fetch_archived_bots() -> Result<Vec<Bot>, String> {
         return Err(format!("/api/bots/archived -> {}", resp.status()));
     }
     resp.json::<ArchivedBotsResponse>()
+        .await
+        .map(|b| b.bots)
+        .map_err(|e| e.to_string())
+}
+
+/* --------------------------------------------------------------- RAIL-01 */
+
+/// `PATCH /api/bots/:id/rail` with a single explicit key - pin and hide
+/// only (see `crates/server/src/routes/bots.rs::patch_rail`'s own doc on
+/// the `sectionId`/`avatar`/`shape` room left for later; a call from this
+/// client should say exactly the one thing it means, same posture
+/// `archive_bot` above already takes over the route's own forgiving
+/// defaults). The route's response already carries the refreshed roster
+/// (same "one call refreshes the rail" contract `mark_bot_seen` has), but
+/// both callers below ignore it and let `app.rs`'s own `fetch_roster` be
+/// the one place this client's roster state lives - same posture
+/// `mark_bot_seen`/`archive_bot` already take, not a second copy of the
+/// roster threaded through a mutation's return value.
+async fn patch_rail(bot_id: &str, body: serde_json::Value) -> Result<(), String> {
+    let url = format!("/api/bots/{bot_id}/rail");
+    let resp = Request::patch(&url)
+        .json(&body)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if resp.ok() {
+        return Ok(());
+    }
+    // S13a-01: see `put_model_field`'s comment on why `status` must be
+    // captured before `.json()`.
+    let status = resp.status();
+    match resp.json::<ModelError>().await {
+        Ok(err) => Err(err.error),
+        Err(_) => Err(format!("{url} -> {status}")),
+    }
+}
+
+/// Pins or unpins a bot - `thread.rs`'s header button. No confirm on either
+/// side (the ticket's own call: both directions are trivially reversible),
+/// so this is a direct action rather than a modal's confirm step the way
+/// `archive_bot` above needs one.
+pub async fn set_bot_pinned(bot_id: &str, pinned: bool) -> Result<(), String> {
+    patch_rail(bot_id, serde_json::json!({ "pinned": pinned })).await
+}
+
+/// Hides or unhides a bot - `thread.rs`'s header button (hide) and
+/// `settings.rs`'s `HiddenBotsSection` (unhide). Same no-confirm posture as
+/// `set_bot_pinned` above.
+pub async fn set_bot_hidden(bot_id: &str, hidden: bool) -> Result<(), String> {
+    patch_rail(bot_id, serde_json::json!({ "hidden": hidden })).await
+}
+
+/// `GET /api/bots/hidden` - the only way a hidden bot is reachable again,
+/// backing `settings.rs`'s `HiddenBotsSection`. Same shape
+/// `fetch_archived_bots` above already takes, including "this route never
+/// refuses anything" (`crates/server/src/routes/bots.rs::list_hidden_bots`),
+/// so a non-2xx here is a plain `{url} -> {status}` string too.
+pub async fn fetch_hidden_bots() -> Result<Vec<Bot>, String> {
+    let resp = Request::get("/api/bots/hidden")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("/api/bots/hidden -> {}", resp.status()));
+    }
+    resp.json::<HiddenBotsResponse>()
         .await
         .map(|b| b.bots)
         .map_err(|e| e.to_string())

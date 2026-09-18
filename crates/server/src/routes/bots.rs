@@ -30,6 +30,19 @@
 //! unreachable and unrestorable - the roster query at `crates/store/src/
 //! roster.rs` deliberately hides it - so archiving would otherwise be a
 //! one-way door.
+//!
+//! RAIL-01 adds `PATCH /api/bots/:id/rail` (port of `app.ts:2340-2362`) and
+//! `GET /api/bots/hidden` (no TS equivalent, same reasoning `GET /api/bots/
+//! archived` above already gives for inventing its own path). Scope is pin
+//! and hide ONLY - the TS route also carries `sectionId` (moving a bot
+//! between sections), `avatar` and `shape`, and none of those three are
+//! ported here; sections need their own CRUD first and are a separate
+//! ticket. `patch_rail` below still reads the body as a raw JSON object and
+//! checks each key independently (`"pinned" => ...`, `"hidden" => ...`),
+//! the same shape the TS route itself uses for all four keys - adding
+//! `sectionId`/`avatar`/`shape` later is one more `if let Some(raw) =
+//! obj.get("...")` block beside these two, not a rewrite of how the body is
+//! read or how the route answers.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -46,8 +59,10 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/bots", post(create_bot))
         .route("/api/bots/archived", get(list_archived_bots))
+        .route("/api/bots/hidden", get(list_hidden_bots))
         .route("/api/bots/{id}", patch(patch_bot))
         .route("/api/bots/{id}/archive", post(archive_bot))
+        .route("/api/bots/{id}/rail", patch(patch_rail))
 }
 
 /// F7b-01: `POST /api/bots`. The body is read as a raw JSON object, same
@@ -262,5 +277,64 @@ async fn archive_bot(
 async fn list_archived_bots(State(state): State<AppState>) -> Result<Response, crate::AppError> {
     let db = state.db();
     let bots = store::list_bots(&db, true)?;
+    Ok(Json(json!({ "bots": bots })).into_response())
+}
+
+/// RAIL-01: `PATCH /api/bots/:id/rail` - port of `app.ts:2340-2362`'s route,
+/// narrowed to `pinned`/`hidden` (see this file's top doc comment on the
+/// `sectionId`/`avatar`/`shape` room left for later).
+///
+/// The 404 check runs FIRST, before the body is even read - matching the
+/// TS's own `const bot = getBot(...); if (!bot) return ...404` ahead of its
+/// `c.req.json()` call, and the ticket's own "checked first."
+///
+/// Each field is applied only when present AND a JSON boolean, matching the
+/// TS `typeof body["pinned"] === "boolean"` guard exactly: a string `"false"`,
+/// a number, or `null` for either key is silently ignored rather than
+/// coerced or refused - the same "ignore the wrong shape" posture as a
+/// missing key, not an error. A body with neither key (including `{}`, or a
+/// body that fails to parse at all - read the same forgiving way
+/// `create_bot`/`archive_bot` above do) is therefore a no-op 200, not a 400.
+async fn patch_rail(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    body: axum::body::Bytes,
+) -> Result<Response, crate::AppError> {
+    let db = state.db();
+    if store::get_bot(&db, &id)?.is_none() {
+        return Ok(no_such_bot());
+    }
+
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap_or_else(|_| json!({}));
+    let obj = parsed.as_object().cloned().unwrap_or_default();
+
+    if let Some(serde_json::Value::Bool(pinned)) = obj.get("pinned") {
+        store::set_pinned(&db, &id, *pinned)?;
+    }
+    if let Some(serde_json::Value::Bool(hidden)) = obj.get("hidden") {
+        store::set_hidden(&db, &id, *hidden)?;
+    }
+
+    // RAIL-01: one call refreshes the rail - same contract the TS route's
+    // own `c.json({ bots: rosterView(...) })` gives, and the same envelope
+    // `mark_bot_seen`/`mark_bot_unseen` in `routes/mod.rs` already answer
+    // with for the same reason (a client that wants the new order/flags
+    // does not need a second round trip to get them).
+    let bots = store::list_roster(&db)?;
+    Ok(Json(json!({ "bots": bots })).into_response())
+}
+
+/// RAIL-01: `GET /api/bots/hidden` - the hidden-bot listing a hidden bot
+/// needs to ever be unhidden again from somewhere other than the rail
+/// itself. See this file's top doc comment for why the path (not a TS
+/// route) was picked, same reasoning `GET /api/bots/archived` above
+/// already gives. Unlike the archived listing, a hidden bot is NOT excluded
+/// from `GET /api/roster` (see `crate::store::roster::list_roster`'s own
+/// doc) - this route exists anyway because Settings' hidden-bots section
+/// (this ticket's own choice of where to put it, not the rail itself) reads
+/// from here rather than filtering the full roster fetch a second time.
+async fn list_hidden_bots(State(state): State<AppState>) -> Result<Response, crate::AppError> {
+    let db = state.db();
+    let bots = store::list_hidden(&db)?;
     Ok(Json(json!({ "bots": bots })).into_response())
 }

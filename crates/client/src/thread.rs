@@ -65,6 +65,18 @@ pub fn ChatPane(
     // `None` on its own, which is what actually moves the pane off the
     // archived bot - nothing here has to clear a selection directly.
     on_archived: EventHandler<()>,
+    // RAIL-01: fires once a pin/hide toggle below resolves, same posture as
+    // `on_archived` above - this component asks for a roster refresh, it
+    // does not hold the roster itself. A hide moves the bot off the rail
+    // the same indirect way archiving does (`app.rs`'s `selected_bot`
+    // lookup comes back `None` once the roster no longer shows it there -
+    // except a hidden bot's roster row does NOT disappear, only its
+    // `hidden` flag flips, so this pane stays open on a bot Josh just hid,
+    // exactly as clicking "Hide" while reading it should feel: reversible,
+    // not a surprise eviction. See `crate::store::roster::list_roster`'s
+    // own doc on why `hidden` never leaves the roster response the way
+    // `archived` does).
+    on_rail_changed: EventHandler<()>,
 ) -> Element {
     let mut messages = use_signal(Vec::<Message>::new);
     let mut streaming = use_signal(|| None::<String>);
@@ -220,43 +232,134 @@ pub fn ChatPane(
     // a bot from the roster, and a mis-click that makes a bot vanish is
     // exactly the kind of thing Josh would have to come asking about.
     let mut archive_open = use_signal(|| false);
+    // RAIL-01: pin/hide are direct actions, not modals - the ticket's own
+    // "No confirm for either. Both are trivially reversible and a confirm
+    // on a pin would be noise." `rail_error` is shared by both buttons
+    // (only one of them is ever busy at a time - each disables only itself
+    // via its own `_busy` signal below).
+    let mut rail_error = use_signal(|| None::<String>);
+    let mut pin_busy = use_signal(|| false);
+    let mut hide_busy = use_signal(|| false);
 
     rsx! {
         div { class: "pane",
             if let Some(current) = local_bot.read().clone() {
-                div { class: "pane-head",
-                    div { class: "pane-head-who",
-                        b { "{bot_name}" }
-                    }
-                    div { class: "pane-head-meta",
-                        button {
-                            class: "pane-perms-btn",
-                            onclick: move |_| perms_open.set(true),
-                            "Permissions"
+                {
+                    // RAIL-01: `toggle_pinned`/`toggle_hidden` below both
+                    // close over one clone of `current` each - `current`
+                    // itself is still needed unmoved for `ModelChip`'s
+                    // `bot: current` further down, and each closure needs
+                    // its own copy to read `.pinned`/`.hidden` from and to
+                    // write the toggled value back into after a successful
+                    // call (`local_bot.set(Some(updated))`, the same
+                    // "seed a local copy, patch it on success" posture
+                    // `ModelChip`'s own `on_saved` already established for
+                    // this pane).
+                    let pin_current = current.clone();
+                    let pin_bot_id = bot_id.clone();
+                    let pin_next = !current.pinned;
+                    let toggle_pinned = move |_| {
+                        if *pin_busy.read() {
+                            return;
                         }
-                        button {
-                            class: "pane-perms-btn",
-                            onclick: move |_| mem_open.set(true),
-                            "Memory"
+                        pin_busy.set(true);
+                        rail_error.set(None);
+                        let bot_id = pin_bot_id.clone();
+                        let mut updated = pin_current.clone();
+                        spawn(async move {
+                            match api::set_bot_pinned(&bot_id, pin_next).await {
+                                Ok(()) => {
+                                    pin_busy.set(false);
+                                    updated.pinned = pin_next;
+                                    local_bot.set(Some(updated));
+                                    on_rail_changed.call(());
+                                }
+                                Err(err) => {
+                                    pin_busy.set(false);
+                                    rail_error.set(Some(err));
+                                }
+                            }
+                        });
+                    };
+
+                    let hide_current = current.clone();
+                    let hide_bot_id = bot_id.clone();
+                    let hide_next = !current.hidden;
+                    let toggle_hidden = move |_| {
+                        if *hide_busy.read() {
+                            return;
                         }
-                        button {
-                            class: "pane-perms-btn",
-                            onclick: move |_| routines_open.set(true),
-                            "Routines"
+                        hide_busy.set(true);
+                        rail_error.set(None);
+                        let bot_id = hide_bot_id.clone();
+                        let mut updated = hide_current.clone();
+                        spawn(async move {
+                            match api::set_bot_hidden(&bot_id, hide_next).await {
+                                Ok(()) => {
+                                    hide_busy.set(false);
+                                    updated.hidden = hide_next;
+                                    local_bot.set(Some(updated));
+                                    on_rail_changed.call(());
+                                }
+                                Err(err) => {
+                                    hide_busy.set(false);
+                                    rail_error.set(Some(err));
+                                }
+                            }
+                        });
+                    };
+
+                    rsx! {
+                        div { class: "pane-head",
+                            div { class: "pane-head-who",
+                                b { "{bot_name}" }
+                            }
+                            div { class: "pane-head-meta",
+                                button {
+                                    class: "pane-perms-btn",
+                                    onclick: move |_| perms_open.set(true),
+                                    "Permissions"
+                                }
+                                button {
+                                    class: "pane-perms-btn",
+                                    onclick: move |_| mem_open.set(true),
+                                    "Memory"
+                                }
+                                button {
+                                    class: "pane-perms-btn",
+                                    onclick: move |_| routines_open.set(true),
+                                    "Routines"
+                                }
+                                button {
+                                    class: "pane-perms-btn",
+                                    onclick: move |_| goals_open.set(true),
+                                    "Goals"
+                                }
+                                button {
+                                    class: "pane-perms-btn",
+                                    disabled: *pin_busy.read(),
+                                    onclick: toggle_pinned,
+                                    if current.pinned { "Unpin" } else { "Pin" }
+                                }
+                                button {
+                                    class: "pane-perms-btn",
+                                    disabled: *hide_busy.read(),
+                                    onclick: toggle_hidden,
+                                    if current.hidden { "Unhide" } else { "Hide" }
+                                }
+                                button {
+                                    class: "pane-perms-btn",
+                                    onclick: move |_| archive_open.set(true),
+                                    "Archive"
+                                }
+                                ModelChip {
+                                    bot: current,
+                                    on_saved: move |updated: Bot| local_bot.set(Some(updated)),
+                                }
+                            }
                         }
-                        button {
-                            class: "pane-perms-btn",
-                            onclick: move |_| goals_open.set(true),
-                            "Goals"
-                        }
-                        button {
-                            class: "pane-perms-btn",
-                            onclick: move |_| archive_open.set(true),
-                            "Archive"
-                        }
-                        ModelChip {
-                            bot: current,
-                            on_saved: move |updated: Bot| local_bot.set(Some(updated)),
+                        if let Some(err) = rail_error.read().clone() {
+                            p { class: "composer-error", "{err}" }
                         }
                     }
                 }

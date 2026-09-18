@@ -249,6 +249,85 @@ pub fn set_archived(db: &Db, id: &str, archived: bool) -> rusqlite::Result<Optio
     get_bot(db, id)
 }
 
+/// RAIL-01: pins or unpins a bot - same shape as `set_archived` above,
+/// port of `roster.ts:95`'s `setPinned` (itself the `flag` helper bound to
+/// `pinned_at`). `None` when no such bot exists. Pinning stamps `pinned_at`
+/// with the current ISO timestamp; unpinning sets it back to `NULL`. This
+/// function only ever writes the one column - moving a pinned bot to the
+/// front of the rail is `crate::roster::list_roster`'s own `ORDER BY`, not
+/// anything this function does.
+pub fn set_pinned(db: &Db, id: &str, pinned: bool) -> rusqlite::Result<Option<Bot>> {
+    if get_bot(db, id)?.is_none() {
+        return Ok(None);
+    }
+    let pinned_at = pinned.then(now_iso);
+    db.conn().execute(
+        "UPDATE bots SET pinned_at = ?1 WHERE id = ?2",
+        params![pinned_at, id],
+    )?;
+    get_bot(db, id)
+}
+
+/// RAIL-01: hides or unhides a bot - same shape as `set_pinned` above, port
+/// of `roster.ts:96`'s `setHidden`. `None` when no such bot exists. Hiding
+/// is independent of archiving: this only ever touches `hidden_at`, never
+/// `archived_at`, so a bot can carry either flag, both, or neither at once
+/// (`crates/server/tests/bots.rs`'s independence test covers this).
+pub fn set_hidden(db: &Db, id: &str, hidden: bool) -> rusqlite::Result<Option<Bot>> {
+    if get_bot(db, id)?.is_none() {
+        return Ok(None);
+    }
+    let hidden_at = hidden.then(now_iso);
+    db.conn().execute(
+        "UPDATE bots SET hidden_at = ?1 WHERE id = ?2",
+        params![hidden_at, id],
+    )?;
+    get_bot(db, id)
+}
+
+/// RAIL-01: every hidden bot, independent of `archived_at` - the only way a
+/// hidden bot is reachable again once `crate::roster::list_roster` stops
+/// carrying it, same reason `list_bots(db, true)` exists for archived bots.
+/// Deliberately its own query rather than a second axis bolted onto
+/// `list_bots` above: that function's own doc already narrows it to the ONE
+/// axis every existing caller wants (`archived`), and `hidden_at`/
+/// `archived_at` are independent columns - `WHERE (archived_at IS NOT NULL)
+/// = ?1` has nothing to say about `hidden_at`, and a hidden *and* archived
+/// bot must still show up here (see the independence test this ticket
+/// adds), which a shared "narrow to whichever flag was asked for" query
+/// cannot express without also filtering on the other one.
+pub fn list_hidden(db: &Db) -> rusqlite::Result<Vec<Bot>> {
+    let mut stmt = db.conn().prepare(
+        "SELECT id, name, purpose, instructions, model, archived_at, has_routine,
+                section_id, pinned_at, hidden_at, avatar, shape, effort, is_template, voice
+         FROM bots WHERE hidden_at IS NOT NULL ORDER BY name",
+    )?;
+
+    let bots = stmt
+        .query_map([], |row| {
+            Ok(BotRow {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                purpose: row.get(2)?,
+                instructions: row.get(3)?,
+                model: row.get(4)?,
+                archived_at: row.get(5)?,
+                has_routine: row.get(6)?,
+                section_id: row.get(7)?,
+                pinned_at: row.get(8)?,
+                hidden_at: row.get(9)?,
+                avatar: row.get(10)?,
+                shape: row.get(11)?,
+                effort: row.get(12)?,
+                is_template: row.get(13)?,
+                voice: row.get(14)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(bots.into_iter().map(row_to_bot).collect())
+}
+
 /// F7b-01: adds a bot to the roster - port of `store.ts:411-426`'s
 /// `createBot`. Only `id, name, purpose, instructions, model, created_at`
 /// are written; every other column keeps its schema default (`crate::

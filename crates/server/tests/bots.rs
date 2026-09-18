@@ -713,3 +713,283 @@ async fn archived_bots_conversations_messages_and_memory_survive() {
         "an archived bot's memory log must survive: {log:?}"
     );
 }
+
+/* --------------------------------------------------------------- RAIL-01 */
+
+fn ids_in_order(bots: &Value) -> Vec<String> {
+    bots.as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// Bite: pinning must move the bot to the FRONT of the roster, not just
+/// flip its flag - checked against both the PATCH's own echoed roster and a
+/// fresh `/api/roster` fetch, so a route that returned the right order once
+/// but wrote an ORDER BY that only happens to match on this one query
+/// cannot pass by accident. Unpinning puts it back in plain name order.
+#[tokio::test]
+async fn pinning_moves_the_bot_to_the_front_unpinning_returns_it_to_name_order() {
+    let db = open_db();
+    seed_bot(&db, "alpha", "Alpha");
+    seed_bot(&db, "bravo", "Bravo");
+    seed_bot(&db, "charlie", "Charlie");
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let (status, response) = patch_route(
+        &app,
+        "/api/bots/charlie/rail",
+        &session,
+        json!({ "pinned": true }),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        ids_in_order(&response["bots"]),
+        vec!["charlie", "alpha", "bravo"],
+        "a pinned bot must lead the roster, not just carry pinned:true"
+    );
+
+    let (_status, roster) = get_route(&app, "/api/roster", &session).await;
+    assert_eq!(
+        ids_in_order(&roster["bots"]),
+        vec!["charlie", "alpha", "bravo"],
+        "the order must hold on a fresh fetch too, not just the PATCH's own echo"
+    );
+
+    let (status, response) = patch_route(
+        &app,
+        "/api/bots/charlie/rail",
+        &session,
+        json!({ "pinned": false }),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        ids_in_order(&response["bots"]),
+        vec!["alpha", "bravo", "charlie"],
+        "unpinning must put the bot back in plain name order"
+    );
+}
+
+/// Bite: hiding flags the bot (`hidden: true` on the roster row) and puts
+/// it in the hidden listing; unhiding clears the flag and drops it from
+/// that listing. `rail.rs:44`'s client-side `.filter(|b| !b.hidden)` is
+/// what actually keeps a hidden bot off the rendered rail (see
+/// `crate::store::roster::list_roster`'s own doc on why `/api/roster`
+/// itself still carries it) - this test proves the server-observable half:
+/// the flag round-trips and the hidden listing is the way back.
+#[tokio::test]
+async fn hiding_flags_the_bot_and_the_hidden_listing_carries_it() {
+    let db = open_db();
+    seed_bot(&db, "test-bot", "Test Bot");
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let (status, response) = patch_route(
+        &app,
+        "/api/bots/test-bot/rail",
+        &session,
+        json!({ "hidden": true }),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let bots = response["bots"].as_array().unwrap();
+    let bot = bots.iter().find(|b| b["id"] == "test-bot").unwrap();
+    assert_eq!(bot["hidden"], true);
+
+    let (status, hidden) = get_route(&app, "/api/bots/hidden", &session).await;
+    assert_eq!(status, 200);
+    let hidden_bots = hidden["bots"].as_array().unwrap();
+    assert!(
+        hidden_bots.iter().any(|b| b["id"] == "test-bot"),
+        "a hidden bot must be in the hidden listing: {hidden_bots:?}"
+    );
+}
+
+/// Bite: unhiding is not a one-way door in reverse either - the flag clears
+/// and the bot drops out of the hidden listing.
+#[tokio::test]
+async fn unhiding_clears_the_flag_and_drops_it_from_the_hidden_listing() {
+    let db = open_db();
+    seed_bot(&db, "test-bot", "Test Bot");
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let (status, _response) = patch_route(
+        &app,
+        "/api/bots/test-bot/rail",
+        &session,
+        json!({ "hidden": true }),
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    let (status, response) = patch_route(
+        &app,
+        "/api/bots/test-bot/rail",
+        &session,
+        json!({ "hidden": false }),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let bots = response["bots"].as_array().unwrap();
+    let bot = bots.iter().find(|b| b["id"] == "test-bot").unwrap();
+    assert_eq!(bot["hidden"], false);
+
+    let (_status, hidden) = get_route(&app, "/api/bots/hidden", &session).await;
+    let hidden_bots = hidden["bots"].as_array().unwrap();
+    assert!(
+        !hidden_bots.iter().any(|b| b["id"] == "test-bot"),
+        "an unhidden bot must not linger in the hidden listing: {hidden_bots:?}"
+    );
+}
+
+/// Bite: `{}` is a no-op success, not an error - neither flag moves.
+#[tokio::test]
+async fn rail_empty_body_is_a_noop_success() {
+    let db = open_db();
+    seed_bot(&db, "test-bot", "Test Bot");
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let (status, response) =
+        patch_route(&app, "/api/bots/test-bot/rail", &session, json!({})).await;
+    assert_eq!(status, 200);
+    let bots = response["bots"].as_array().unwrap();
+    let bot = bots.iter().find(|b| b["id"] == "test-bot").unwrap();
+    assert_eq!(bot["pinned"], false);
+    assert_eq!(bot["hidden"], false);
+}
+
+/// Bite: a non-boolean `pinned`/`hidden` (a string, a number, `null`) is
+/// IGNORED, matching the TS `typeof body[...] === "boolean"` guard exactly -
+/// not refused with a 400, and not coerced (`"false"` must not hide/pin the
+/// bot the way an "anything but literal false" coercion - the archive
+/// route's OWN rule, on a different field - would). Both keys are checked,
+/// not just `pinned`: the guard is two separate `if let` blocks in the
+/// route, and a mutation that drops only one of them must not slip past
+/// this test.
+#[tokio::test]
+async fn rail_non_boolean_values_are_ignored_not_refused() {
+    let db = open_db();
+    seed_bot(&db, "test-bot", "Test Bot");
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    for value in [json!("false"), json!(1), json!(null)] {
+        let (status, response) = patch_route(
+            &app,
+            "/api/bots/test-bot/rail",
+            &session,
+            json!({ "pinned": value }),
+        )
+        .await;
+        assert_eq!(status, 200, "pinned value={value:?}");
+        let bots = response["bots"].as_array().unwrap();
+        let bot = bots.iter().find(|b| b["id"] == "test-bot").unwrap();
+        assert_eq!(bot["pinned"], false, "pinned value={value:?} must not pin");
+
+        let (status, response) = patch_route(
+            &app,
+            "/api/bots/test-bot/rail",
+            &session,
+            json!({ "hidden": value }),
+        )
+        .await;
+        assert_eq!(status, 200, "hidden value={value:?}");
+        let bots = response["bots"].as_array().unwrap();
+        let bot = bots.iter().find(|b| b["id"] == "test-bot").unwrap();
+        assert_eq!(bot["hidden"], false, "hidden value={value:?} must not hide");
+    }
+}
+
+/// Bite: an unknown id is 404 with the exact ticket-specified body, checked
+/// BEFORE anything is written - re-fetches both the roster and the hidden
+/// listing afterward (both empty) rather than trusting the status code
+/// alone.
+#[tokio::test]
+async fn rail_unknown_id_is_404_and_writes_nothing() {
+    let db = open_db();
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let (status, response) = patch_route(
+        &app,
+        "/api/bots/does-not-exist/rail",
+        &session,
+        json!({ "pinned": true, "hidden": true }),
+    )
+    .await;
+    assert_eq!(status, 404);
+    assert_eq!(response["error"], "no such bot");
+
+    let (_status, roster) = get_route(&app, "/api/roster", &session).await;
+    assert!(roster["bots"].as_array().unwrap().is_empty());
+    let (_status, hidden) = get_route(&app, "/api/bots/hidden", &session).await;
+    assert!(hidden["bots"].as_array().unwrap().is_empty());
+}
+
+/// Bite: hidden and archived are independent flags on the same row -
+/// archiving a hidden bot keeps it hidden, and neither listing loses it;
+/// restoring (un-archiving) it afterward must not clear the hidden flag as
+/// a side effect.
+#[tokio::test]
+async fn hidden_and_archived_are_independent() {
+    let db = open_db();
+    seed_bot(&db, "test-bot", "Test Bot");
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let (status, _response) = patch_route(
+        &app,
+        "/api/bots/test-bot/rail",
+        &session,
+        json!({ "hidden": true }),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let (status, _response) = post_route(
+        &app,
+        "/api/bots/test-bot/archive",
+        &session,
+        json!({ "archived": true }),
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    let (_status, hidden) = get_route(&app, "/api/bots/hidden", &session).await;
+    let hidden_bots = hidden["bots"].as_array().unwrap();
+    let bot = hidden_bots
+        .iter()
+        .find(|b| b["id"] == "test-bot")
+        .expect("an archived bot must still be in the hidden listing");
+    assert_eq!(bot["archived"], true);
+    assert_eq!(bot["hidden"], true);
+
+    let (_status, archived) = get_route(&app, "/api/bots/archived", &session).await;
+    let archived_bots = archived["bots"].as_array().unwrap();
+    let bot = archived_bots
+        .iter()
+        .find(|b| b["id"] == "test-bot")
+        .expect("a hidden bot must still be in the archived listing");
+    assert_eq!(bot["archived"], true);
+    assert_eq!(bot["hidden"], true);
+
+    let (status, _response) = post_route(
+        &app,
+        "/api/bots/test-bot/archive",
+        &session,
+        json!({ "archived": false }),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let (_status, hidden) = get_route(&app, "/api/bots/hidden", &session).await;
+    let hidden_bots = hidden["bots"].as_array().unwrap();
+    assert!(
+        hidden_bots.iter().any(|b| b["id"] == "test-bot"),
+        "restoring an archived bot must not clear its hidden flag: {hidden_bots:?}"
+    );
+}

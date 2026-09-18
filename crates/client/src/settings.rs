@@ -70,6 +70,7 @@ fn GeneralSettings(#[props(default)] on_restored: Option<EventHandler<()>>) -> E
                 RoutingSection {}
                 AutoReviewSection {}
                 ArchivedBotsSection { on_restored }
+                HiddenBotsSection { on_restored }
             }
         }
         section { class: "stg-group",
@@ -1029,6 +1030,100 @@ fn ArchivedBotsSection(#[props(default)] on_restored: Option<EventHandler<()>>) 
                                 }
                             },
                             if busy_id.as_deref() == Some(bot.id.as_str()) { "Restoring…" } else { "Restore" }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/* ------------------------------------------------------------- RAIL-01 */
+
+/// RAIL-01: the only place a hidden bot is reachable other than the header
+/// button that hid it - tucked right beside `ArchivedBotsSection` above,
+/// the ticket's own pick (the TS original instead grows a collapsible
+/// "Hidden" section inside the rail itself, `Roster.tsx:296-318` - out of
+/// scope here; this ticket only asks for "reachable and unhideable, next to
+/// the archived list in Settings"). Same fetch-on-mount, plain-list shape,
+/// same one-click-no-confirm "Unhide" button too: hiding is even MORE
+/// reversible than archiving (no confirm on the way in either, per the
+/// ticket - "a confirm on a pin would be noise"), so there is even less
+/// reason for a confirm on the way back out than `ArchivedBotsSection`'s
+/// own "Restore" already has none of.
+#[component]
+fn HiddenBotsSection(#[props(default)] on_restored: Option<EventHandler<()>>) -> Element {
+    let mut bots = use_signal(Vec::<crate::types::Bot>::new);
+    let mut load_error = use_signal(|| None::<String>);
+    let mut unhide_error = use_signal(|| None::<String>);
+    let mut unhiding = use_signal(|| None::<String>);
+
+    use_effect(move || {
+        spawn(async move {
+            match api::fetch_hidden_bots().await {
+                Ok(list) => bots.set(list),
+                Err(err) => load_error.set(Some(err)),
+            }
+        });
+    });
+
+    let list = bots.read().clone();
+    let busy_id = unhiding.read().clone();
+
+    rsx! {
+        div { class: "stg-sub",
+            h4 { class: "stg-sub-h", "Hidden bots" }
+            p { class: "set-note",
+                "Off the rail, not archived and not deleted - conversations, memory and spend history are all still there. Unhide one to bring it back."
+            }
+
+            if let Some(err) = load_error.read().clone() {
+                div { class: "refusal",
+                    b { "Could not load hidden bots." }
+                    p { "{err}" }
+                }
+            }
+
+            if let Some(err) = unhide_error.read().clone() {
+                div { class: "refusal",
+                    b { "Could not unhide." }
+                    p { "{err}" }
+                }
+            }
+
+            if list.is_empty() && load_error.read().is_none() {
+                p { class: "muted", "No hidden bots." }
+            } else {
+                for bot in list.iter() {
+                    div { key: "{bot.id}", class: "stg-row",
+                        span { "{bot.name}" }
+                        button {
+                            class: "stg-btn",
+                            disabled: busy_id.as_deref() == Some(bot.id.as_str()),
+                            onclick: {
+                                let id = bot.id.clone();
+                                move |_| {
+                                    let id = id.clone();
+                                    unhiding.set(Some(id.clone()));
+                                    unhide_error.set(None);
+                                    spawn(async move {
+                                        match api::set_bot_hidden(&id, false).await {
+                                            Ok(()) => {
+                                                bots.write().retain(|b| b.id != id);
+                                                unhiding.set(None);
+                                                if let Some(handler) = on_restored.as_ref() {
+                                                    handler.call(());
+                                                }
+                                            }
+                                            Err(err) => {
+                                                unhiding.set(None);
+                                                unhide_error.set(Some(err));
+                                            }
+                                        }
+                                    });
+                                }
+                            },
+                            if busy_id.as_deref() == Some(bot.id.as_str()) { "Unhiding…" } else { "Unhide" }
                         }
                     }
                 }

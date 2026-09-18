@@ -315,6 +315,16 @@ fn AppShell() -> Element {
                                     roster.set(Some(fetch_roster().await));
                                 });
                             },
+                            // RAIL-01: `thread.rs` never renders the
+                            // pin/hide buttons for a room either (same
+                            // `bot` is `None` gap `on_archived` above
+                            // already notes) - still a required prop, wired
+                            // the same way for when it ever could.
+                            on_rail_changed: move |_| {
+                                spawn(async move {
+                                    roster.set(Some(fetch_roster().await));
+                                });
+                            },
                         }
                     } else if let Some(bot) = selected_bot {
                         ChatPane {
@@ -335,6 +345,19 @@ fn AppShell() -> Element {
                             // what actually moves the pane off it (see
                             // `thread.rs`'s `on_archived` doc).
                             on_archived: move |_| {
+                                spawn(async move {
+                                    roster.set(Some(fetch_roster().await));
+                                });
+                            },
+                            // RAIL-01: same refresh `on_seen`/`on_archived`
+                            // already trigger - a pin moves the row inside
+                            // the rail's own ordering, and a hide flips the
+                            // flag `rail.rs`'s filter reads, so both need
+                            // the roster re-fetched for the RAIL to notice;
+                            // this pane's own `local_bot` (see `thread.rs`'s
+                            // doc on it) already updates itself immediately
+                            // for the header buttons' own label.
+                            on_rail_changed: move |_| {
                                 spawn(async move {
                                     roster.set(Some(fetch_roster().await));
                                 });
