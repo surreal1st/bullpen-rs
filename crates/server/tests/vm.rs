@@ -16,8 +16,8 @@
 use axum::http::{HeaderMap, HeaderValue};
 use server::desk::DeskConfig;
 use server::vm::{
-    DockerRun, FrameCapture, create_args, desk_for, ensure_vm, hibernate_idle, is_png, refresh_vm,
-    start_vm_reaper, thumbnail, touch_vm, vm_desk,
+    CapturedFrame, DockerRun, FrameCapture, create_args, desk_for, ensure_vm, hibernate_idle,
+    is_png, refresh_vm, start_vm_reaper, thumbnail, touch_vm, validate_frame, vm_desk,
 };
 use server::vm_proxy::{
     ProxyOutcome, attach_vm_proxy, build_upgrade_request, proxy_response_headers, viewer_target,
@@ -644,6 +644,56 @@ fn is_png_rejects_short_buffers_and_wrong_signature() {
     assert!(!is_png(&[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
 }
 
+#[test]
+fn validate_frame_returns_original_bytes_and_native_dimensions() {
+    let capture = FakeFrameCapture::new();
+    let expected = capture.png.clone();
+    let frame = validate_frame(expected.clone()).expect("valid PNG");
+    assert_eq!(frame.png, expected);
+    assert_eq!((frame.width, frame.height), (1, 1));
+}
+
+#[test]
+fn validate_frame_rejects_signature_only_and_corrupt_png_data() {
+    let capture = FakeFrameCapture::new();
+    assert!(
+        validate_frame(vec![
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0, 0, 0, 0, 0
+        ])
+        .is_none()
+    );
+    let mut corrupt = capture.png.clone();
+    let last = corrupt.len() - 1;
+    corrupt[last] ^= 1;
+    assert!(validate_frame(corrupt).is_none());
+}
+fn encoded_png(width: u32, height: u32) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut bytes, width, height);
+        encoder.set_color(png::ColorType::Grayscale);
+        encoder.set_depth(png::BitDepth::One);
+        let mut writer = encoder.write_header().expect("write PNG header");
+        let row_bytes = width.div_ceil(8) as usize;
+        writer
+            .write_image_data(&vec![0; row_bytes * height as usize])
+            .expect("write PNG pixels");
+    }
+    bytes
+}
+
+#[test]
+fn validate_frame_rejects_all_size_and_decode_boundaries() {
+    // A valid image plus trailing bytes isolates the byte cap from PNG corruption.
+    let mut oversized = encoded_png(1, 1);
+    oversized.resize(server::vm::MAX_FRAME_PNG_BYTES + 1, 0);
+    assert!(validate_frame(oversized).is_none());
+    assert!(validate_frame(encoded_png(4_097, 1)).is_none());
+    assert!(validate_frame(encoded_png(4_000, 2_001)).is_none());
+    let mut truncated = encoded_png(1, 1);
+    truncated.pop();
+    assert!(validate_frame(truncated).is_none());
+}
 /* --------------------------------------------------------------- thumbnail --------------------------------------------------------------- */
 
 /// Records every call it receives, same convention as `RecordingDockerRun`.
@@ -654,8 +704,16 @@ struct FakeFrameCapture {
 
 impl FakeFrameCapture {
     fn new() -> Self {
-        let mut png = vec![0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
-        png.extend_from_slice(&[0u8; 16]);
+        let mut png = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut png, 1, 1);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().expect("write PNG header");
+            writer
+                .write_image_data(&[0, 0, 0, 255])
+                .expect("write PNG pixel");
+        }
         Self {
             calls: Mutex::new(Vec::new()),
             png,
@@ -665,9 +723,9 @@ impl FakeFrameCapture {
 
 #[async_trait::async_trait]
 impl FrameCapture for FakeFrameCapture {
-    async fn capture(&self, container: &str, _cfg: &VmConfig) -> Option<Vec<u8>> {
+    async fn capture(&self, container: &str, _cfg: &VmConfig) -> Option<CapturedFrame> {
         self.calls.lock().unwrap().push(container.to_string());
-        Some(self.png.clone())
+        validate_frame(self.png.clone())
     }
 }
 
@@ -1026,4 +1084,28 @@ async fn real_docker_run_call_with_stdin_threads_the_payload_through_as_bytes_no
         "; rm -rf / `echo pwned`".as_bytes(),
         "the payload must reach CommandRunner::run's own stdin parameter, as bytes"
     );
+}
+
+#[test]
+fn validate_frame_rejects_invalid_compression_even_with_valid_chunk_crcs() {
+    // Valid signature, IHDR, chunk checksums and IEND; the IDAT zlib stream is invalid.
+    // A header/chunk-only validator accepts this, so it isolates full pixel decoding.
+    let png = vec![
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6,
+        0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 4, 73, 68, 65, 84, 0, 0, 0, 0, 234, 35, 231, 7, 0, 0,
+        0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+    ];
+    assert!(validate_frame(png).is_none());
+}
+
+#[test]
+fn validate_frame_rejects_valid_compression_with_missing_pixels() {
+    // Valid chunks and a valid empty zlib stream, but IHDR promises a full RGBA pixel.
+    // Chunk-only validation cannot detect the missing decompressed scanline.
+    let png = vec![
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6,
+        0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 11, 73, 68, 65, 84, 120, 1, 1, 0, 0, 255, 255, 0, 0, 0,
+        1, 137, 214, 174, 95, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+    ];
+    assert!(validate_frame(png).is_none());
 }

@@ -17,6 +17,8 @@
 
 use chrono::Utc;
 use std::collections::HashMap;
+use std::fmt;
+use std::io::Cursor;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 use store::Db;
@@ -1045,6 +1047,104 @@ pub fn is_png(bytes: &[u8]) -> bool {
     bytes[..SIGNATURE.len()] == SIGNATURE
 }
 
+/// Limits for an uncached observation frame. Rows are decoded one at a time,
+/// so validation does not allocate a full 16-bit RGBA image.
+pub const MAX_FRAME_PNG_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_FRAME_DIMENSION: u32 = 4_096;
+pub const MAX_FRAME_PIXELS: u64 = 8_000_000;
+const MAX_FRAME_DECODE_BYTES: usize = 32 * 1024 * 1024;
+
+#[derive(PartialEq, Eq)]
+pub struct CapturedFrame {
+    pub png: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl fmt::Debug for CapturedFrame {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CapturedFrame")
+            .field("encoded_bytes", &self.png.len())
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .finish()
+    }
+}
+
+/// Validates the whole image with decoder limits applied before headers.
+pub fn validate_frame(png_bytes: Vec<u8>) -> Option<CapturedFrame> {
+    if png_bytes.len() > MAX_FRAME_PNG_BYTES || !is_png(&png_bytes) {
+        return None;
+    }
+    let decoder = png::Decoder::new_with_limits(
+        Cursor::new(&png_bytes),
+        png::Limits {
+            bytes: MAX_FRAME_DECODE_BYTES,
+        },
+    );
+    let mut reader = decoder.read_info().ok()?;
+    let width = reader.info().width;
+    let height = reader.info().height;
+    if width == 0
+        || height == 0
+        || width > MAX_FRAME_DIMENSION
+        || height > MAX_FRAME_DIMENSION
+        || u64::from(width) * u64::from(height) > MAX_FRAME_PIXELS
+    {
+        return None;
+    }
+    while reader.next_row().ok()?.is_some() {}
+    reader.finish().ok()?;
+    Some(CapturedFrame {
+        png: png_bytes,
+        width,
+        height,
+    })
+}
+
+async fn read_capped_frame_stdout(stdout: &mut tokio::process::ChildStdout) -> Result<Vec<u8>, ()> {
+    use tokio::io::AsyncReadExt;
+    let mut bytes = Vec::with_capacity(8 * 1024);
+    let mut buffer = [0_u8; 8 * 1024];
+    loop {
+        let remaining = MAX_FRAME_PNG_BYTES.saturating_sub(bytes.len());
+        let read_len = buffer.len().min(remaining.saturating_add(1));
+        let read = stdout.read(&mut buffer[..read_len]).await.map_err(|_| ())?;
+        if read == 0 {
+            return Ok(bytes);
+        }
+        if read > remaining {
+            return Err(());
+        }
+        bytes.extend_from_slice(&buffer[..read]);
+    }
+}
+
+async fn kill_and_reap(child: &mut tokio::process::Child) {
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+}
+
+/// Worker ownership makes receiver closure an explicit cancellation signal.
+async fn collect_frame_from_child(
+    mut child: tokio::process::Child,
+    timeout: Duration,
+    cancelled: &mut tokio::sync::oneshot::Sender<Option<CapturedFrame>>,
+) -> Option<CapturedFrame> {
+    let mut stdout = child.stdout.take()?;
+    let deadline = tokio::time::Instant::now() + timeout;
+    let bytes = tokio::select! {
+        result = read_capped_frame_stdout(&mut stdout) => match result { Ok(bytes) => bytes, Err(()) => { kill_and_reap(&mut child).await; return None; } },
+        _ = tokio::time::sleep_until(deadline) => { kill_and_reap(&mut child).await; return None; },
+        _ = cancelled.closed() => { kill_and_reap(&mut child).await; return None; },
+    };
+    tokio::select! {
+        _ = child.wait() => {},
+        _ = tokio::time::sleep_until(deadline) => { kill_and_reap(&mut child).await; return None; },
+        _ = cancelled.closed() => { kill_and_reap(&mut child).await; return None; },
+    }
+    validate_frame(bytes)
+}
 /// One frame of the VM's X display, straight out of ffmpeg on stdout.
 ///
 /// Port of TS `captureFrame` (`vm.ts:528`). Bypasses `DockerRun` on
@@ -1061,12 +1161,20 @@ pub fn is_png(bytes: &[u8]) -> bool {
 /// top-left corner, which looks like a working feature. `bash -c`, not a
 /// login shell - a login shell prints its profile's output onto stdout,
 /// and stdout here IS the PNG.
-pub async fn capture_frame(container: &str, cfg: &VmConfig, timeout_ms: u64) -> Option<Vec<u8>> {
-    let script = "SIZE=$(xdpyinfo -display :1 2>/dev/null | awk \"/dimensions:/{print \\$2}\"); \
-         test -n \"$SIZE\" || SIZE=1280x800; \
-         exec ffmpeg -nostdin -loglevel quiet -f x11grab -video_size \"$SIZE\" -i :1 \
-         -frames:v 1 -f image2 -vcodec png - 2>/dev/null";
-
+/// Bounds the entire remote shell, including X-size discovery. GNU timeout's
+/// kill-after prevents a stubborn descendant from surviving its TERM grace.
+fn frame_capture_script() -> &'static str {
+    "exec timeout -k 5s 15s bash -c 'SIZE=$(xdpyinfo -display :1 2>/dev/null | awk \"/dimensions:/{print \\$2}\"); \
+     test -n \"$SIZE\" || exit 64; \
+     exec ffmpeg -nostdin -loglevel quiet -f x11grab -video_size \"$SIZE\" -i :1 \
+     -frames:v 1 -f image2 -vcodec png - 2>/dev/null'"
+}
+pub async fn capture_frame(
+    container: &str,
+    cfg: &VmConfig,
+    timeout_ms: u64,
+) -> Option<CapturedFrame> {
+    let script = frame_capture_script();
     let mut command = tokio::process::Command::new("docker");
     command
         .env("DOCKER_HOST", &cfg.docker_host)
@@ -1082,18 +1190,27 @@ pub async fn capture_frame(container: &str, cfg: &VmConfig, timeout_ms: u64) -> 
             script,
         ])
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
-
-    // The bytes are checked, not the exit code: ffmpeg writes a usable
-    // frame and then exits non-zero often enough that trusting the code
-    // throws away good pictures; a zero exit with 40 bytes of text on
-    // stdout would otherwise be served as an image. `is_png` covers both.
-    match tokio::time::timeout(Duration::from_millis(timeout_ms), command.output()).await {
-        Ok(Ok(out)) if is_png(&out.stdout) => Some(out.stdout),
-        _ => None,
-    }
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let child = command.spawn().ok()?;
+    spawn_frame_collection(child, Duration::from_millis(timeout_ms))
+        .await
+        .ok()
+        .flatten()
 }
-
+/// Starts the production owner task. Receiver closure is the cancellation
+/// signal; this task retains child ownership and always kills then reaps it.
+fn spawn_frame_collection(
+    child: tokio::process::Child,
+    timeout: Duration,
+) -> tokio::sync::oneshot::Receiver<Option<CapturedFrame>> {
+    let (mut result_tx, result_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let result = collect_frame_from_child(child, timeout, &mut result_tx).await;
+        let _ = result_tx.send(result);
+    });
+    result_rx
+}
 /// The thumbnail cache.
 ///
 /// Port of TS `thumbnail`/`clearThumbnailCache` (`vm.ts:572`, `vm.ts:588`).
@@ -1125,7 +1242,7 @@ fn thumbs() -> &'static Mutex<HashMap<String, CachedThumb>> {
 /// The real capture behind `thumbnail`'s cache, for production callers.
 #[async_trait::async_trait]
 pub trait FrameCapture: Send + Sync {
-    async fn capture(&self, container: &str, cfg: &VmConfig) -> Option<Vec<u8>>;
+    async fn capture(&self, container: &str, cfg: &VmConfig) -> Option<CapturedFrame>;
 }
 
 /// `FrameCapture` wired to the real `capture_frame` (20s timeout, same as
@@ -1134,7 +1251,7 @@ pub struct RealFrameCapture;
 
 #[async_trait::async_trait]
 impl FrameCapture for RealFrameCapture {
-    async fn capture(&self, container: &str, cfg: &VmConfig) -> Option<Vec<u8>> {
+    async fn capture(&self, container: &str, cfg: &VmConfig) -> Option<CapturedFrame> {
         capture_frame(container, cfg, 20_000).await
     }
 }
@@ -1154,7 +1271,8 @@ pub async fn thumbnail(
         }
     }
 
-    let png = capture.capture(container, cfg).await?;
+    let frame = capture.capture(container, cfg).await?;
+    let png = frame.png;
     thumbs()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -1175,4 +1293,142 @@ pub fn clear_thumbnail_cache() {
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .clear();
+}
+
+#[cfg(test)]
+mod capture_process_tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn captured_frame_debug_contains_only_metadata() {
+        let frame = CapturedFrame {
+            png: vec![0xde, 0xad, 0xbe, 0xef],
+            width: 11,
+            height: 13,
+        };
+        let debug = format!("{frame:?}");
+        assert!(debug.contains("encoded_bytes: 4"));
+        assert!(debug.contains("width: 11"));
+        assert!(debug.contains("height: 13"));
+        assert!(!debug.contains("222"));
+        assert!(!debug.contains("173"));
+    }
+
+    #[test]
+    fn frame_capture_script_bounds_probe_and_ffmpeg_without_dimension_fallback() {
+        let script = frame_capture_script();
+        assert!(script.starts_with("exec timeout -k 5s 15s bash -c '"));
+        assert!(script.contains("xdpyinfo -display :1"));
+        assert!(script.contains("exec ffmpeg"));
+        assert!(!script.contains("1280x800"));
+    }
+    #[test]
+    fn capture_child_fixture() {
+        let Ok(mode) = std::env::var("S8D_CAPTURE_FIXTURE") else {
+            return;
+        };
+        match mode.as_str() {
+            "overflow" => {
+                std::io::stdout()
+                    .write_all(&vec![b'x'; MAX_FRAME_PNG_BYTES + 1])
+                    .unwrap();
+                std::io::stdout().flush().unwrap();
+            }
+            "sleep" => {}
+            _ => panic!("unknown fixture mode"),
+        }
+        std::thread::sleep(Duration::from_secs(10));
+    }
+
+    async fn fixture(mode: &str) -> tokio::process::Child {
+        let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "vm::capture_process_tests::capture_child_fixture",
+                "--nocapture",
+            ])
+            .env("S8D_CAPTURE_FIXTURE", mode)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        command.spawn().unwrap()
+    }
+
+    #[cfg(windows)]
+    async fn pid_is_alive(pid: u32) -> bool {
+        let output = tokio::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+            .output()
+            .await
+            .unwrap();
+        String::from_utf8_lossy(&output.stdout).contains(&pid.to_string())
+    }
+
+    #[cfg(unix)]
+    async fn pid_is_alive(pid: u32) -> bool {
+        tokio::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .status()
+            .await
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
+    async fn assert_reaped(pid: u32) {
+        for _ in 0..20 {
+            if !pid_is_alive(pid).await {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("capture child PID {pid} survived cleanup");
+    }
+
+    #[tokio::test]
+    async fn capture_child_overflow_refuses_before_timeout_and_reaps_the_real_process() {
+        let child = fixture("overflow").await;
+        let pid = child.id().unwrap();
+        let (mut tx, _rx) = tokio::sync::oneshot::channel();
+        let started = tokio::time::Instant::now();
+        assert!(
+            collect_frame_from_child(child, Duration::from_secs(2), &mut tx)
+                .await
+                .is_none()
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "overflow must not wait for timeout"
+        );
+        assert_reaped(pid).await;
+    }
+
+    #[tokio::test]
+    async fn capture_child_timeout_kills_and_reaps_the_real_process() {
+        let child = fixture("sleep").await;
+        let pid = child.id().unwrap();
+        let (mut tx, _rx) = tokio::sync::oneshot::channel();
+        let started = std::time::Instant::now();
+        assert!(
+            collect_frame_from_child(child, Duration::from_millis(30), &mut tx)
+                .await
+                .is_none()
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "capture exceeded its deadline"
+        );
+        assert_reaped(pid).await;
+    }
+
+    #[tokio::test]
+    async fn dropping_a_live_capture_receiver_kills_and_reaps_the_real_process() {
+        let child = fixture("sleep").await;
+        let pid = child.id().unwrap();
+        let receiver = spawn_frame_collection(child, Duration::from_secs(2));
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        drop(receiver);
+        assert_reaped(pid).await;
+    }
 }

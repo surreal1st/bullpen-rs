@@ -5122,6 +5122,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "model",
+ "png 0.17.16",
  "rand 0.8.8",
  "regex",
  "reqwest",

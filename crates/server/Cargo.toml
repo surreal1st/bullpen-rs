@@ -54,6 +54,9 @@ hyper-util = { workspace = true }
 # comment for the version pin and why.
 tokio-tungstenite = { workspace = true }
 
+# S8d-02: bounded full PNG validation for VM observations.
+png = "0.17.16"
+
 [dev-dependencies]
 # S0-04: driving `build_app` in tests via `tower::ServiceExt::oneshot`, and
 # seeding a session row directly for the auth tests.
