@@ -1,6 +1,9 @@
 mod common;
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use tokio::time::Instant;
 
 use common::{ScriptedPort, as_port, own_conversation, seed_bot};
 use model::ladder::Trigger;
@@ -127,6 +130,65 @@ fn observation_and_tool_outcome_debug_never_include_png_bytes() {
         "This tool returned a screen observation in a context that cannot deliver it."
     );
     assert!(usage.is_none());
+}
+
+#[test]
+fn coordinate_claims_are_latest_single_use_generation_fresh_and_native_bounded() {
+    let admission = Arc::new(ObservationAdmission::new());
+    let registry = ObservationRegistry::new();
+
+    registry.replace(retain(&admission, "run-latest", "obs-current", 1));
+    let wrong = registry.consume_coordinates("run-latest", "arthur", "obs-old", 7, &[(0, 0)]);
+    assert!(wrong.unwrap_err().contains("latest observation"));
+    assert_eq!(
+        registry.metadata("run-latest").unwrap().observation_id,
+        "obs-current"
+    );
+    assert!(
+        registry
+            .consume_coordinates("run-latest", "arthur", "obs-current", 7, &[(3, 7)])
+            .is_ok()
+    );
+    assert!(
+        registry
+            .consume_coordinates("run-latest", "arthur", "obs-current", 7, &[(3, 7)])
+            .unwrap_err()
+            .contains("No current")
+    );
+
+    registry.replace(retain(&admission, "run-generation", "obs-generation", 2));
+    assert!(
+        registry
+            .consume_coordinates("run-generation", "arthur", "obs-generation", 8, &[(0, 0)])
+            .unwrap_err()
+            .contains("desktop changed")
+    );
+    assert!(registry.metadata("run-generation").is_none());
+
+    registry.replace(retain(&admission, "run-bounds", "obs-bounds", 3));
+    assert!(
+        registry
+            .consume_coordinates("run-bounds", "arthur", "obs-bounds", 7, &[(4, 0)])
+            .unwrap_err()
+            .contains("inside the observed 4x8")
+    );
+    assert!(registry.metadata("run-bounds").is_none());
+
+    registry.replace(retain(&admission, "run-age", "obs-age", 4));
+    assert!(
+        registry
+            .consume_coordinates_at(
+                "run-age",
+                "arthur",
+                "obs-age",
+                7,
+                &[(0, 0)],
+                Instant::now() + Duration::from_secs(31),
+            )
+            .unwrap_err()
+            .contains("older than 30 seconds")
+    );
+    assert!(registry.metadata("run-age").is_none());
 }
 
 #[test]
@@ -341,5 +403,34 @@ fn shared_png_handle_keeps_the_retained_reservation_until_last_handle_drops() {
     drop(png);
     assert_eq!(admission.snapshot().retained_in_use, 1);
     drop(another);
+    assert_eq!(admission.snapshot().retained_in_use, 0);
+}
+
+#[test]
+fn coordinate_claims_refuse_cross_run_cross_bot_and_height_boundary() {
+    let admission = Arc::new(ObservationAdmission::new());
+    let registry = ObservationRegistry::new();
+    registry.replace(retain(&admission, "run-owner", "obs-owner", 1));
+    assert!(
+        registry
+            .consume_coordinates("other-run", "arthur", "obs-owner", 7, &[(0, 0)])
+            .is_err()
+    );
+    assert!(registry.metadata("run-owner").is_some());
+    assert!(
+        registry
+            .consume_coordinates("run-owner", "other-bot", "obs-owner", 7, &[(0, 0)])
+            .unwrap_err()
+            .contains("another bot")
+    );
+    assert!(registry.metadata("run-owner").is_none());
+    registry.replace(retain(&admission, "run-height", "obs-height", 2));
+    assert!(
+        registry
+            .consume_coordinates("run-height", "arthur", "obs-height", 7, &[(0, 8)])
+            .unwrap_err()
+            .contains("inside the observed")
+    );
+    assert!(registry.metadata("run-height").is_none());
     assert_eq!(admission.snapshot().retained_in_use, 0);
 }

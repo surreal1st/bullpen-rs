@@ -370,12 +370,19 @@ async fn success_uses_persisted_effective_model_and_own_vm_without_persisting_pn
         true,
     );
 
+    manager
+        .desktop_state_registry()
+        .for_bot("arthur")
+        .lock()
+        .await
+        .advance();
     let outcome = manager
         .capture_screen_internal(&toolbox(&manager, "arthur", "run-1", "wrong/text-model"))
         .await;
     let observation = outcome.observation.expect("captured observation");
     assert_eq!(observation.metadata().run_id, "run-1");
     assert_eq!(observation.metadata().bot_id, "arthur");
+    assert_eq!(observation.metadata().desktop_generation, 1);
     assert_eq!(
         (observation.metadata().width, observation.metadata().height),
         (640, 480)
@@ -610,10 +617,15 @@ async fn capture_failure_releases_every_reservation_and_keeps_no_registry_bytes(
 #[tokio::test]
 async fn cancelled_callers_keep_both_capture_budgets_until_detached_cleanup_finishes() {
     let db = Arc::new(Mutex::new(Db::open(":memory:").unwrap()));
-    for id in ["run-1", "run-2", "run-3"] {
-        insert_run(&db, id, "arthur", "test/model");
+    for (id, bot_id) in [
+        ("run-1", "arthur"),
+        ("run-2", "merlin"),
+        ("run-3", "guinevere"),
+    ] {
+        insert_run(&db, id, bot_id, "test/model");
     }
     insert_vm(&db, "arthur");
+    insert_vm(&db, "merlin");
     let capture = Arc::new(DetachedCleanupCapture {
         started: AtomicUsize::new(0),
         cleanup: Arc::new(tokio::sync::Semaphore::new(0)),
@@ -627,9 +639,9 @@ async fn cancelled_callers_keep_both_capture_budgets_until_detached_cleanup_fini
     );
 
     let mut tasks = Vec::new();
-    for id in ["run-1", "run-2"] {
+    for (id, bot_id) in [("run-1", "arthur"), ("run-2", "merlin")] {
         let manager = Arc::clone(&manager);
-        let box_ = toolbox(&manager, "arthur", id, "ignored");
+        let box_ = toolbox(&manager, bot_id, id, "ignored");
         tasks.push(tokio::spawn(async move {
             manager.capture_screen_internal(&box_).await
         }));
@@ -660,7 +672,7 @@ async fn cancelled_callers_keep_both_capture_budgets_until_detached_cleanup_fini
     );
 
     let refused = manager
-        .capture_screen_internal(&toolbox(&manager, "arthur", "run-3", "ignored"))
+        .capture_screen_internal(&toolbox(&manager, "guinevere", "run-3", "ignored"))
         .await;
     assert!(refused.observation.is_none());
     assert_eq!(capture.started.load(Ordering::SeqCst), 2);
@@ -676,6 +688,16 @@ async fn cancelled_callers_keep_both_capture_budgets_until_detached_cleanup_fini
         2
     );
 
+    for bot in ["arthur", "merlin"] {
+        let state = manager.desktop_state_registry().for_bot(bot);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), state.lock_owned())
+                .await
+                .is_err(),
+            "capture released {bot}'s desktop lock before detached cleanup"
+        );
+    }
+
     capture.cleanup.add_permits(2);
     tokio::time::timeout(Duration::from_secs(1), async {
         while {
@@ -687,4 +709,10 @@ async fn cancelled_callers_keep_both_capture_budgets_until_detached_cleanup_fini
     })
     .await
     .expect("detached cleanup released both leases");
+    for bot in ["arthur", "merlin"] {
+        let state = manager.desktop_state_registry().for_bot(bot);
+        tokio::time::timeout(Duration::from_secs(1), state.lock_owned())
+            .await
+            .unwrap_or_else(|_| panic!("detached cleanup did not release {bot}'s desktop lock"));
+    }
 }

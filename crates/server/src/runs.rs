@@ -28,8 +28,8 @@ use crate::approvals;
 use crate::changes::{ChangeBus, ChangeKind};
 use crate::judge;
 use crate::observations::{
-    CounterClaim, ObservationAdmission, ObservationDispatch, ObservationRegistry,
-    ScreenObservation, claim_capture_attempt, claim_image_dispatch,
+    CounterClaim, DesktopStateRegistry, ObservationAdmission, ObservationDispatch,
+    ObservationRegistry, ScreenObservation, claim_capture_attempt, claim_image_dispatch,
 };
 use crate::permissions::{self, Decision};
 use crate::rules;
@@ -209,6 +209,7 @@ pub struct RunManager {
     catalog: Arc<dyn Catalog>,
     observation_admission: Arc<ObservationAdmission>,
     observations: Arc<ObservationRegistry>,
+    desktop_states: Arc<DesktopStateRegistry>,
     frame_capture: Arc<dyn vm::FrameCapture>,
     /// S6L-02: what `toolbox_for` hands `shell`/`sandbox_read` to actually run
     /// against. Resolved from `BULLPEN_SANDBOX` by the no-arg constructors
@@ -490,6 +491,7 @@ impl RunManager {
             catalog,
             observation_admission: Arc::new(ObservationAdmission::new()),
             observations: Arc::new(ObservationRegistry::new()),
+            desktop_states: Arc::new(DesktopStateRegistry::new()),
             frame_capture,
             sandbox,
             vm_docker,
@@ -523,6 +525,10 @@ impl RunManager {
 
     pub fn observation_registry(&self) -> Arc<ObservationRegistry> {
         Arc::clone(&self.observations)
+    }
+
+    pub fn desktop_state_registry(&self) -> Arc<DesktopStateRegistry> {
+        Arc::clone(&self.desktop_states)
     }
 
     async fn offered_specs_for_model(&self, toolbox: &ToolBox, model: &str) -> Vec<ToolSpec> {
@@ -670,7 +676,16 @@ impl RunManager {
                 None,
             );
         };
-        let worker_lease = reservation.into_worker();
+
+        let desktop = self.desktop_states.for_bot(bot_id);
+        let stop = self.wait_for_stop(run_id);
+        tokio::pin!(stop);
+        let desktop_guard = tokio::select! {
+            biased;
+            _ = &mut stop => return tools::ToolOutcome::new("Screen capture stopped.", None),
+            guard = desktop.lock_owned() => guard,
+        };
+        let worker_lease = reservation.into_worker(desktop_guard);
 
         let stop = self.wait_for_stop(run_id);
         tokio::pin!(stop);
@@ -716,11 +731,18 @@ impl RunManager {
             captured.dispose();
             return tools::ToolOutcome::new("Screen capture stopped.", None);
         }
-        let (frame, retained) = captured.into_frame();
+        let (frame, retained, desktop_guard) = captured.into_frame();
 
         let observation_id = Uuid::new_v4().to_string();
         let captured_at = chrono::Utc::now().to_rfc3339();
-        let observation = retained.retain(frame, run_id, bot_id, &observation_id, &captured_at, 0);
+        let observation = retained.retain(
+            frame,
+            run_id,
+            bot_id,
+            &observation_id,
+            &captured_at,
+            desktop_guard.generation(),
+        );
         self.observations.store(&observation);
         let metadata = observation.metadata();
         tools::ToolOutcome::with_observation(
@@ -1213,6 +1235,8 @@ impl RunManager {
             only,
             execution_context,
             capture_observation,
+            observations: Arc::clone(&self.observations),
+            desktop_states: Arc::clone(&self.desktop_states),
         })
     }
 

@@ -1485,10 +1485,13 @@ mod capture_process_tests {
     #[tokio::test]
     async fn cancelled_real_child_owner_holds_both_capture_leases_until_reaped() {
         let admission = Arc::new(crate::observations::ObservationAdmission::new());
+        let desktop = Arc::new(tokio::sync::Mutex::new(
+            crate::observations::BotDesktopState::default(),
+        ));
         let worker_lease = admission
             .try_begin_capture()
             .expect("capture admission")
-            .into_worker();
+            .into_worker(Arc::clone(&desktop).lock_owned().await);
         let child = fixture("sleep").await;
         let pid = child.id().unwrap();
         let receiver =
@@ -1500,6 +1503,12 @@ mod capture_process_tests {
         );
         assert_eq!(admission.snapshot().capture_decode_in_use, 1);
         assert_eq!(admission.snapshot().retained_in_use, 1);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), Arc::clone(&desktop).lock_owned())
+                .await
+                .is_err(),
+            "desktop lock was released while the real capture child was alive"
+        );
         drop(receiver);
         while pid_is_alive(pid).await {
             assert_eq!(
@@ -1511,6 +1520,12 @@ mod capture_process_tests {
                 admission.snapshot().retained_in_use,
                 1,
                 "retained-frame lease released while the child was still alive"
+            );
+            assert!(
+                tokio::time::timeout(Duration::from_millis(1), Arc::clone(&desktop).lock_owned())
+                    .await
+                    .is_err(),
+                "desktop lock released while the child was still alive"
             );
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
@@ -1524,5 +1539,8 @@ mod capture_process_tests {
         })
         .await
         .expect("owner task released decode lease after reap");
+        tokio::time::timeout(Duration::from_secs(1), desktop.lock_owned())
+            .await
+            .expect("owner task released desktop lock after reap");
     }
 }

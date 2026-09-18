@@ -24,6 +24,7 @@ use std::sync::OnceLock;
 use model::ToolSpec;
 use regex::Regex;
 use serde_json::{Value, json};
+use uuid::Uuid;
 
 use crate::desk::DeskConfig;
 use crate::vm::DockerRun;
@@ -446,16 +447,18 @@ pub async fn desk_action(
 pub fn desk_act_spec() -> ToolSpec {
     ToolSpec {
         name: "desk_act".to_string(),
-        description: "Press buttons and move the mouse on this bot's machine by pixel \
-coordinates - reaching anything on screen, not only what a browser shows. Mouse actions need \
-coordinates read off a picture of the screen, and there is no way yet to get one - key, type and \
-wait, which drive a window from the keyboard, are what actually works today. Prefer browse, \
-click and type_text for anything inside the browser - they read the page instead of a picture \
-and cost far less."
+        description: "Press buttons and move the mouse on this bot's machine by native pixel \
+coordinates. Call snap_desk first and pass its observation_id for every batch containing a \
+coordinate action. Keyboard-only key, type and wait batches do not need an observation. Prefer \
+browse, click and type_text for browser content because they read the page and cost far less."
             .to_string(),
         parameters: json!({
             "type": "object",
             "properties": {
+                "observation_id": {
+                    "type": "string",
+                    "description": "Required when any action uses coordinates. Use the latest snap_desk observation ID."
+                },
                 "actions": {
                     "type": "array",
                     "maxItems": 10,
@@ -498,9 +501,86 @@ and cost far less."
                     }
                 }
             },
-            "required": ["actions"]
+            "required": ["actions"],
+            "additionalProperties": false
         }),
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservationUse {
+    pub observation_id: String,
+    pub points: Vec<(u32, u32)>,
+}
+
+fn native_coord(value: Option<&Value>) -> Option<u32> {
+    let value = value?.as_f64()?;
+    (value.is_finite() && value.fract() == 0.0 && value >= 0.0 && value <= u32::MAX as f64)
+        .then_some(value as u32)
+}
+
+fn native_point(value: Option<&Value>) -> Option<(u32, u32)> {
+    let value = value?.as_object()?;
+    Some((native_coord(value.get("x"))?, native_coord(value.get("y"))?))
+}
+
+/// Extracts the observation claim and every syntactically valid coordinate.
+/// Malformed coordinate fields still count as coordinate use, so a matching
+/// observation is consumed before `run_desk_act` returns its existing error.
+pub fn observation_use(args: &str) -> Result<Option<ObservationUse>, String> {
+    let parsed: Value = serde_json::from_str(args).unwrap_or(Value::Null);
+    let observation_id = match parsed.get("observation_id") {
+        None => None,
+        Some(Value::String(id)) if Uuid::parse_str(id).is_ok() => Some(id.clone()),
+        Some(_) => {
+            return Err("observation_id must be a valid snap_desk observation ID.".to_string());
+        }
+    };
+    let actions = parsed
+        .get("actions")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let uses_coordinates = actions.iter().any(|action| {
+        matches!(
+            action.get("kind").and_then(Value::as_str),
+            Some("click" | "move" | "drag" | "scroll")
+        )
+    });
+    if !uses_coordinates {
+        return Ok(None);
+    }
+    let Some(observation_id) = observation_id else {
+        return Err(
+            "Coordinate actions require observation_id from this run's latest snap_desk."
+                .to_string(),
+        );
+    };
+    let mut points = Vec::new();
+    for action in actions {
+        match action.get("kind").and_then(Value::as_str) {
+            Some("click" | "move" | "scroll") => {
+                if let (Some(x), Some(y)) =
+                    (native_coord(action.get("x")), native_coord(action.get("y")))
+                {
+                    points.push((x, y));
+                }
+            }
+            Some("drag") => {
+                if let Some(point) = native_point(action.get("from")) {
+                    points.push(point);
+                }
+                if let Some(point) = native_point(action.get("to")) {
+                    points.push(point);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(Some(ObservationUse {
+        observation_id,
+        points,
+    }))
 }
 
 /* ---------------------------------------------------------------- the tool */

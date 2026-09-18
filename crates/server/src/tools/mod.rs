@@ -61,7 +61,7 @@ use model::ladder::Trigger;
 use model::{ModelPort, ModelUsage, ToolSpec};
 use store::Db;
 
-use crate::observations::ScreenObservation;
+use crate::observations::{DesktopStateRegistry, ObservationRegistry, ScreenObservation};
 use crate::permissions::{Decision, Permissions, always_on_set};
 use crate::sandbox::Sandbox;
 use crate::vm;
@@ -260,6 +260,8 @@ pub struct BuildParams {
     pub only: Option<Vec<String>>,
     pub execution_context: RunExecutionContext,
     pub capture_observation: ObservationCapture,
+    pub observations: Arc<ObservationRegistry>,
+    pub desktop_states: Arc<DesktopStateRegistry>,
 }
 
 /// F1: the full spec list this crate's toolbox can offer, before either
@@ -365,6 +367,8 @@ pub fn build(params: BuildParams) -> ToolBox {
     let only = params.only;
     let execution_context = params.execution_context;
     let capture_observation = params.capture_observation;
+    let observations = params.observations;
+    let desktop_states = params.desktop_states;
     let toolbox_bot_id = bot_id.clone();
     // F3: `always_on_set()` rides through any `only` narrowing whatever it
     // says (TS `app.ts:5783`) - a routine's phrasing turn narrowed to `[]`
@@ -390,6 +394,7 @@ pub fn build(params: BuildParams) -> ToolBox {
 
     let current_model = Arc::new(Mutex::new(initial_model.to_string()));
     let escalated: Arc<Mutex<Option<escalate::Climb>>> = Arc::new(Mutex::new(None));
+    let handler_execution_context = execution_context.clone();
 
     let handler: Arc<dyn Fn(String, String) -> ToolFuture + Send + Sync> = {
         let current_model = Arc::clone(&current_model);
@@ -406,6 +411,9 @@ pub fn build(params: BuildParams) -> ToolBox {
             let vm_docker = Arc::clone(&vm_docker);
             let vm_config = Arc::clone(&vm_config);
             let capture_observation = Arc::clone(&capture_observation);
+            let observations = Arc::clone(&observations);
+            let desktop_states = Arc::clone(&desktop_states);
+            let execution_context = handler_execution_context.clone();
             Box::pin(async move {
                 if name == "snap_desk" {
                     return snap_desk::run(&args, &capture_observation).await;
@@ -600,28 +608,18 @@ pub fn build(params: BuildParams) -> ToolBox {
                     // `desk_act.rs` and `tests/desk_act_routing.rs` uses a
                     // fake instead.
                     "desk_act" => {
-                        let text = match crate::desk::desk_config_for_bot(
-                            &db,
-                            Arc::clone(&vm_docker),
-                            &vm_config,
+                        let text = run_desk_act_guarded(
+                            db,
+                            vm_docker,
+                            vm_config,
                             vm_enabled,
-                            &bot_id,
+                            bot_id,
+                            execution_context,
+                            observations,
+                            desktop_states,
+                            args,
                         )
-                        .await
-                        {
-                            Ok(config) => {
-                                crate::tools::desk_act::run_desk_act(
-                                    vm_docker.as_ref(),
-                                    &config,
-                                    &args,
-                                    &crate::tools::desk_act::RealSleeper,
-                                )
-                                .await
-                            }
-                            Err(reason) => {
-                                format!("The shared computer did not answer: {reason}")
-                            }
-                        };
+                        .await;
                         (text, None)
                     }
                     other => (format!("Unknown tool: {other}"), None),
@@ -637,5 +635,96 @@ pub fn build(params: BuildParams) -> ToolBox {
         bot_id: toolbox_bot_id,
         execution_context,
         escalated,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_desk_act_guarded(
+    db: Arc<Mutex<Db>>,
+    vm_docker: Arc<dyn vm::DockerRun>,
+    vm_config: Arc<store::vms::VmConfig>,
+    vm_enabled: bool,
+    bot_id: String,
+    execution_context: RunExecutionContext,
+    observations: Arc<ObservationRegistry>,
+    desktop_states: Arc<DesktopStateRegistry>,
+    args: String,
+) -> String {
+    let observation_use = match desk_act::observation_use(&args) {
+        Ok(use_) => use_,
+        Err(reason) => return reason,
+    };
+    let run_id = match (&observation_use, execution_context) {
+        (Some(_), RunExecutionContext::ModelTurn { run_id }) => Some(run_id),
+        (Some(_), RunExecutionContext::Unbound) => {
+            return "Coordinate desktop actions require an active persisted run.".to_string();
+        }
+        (Some(_), RunExecutionContext::DirectRoutine) => {
+            return "Coordinate desktop actions are unavailable in a direct tool routine."
+                .to_string();
+        }
+        (None, _) => None,
+    };
+    let worker = tokio::spawn(async move {
+        let desktop = desktop_states.for_bot(&bot_id);
+        let mut state = desktop.lock().await;
+        if let Some(run_id) = run_id.as_deref() {
+            let ownership: rusqlite::Result<(String, String)> = lock_db(&db).conn().query_row(
+                "SELECT bot_id, status FROM runs WHERE id = ?1",
+                [run_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            );
+            match ownership {
+                Ok((owner, status)) if owner == bot_id && status == "running" => {}
+                Ok((owner, _)) if owner != bot_id => {
+                    return "Coordinate desktop actions cannot use another bot's run or machine."
+                        .to_string();
+                }
+                Ok(_) => return "Coordinate desktop actions require a running run.".to_string(),
+                Err(rusqlite::Error::QueryReturnedNoRows) => {
+                    return "Coordinate desktop actions require an active persisted run."
+                        .to_string();
+                }
+                Err(err) => {
+                    tracing::error!("failed to validate coordinate action ownership: {err}");
+                    return "Coordinate desktop actions could not validate their owning run."
+                        .to_string();
+                }
+            }
+        }
+
+        if let (Some(use_), Some(run_id)) = (&observation_use, run_id.as_deref())
+            && let Err(reason) = observations.consume_coordinates(
+                run_id,
+                &bot_id,
+                &use_.observation_id,
+                state.generation(),
+                &use_.points,
+            )
+        {
+            return reason;
+        }
+        observations.invalidate_bot(&bot_id);
+        state.advance();
+        let config = match crate::desk::desk_config_for_bot(
+            &db,
+            Arc::clone(&vm_docker),
+            &vm_config,
+            vm_enabled,
+            &bot_id,
+        )
+        .await
+        {
+            Ok(config) => config,
+            Err(reason) => return format!("The shared computer did not answer: {reason}"),
+        };
+        desk_act::run_desk_act(vm_docker.as_ref(), &config, &args, &desk_act::RealSleeper).await
+    });
+    match worker.await {
+        Ok(text) => text,
+        Err(err) => {
+            tracing::error!("desk_act worker failed: {err}");
+            "The desktop action failed.".to_string()
+        }
     }
 }

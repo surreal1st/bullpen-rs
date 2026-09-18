@@ -4,10 +4,12 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use rusqlite::OptionalExtension;
 use store::Db;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::time::Instant;
 
 use crate::vm::CapturedFrame;
 
@@ -16,6 +18,42 @@ pub const MAX_CONCURRENT_DECODES: usize = 2;
 pub const MAX_CONCURRENT_DISPATCHES: usize = 2;
 pub const MAX_CAPTURE_ATTEMPTS_PER_RUN: u32 = 8;
 pub const MAX_IMAGE_DISPATCHES_PER_RUN: u32 = 8;
+pub const OBSERVATION_MAX_AGE: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Default)]
+pub struct BotDesktopState {
+    generation: u64,
+}
+
+impl BotDesktopState {
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn advance(&mut self) -> u64 {
+        self.generation = self.generation.saturating_add(1);
+        self.generation
+    }
+}
+
+#[derive(Default)]
+pub struct DesktopStateRegistry {
+    bots: Mutex<HashMap<String, Arc<tokio::sync::Mutex<BotDesktopState>>>>,
+}
+
+impl DesktopStateRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn for_bot(&self, bot_id: &str) -> Arc<tokio::sync::Mutex<BotDesktopState>> {
+        let mut bots = self.bots.lock().unwrap_or_else(PoisonError::into_inner);
+        Arc::clone(
+            bots.entry(bot_id.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(BotDesktopState::default()))),
+        )
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AdmissionSnapshot {
@@ -73,10 +111,14 @@ pub struct CaptureReservation {
 }
 
 impl CaptureReservation {
-    pub fn into_worker(self) -> CaptureWorkerLease {
+    pub fn into_worker(
+        self,
+        desktop: tokio::sync::OwnedMutexGuard<BotDesktopState>,
+    ) -> CaptureWorkerLease {
         CaptureWorkerLease {
             retained: self.retained,
             decode: self.decode,
+            desktop,
         }
     }
 
@@ -106,6 +148,7 @@ impl CaptureReservation {
 pub struct CaptureWorkerLease {
     retained: OwnedSemaphorePermit,
     decode: OwnedSemaphorePermit,
+    desktop: tokio::sync::OwnedMutexGuard<BotDesktopState>,
 }
 
 impl fmt::Debug for CaptureWorkerLease {
@@ -118,6 +161,7 @@ pub struct CapturedObservationFrame {
     frame: CapturedFrame,
     retained: OwnedSemaphorePermit,
     decode: OwnedSemaphorePermit,
+    desktop: tokio::sync::OwnedMutexGuard<BotDesktopState>,
 }
 
 impl CaptureWorkerLease {
@@ -126,19 +170,27 @@ impl CaptureWorkerLease {
             frame,
             retained: self.retained,
             decode: self.decode,
+            desktop: self.desktop,
         }
     }
 }
 
 impl CapturedObservationFrame {
-    pub fn into_frame(self) -> (CapturedFrame, RetainedFrameReservation) {
+    pub fn into_frame(
+        self,
+    ) -> (
+        CapturedFrame,
+        RetainedFrameReservation,
+        tokio::sync::OwnedMutexGuard<BotDesktopState>,
+    ) {
         let CapturedObservationFrame {
             frame,
             retained,
             decode,
+            desktop,
         } = self;
         drop(decode);
-        (frame, RetainedFrameReservation { retained })
+        (frame, RetainedFrameReservation { retained }, desktop)
     }
 
     pub(crate) fn dispose(self) {
@@ -146,10 +198,12 @@ impl CapturedObservationFrame {
             frame,
             retained,
             decode,
+            desktop,
         } = self;
         drop(frame);
         drop(retained);
         drop(decode);
+        drop(desktop);
     }
 }
 
@@ -181,7 +235,7 @@ impl RetainedFrameReservation {
                 encoded_bytes: png.len(),
             },
             payload: Arc::new(FramePayload {
-                png: Arc::from(png),
+                png,
                 _retained: self.retained,
             }),
         }
@@ -217,7 +271,7 @@ pub struct ScreenObservation {
 }
 
 struct FramePayload {
-    png: Arc<[u8]>,
+    png: Vec<u8>,
     _retained: OwnedSemaphorePermit,
 }
 
@@ -321,6 +375,7 @@ pub struct ObservationRegistry {
 struct RegistryObservation {
     metadata: ObservationMetadata,
     payload: Option<Arc<FramePayload>>,
+    captured_monotonic: Instant,
 }
 
 impl ObservationRegistry {
@@ -340,6 +395,7 @@ impl ObservationRegistry {
                 RegistryObservation {
                     metadata: observation.metadata,
                     payload: Some(observation.payload),
+                    captured_monotonic: Instant::now(),
                 },
             )
             .is_some()
@@ -353,6 +409,7 @@ impl ObservationRegistry {
                 RegistryObservation {
                     metadata: observation.metadata.clone(),
                     payload: Some(Arc::clone(&observation.payload)),
+                    captured_monotonic: Instant::now(),
                 },
             )
             .is_some()
@@ -380,6 +437,80 @@ impl ObservationRegistry {
 
     pub fn release(&self, run_id: &str) -> bool {
         self.frames().remove(run_id).is_some()
+    }
+
+    pub fn invalidate_bot(&self, bot_id: &str) -> usize {
+        let mut frames = self.frames();
+        let before = frames.len();
+        frames.retain(|_, observation| observation.metadata.bot_id != bot_id);
+        before - frames.len()
+    }
+
+    pub fn consume_coordinates(
+        &self,
+        run_id: &str,
+        bot_id: &str,
+        observation_id: &str,
+        desktop_generation: u64,
+        points: &[(u32, u32)],
+    ) -> Result<ObservationMetadata, String> {
+        self.consume_coordinates_at(
+            run_id,
+            bot_id,
+            observation_id,
+            desktop_generation,
+            points,
+            Instant::now(),
+        )
+    }
+
+    pub fn consume_coordinates_at(
+        &self,
+        run_id: &str,
+        bot_id: &str,
+        observation_id: &str,
+        desktop_generation: u64,
+        points: &[(u32, u32)],
+        now: Instant,
+    ) -> Result<ObservationMetadata, String> {
+        let mut frames = self.frames();
+        let Some(current) = frames.get(run_id) else {
+            return Err(
+                "No current screen observation belongs to this run. Capture again.".to_string(),
+            );
+        };
+        if current.metadata.observation_id != observation_id {
+            return Err(
+                "That screen observation is not this run's latest observation. Capture again."
+                    .to_string(),
+            );
+        }
+        let current = frames
+            .remove(run_id)
+            .expect("matching observation remained present while registry was locked");
+        if current.metadata.bot_id != bot_id {
+            return Err(
+                "That screen observation belongs to another bot. Capture again.".to_string(),
+            );
+        }
+        if current.metadata.desktop_generation != desktop_generation {
+            return Err("The desktop changed after that observation. Capture again.".to_string());
+        }
+        if now.saturating_duration_since(current.captured_monotonic) > OBSERVATION_MAX_AGE {
+            return Err(
+                "That screen observation is older than 30 seconds. Capture again.".to_string(),
+            );
+        }
+        if points
+            .iter()
+            .any(|(x, y)| *x >= current.metadata.width || *y >= current.metadata.height)
+        {
+            return Err(format!(
+                "Coordinates must stay inside the observed {}x{} native-pixel desktop. Capture again.",
+                current.metadata.width, current.metadata.height
+            ));
+        }
+        Ok(current.metadata)
     }
 
     pub fn len(&self) -> usize {
