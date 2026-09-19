@@ -34,14 +34,30 @@
 //! Import is a three-step flow, collapsed to two rendered states
 //! (`ImportStage`): **Paste** (filename + textarea, "Preview") and
 //! **Preview** (the server's own parse - name, purpose, format, model pin,
-//! every warning - then "Import" or "Back"). The third step, "Done," is not
-//! a rendered state at all: a successful `POST /api/import/open` calls
-//! `on_created` directly, same as the "New bot" form's own `submit` does,
-//! and the parent closes the modal from there. Nothing about the parse
-//! happens client-side - see `api::preview_open_import`/`api::
-//! import_open_bot`'s own doc comments for why (the server owns the format
-//! rules, and the create route's response has no full bot row to read a
-//! `Bot` back from directly).
+//! the instructions themselves, every warning - then "Import" or "Back").
+//! The third step, "Done," is not a rendered state at all: a successful
+//! `POST /api/import/open` calls `on_created` directly, same as the "New
+//! bot" form's own `submit` does, and the parent closes the modal from
+//! there. Nothing about the parse happens client-side - see `api::
+//! preview_open_import`/`api::import_open_bot`'s own doc comments for why
+//! (the server owns the format rules, and the create route's response has
+//! no full bot row to read a `Bot` back from directly).
+//!
+//! IMPORT-03/F3: the preview's Instructions field is a READ-ONLY
+//! `.room-picker-textarea` (the exact class the Paste step's own editable
+//! textarea already uses), not a plain paragraph. A file's instructions are
+//! its actual content - the earlier version showed name/purpose/format/
+//! model and NOTHING about the body, so a file with perfect frontmatter and
+//! the wrong half of a document in its body previewed as entirely correct.
+//! Reusing `.room-picker-textarea` gets a capped, internally-scrolling box
+//! for free with no new CSS: a `<textarea>`'s rendered height comes from
+//! `min-height`/`rows`, never from how much text is inside it, so this
+//! shows the FULL text, never truncated - satisfying the ticket's "either
+//! it scrolls in full, or say so with a count" the simpler way, since there
+//! is nothing to truncate. `readonly` (not `disabled`) so the text stays
+//! selectable/copyable; the inline `resize: none` stops Josh from dragging
+//! a read-only preview's resize handle, the one thing `.room-picker-
+//! textarea`'s own `resize: vertical` does not fit here.
 
 use crate::api;
 use crate::types::{Bot, OpenPreview};
@@ -52,6 +68,36 @@ use dioxus::prelude::*;
 enum Mode {
     New,
     Import,
+}
+
+/// IMPORT-03/F1: the modal's own heading and its dialog `aria-label` both
+/// read this - previously both were the literal string `"New bot"` even
+/// while the Import mode was selected, so the header contradicted the
+/// selected mode. One function so the two call sites cannot drift apart
+/// again the way they already had once.
+fn modal_title(mode: Mode) -> &'static str {
+    match mode {
+        Mode::New => "New bot",
+        Mode::Import => "Import a bot",
+    }
+}
+
+/// IMPORT-03/F2: the server's wire value for `format` (`crates/server/src/
+/// import_open.rs::OpenFormat`'s serde names) is correct on the wire and
+/// wrong on a screen - mapped HERE, at the render site, never on the
+/// server, whose JSON is a contract the whole round trip (export, then
+/// import back) depends on. An unrecognised value falls through to the raw
+/// string rather than panicking or rendering blank - the server could grow
+/// a fifth format before this client is rebuilt, and a client that has
+/// never heard of it should still show SOMETHING rather than nothing.
+fn format_label(format: &str) -> &str {
+    match format {
+        "skill" => "Agent Skill",
+        "subagent" => "Claude Code subagent",
+        "agents-md" => "AGENTS.md",
+        "unknown" => "Not recognised",
+        other => other,
+    }
 }
 
 /// IMPORT-02's two rendered states inside `Mode::Import` - see this
@@ -162,10 +208,10 @@ pub fn NewBotModal(on_close: EventHandler<()>, on_created: EventHandler<Bot>) ->
                 class: "modal room-picker",
                 role: "dialog",
                 "aria-modal": "true",
-                "aria-label": "New bot",
+                "aria-label": "{modal_title(*mode.read())}",
                 onclick: move |evt| evt.stop_propagation(),
                 div { class: "modal-head",
-                    h2 { "New bot" }
+                    h2 { "{modal_title(*mode.read())}" }
                     button {
                         class: "modal-x",
                         "aria-label": "Close",
@@ -265,12 +311,22 @@ pub fn NewBotModal(on_close: EventHandler<()>, on_created: EventHandler<Bot>) ->
                         }
                         div { class: "room-picker-title",
                             "Format"
-                            p { class: "room-picker-hint", "{preview.format}" }
+                            p { class: "room-picker-hint", "{format_label(&preview.format)}" }
                         }
                         if let Some(model) = preview.model.clone() {
                             div { class: "room-picker-title",
                                 "Model"
                                 p { class: "room-picker-hint", "{model}" }
+                            }
+                        }
+                        label { class: "room-picker-title",
+                            "Instructions"
+                            textarea {
+                                class: "room-picker-textarea",
+                                style: "resize: none;",
+                                value: "{preview.instructions}",
+                                readonly: true,
+                                "aria-label": "Instructions preview",
                             }
                         }
                         for warning in &preview.warnings {
