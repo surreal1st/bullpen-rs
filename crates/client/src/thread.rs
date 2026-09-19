@@ -11,6 +11,7 @@ use crate::api;
 use crate::approvals::Approvals;
 use crate::bubble::Bubble;
 use crate::composer::Composer;
+use crate::edit_bot::EditBotModal;
 use crate::goals_editor::GoalsModal;
 use crate::memory_editor::MemoryModal;
 use crate::message_time::{day_key, format_day, format_time, now_iso, parse_epoch_ms};
@@ -231,6 +232,11 @@ pub fn ChatPane(
         local_bot.set(bot.clone());
     });
 
+    // EDIT-01: the identity editor (name/purpose/instructions) - first in
+    // this control group, since it is the most-needed one of all of them
+    // (see `edit_bot.rs`'s own top doc on the hole this closes). Same
+    // modal-over-the-thread placement as `PermissionsModal` etc. below.
+    let mut edit_open = use_signal(|| false);
     // S2-F-08 (D1): the permissions grid used to sit inline under the
     // header (`section.pane-perms`), eating the top half of the pane on
     // every bot. It now opens over the thread instead, behind this button -
@@ -542,6 +548,11 @@ pub fn ChatPane(
                             div { class: "pane-head-meta",
                                 button {
                                     class: "pane-perms-btn",
+                                    onclick: move |_| edit_open.set(true),
+                                    "Edit"
+                                }
+                                button {
+                                    class: "pane-perms-btn",
                                     onclick: move |_| perms_open.set(true),
                                     "Permissions"
                                 }
@@ -653,6 +664,27 @@ pub fn ChatPane(
                 // narrowed to the non-room path exactly like the
                 // permissions grid and `ModelChip` just above it.
                 VmCard { bot_id: bot_id.clone(), bot_name: bot_name.clone() }
+            }
+            if *edit_open.read() {
+                if let Some(current) = local_bot.read().clone() {
+                    EditBotModal {
+                        bot: current,
+                        on_close: move |_| edit_open.set(false),
+                        on_saved: move |updated: Bot| {
+                            edit_open.set(false);
+                            // Same "seed a local copy from the server's
+                            // response" posture pin/hide/move/avatar/shape/
+                            // `ModelChip` above already take, so the header
+                            // shows the new name immediately - PLUS
+                            // `on_rail_changed`, which none of those need
+                            // (a pin/hide/avatar/shape/model change is not
+                            // visible on the rail's own bot row the way a
+                            // name is).
+                            local_bot.set(Some(updated));
+                            on_rail_changed.call(());
+                        },
+                    }
+                }
             }
             if *perms_open.read() {
                 PermissionsModal {

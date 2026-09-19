@@ -463,6 +463,48 @@ pub fn set_hidden(db: &Db, id: &str, hidden: bool) -> rusqlite::Result<Option<Bo
     get_bot(db, id)
 }
 
+/// EDIT-01: updates a bot's `name`/`purpose`/`instructions`, each
+/// independently optional - `None` means the caller sent nothing for that
+/// field (leave the column alone), `Some` is the exact value to store.
+/// **The route decides, this function writes**: `routes/bots.rs::patch_bot`
+/// does the actual guarding (name trimmed and non-empty, purpose/
+/// instructions any string including empty) before ever calling this - the
+/// same split `set_avatar`/`set_shape` already draw between their own
+/// route-level "what counts as a value to set" decision and their own
+/// unconditional write.
+///
+/// `None` when no such bot exists, so the caller can 404 rather than
+/// silently writing nothing - the same shape `set_archived`/`set_pinned`/
+/// `set_hidden` above already use.
+pub fn set_identity(
+    db: &Db,
+    id: &str,
+    name: Option<&str>,
+    purpose: Option<&str>,
+    instructions: Option<&str>,
+) -> rusqlite::Result<Option<Bot>> {
+    if get_bot(db, id)?.is_none() {
+        return Ok(None);
+    }
+    if let Some(name) = name {
+        db.conn()
+            .execute("UPDATE bots SET name = ?1 WHERE id = ?2", params![name, id])?;
+    }
+    if let Some(purpose) = purpose {
+        db.conn().execute(
+            "UPDATE bots SET purpose = ?1 WHERE id = ?2",
+            params![purpose, id],
+        )?;
+    }
+    if let Some(instructions) = instructions {
+        db.conn().execute(
+            "UPDATE bots SET instructions = ?1 WHERE id = ?2",
+            params![instructions, id],
+        )?;
+    }
+    get_bot(db, id)
+}
+
 /// RAIL-01: every hidden bot, independent of `archived_at` - the only way a
 /// hidden bot is reachable again once `crate::roster::list_roster` stops
 /// carrying it, same reason `list_bots(db, true)` exists for archived bots.

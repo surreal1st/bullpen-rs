@@ -2,6 +2,9 @@
 //! bot's calls carry - port of `projects/bullpen-night/src/server/app.ts:1190-1240`
 //! for the `model` and `effort` fields ONLY. `name`/`purpose`/`instructions`/
 //! `voice` are not ported; nothing in this ticket touches a bot's identity.
+//! **EDIT-01 below ports the `name`/`purpose`/`instructions` third of that -
+//! `voice` is the one field that stays out**, so this sentence is now only
+//! historically accurate for `voice`.
 //!
 //! The TS route also runs a pinned model through `judgePin` (catalog lookup,
 //! `:batch`/`:free` suffix checks, provider-redundancy warnings) before
@@ -83,6 +86,41 @@
 //! Disposition` header value with no escaping needed, unlike `name`/
 //! `description`/the instructions body, which is why only those three are
 //! JSON-encoded per the ticket's contract.
+//!
+//! EDIT-01 adds `name`/`purpose`/`instructions` to `patch_bot`'s own PATCH -
+//! port of the third of `app.ts:1190-1240` that S2-09b deliberately left
+//! out (that ticket's own doc, above, named exactly this gap). Before this,
+//! nothing anywhere in this port ever wrote a bot's instructions after
+//! creation (`grep "SET instructions" crates/store` returned nothing) - a
+//! bot made in the app had empty instructions forever, and `new_bot.rs`'s
+//! own copy ("Give it instructions and a model next") had no "next" to send
+//! Josh to. Import (`routes/import.rs`) was the only way in.
+//!
+//! The three guards are NOT the same shape as each other, matching the TS
+//! exactly rather than picking one shared rule:
+//! - `name` applies only when it is a string AND non-empty after trimming,
+//!   and the TRIMMED value is what is stored. An empty or whitespace-only
+//!   `name` is silently ignored, not a 400 - the TS never refuses this, it
+//!   just treats it as "no change requested."
+//! - `purpose`/`instructions` apply for ANY string, empty included -
+//!   clearing either is legitimate (Josh emptying a bot's purpose, or
+//!   replacing its instructions with a shorter draft, is not an error).
+//!
+//! `voice` stays out on purpose: it is S11's device-voice field, and
+//! nothing in this port writes it anywhere except `store::duplicate_bot`
+//! (which only ever carries an existing value ACROSS to a copy, never sets
+//! one from scratch). Adding a writer here for a field with no feature
+//! behind it yet would be a column edit pretending to be a feature.
+//!
+//! All three are collected as plain, side-effect-free locals BEFORE the
+//! `model`/`effort` guards run - the same posture `model_update`/
+//! `effort_update` already have below - so the model verdict's early
+//! `return Err(...)` (a refused pin) exits the whole handler before any of
+//! the three name/purpose/instructions `UPDATE`s in the final locked scope
+//! ever run. Nothing about the model-pin path itself (the locked scope
+//! dropped before `judge_pin`'s `.await`) is restructured - the new writes
+//! land in the SAME final scope the existing `model`/`effort` writes
+//! already use, after that `.await` has resolved.
 
 use axum::extract::{Path, State};
 use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
@@ -210,6 +248,37 @@ async fn patch_bot(
         return Err(crate::AppError::bad_request("invalid JSON body"));
     };
 
+    // EDIT-01: `name`/`purpose`/`instructions`, collected as plain
+    // side-effect-free locals - same posture as `model_update`/
+    // `effort_update` below - so a refused model pin's early `return
+    // Err(...)` further down exits before any of these are ever written.
+    //
+    // `name` matches the TS `typeof === "string" && trim() !== ""`
+    // exactly: only a non-empty-after-trim string applies, and the TRIMMED
+    // value is what gets stored. A blank/whitespace-only name is silently
+    // ignored - not a 400 - matching the TS's own "no change requested"
+    // treatment rather than inventing a refusal for it.
+    let mut name_update: Option<String> = None;
+    if let Some(serde_json::Value::String(raw)) = obj.get("name") {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            name_update = Some(trimmed.to_string());
+        }
+    }
+
+    // `purpose`/`instructions` both apply for ANY string, empty included -
+    // clearing either is legitimate, unlike `name` above. A non-string
+    // value present under either key is silently ignored, the same "wrong
+    // shape, not an error" posture `name` takes for a non-string.
+    let mut purpose_update: Option<String> = None;
+    if let Some(serde_json::Value::String(raw)) = obj.get("purpose") {
+        purpose_update = Some(raw.clone());
+    }
+    let mut instructions_update: Option<String> = None;
+    if let Some(serde_json::Value::String(raw)) = obj.get("instructions") {
+        instructions_update = Some(raw.clone());
+    }
+
     // `Some(Some(id))` = set the pin, `Some(None)` = clear it, `None` = the
     // field was absent from the body at all - collected here and written
     // once the db lock is retaken below.
@@ -275,6 +344,21 @@ async fn patch_bot(
         db.conn().execute(
             "UPDATE bots SET effort = ?1 WHERE id = ?2",
             rusqlite::params![effort, id],
+        )?;
+    }
+    // EDIT-01: only called when at least one of the three was actually
+    // present in the body - same "only write if there is something to
+    // write" posture the `model`/`effort` blocks above already take. Its
+    // own `Option<Bot>` return is unused here (the freshening `get_bot`
+    // call below already covers it) - the route already proved the bot
+    // exists at the top of this handler, before any `.await`.
+    if name_update.is_some() || purpose_update.is_some() || instructions_update.is_some() {
+        store::set_identity(
+            &db,
+            &id,
+            name_update.as_deref(),
+            purpose_update.as_deref(),
+            instructions_update.as_deref(),
         )?;
     }
 

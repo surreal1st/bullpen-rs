@@ -71,6 +71,15 @@ pub struct Bot {
     pub name: String,
     #[serde(default)]
     pub purpose: String,
+    // EDIT-01: the roster response (`store::roster::list_roster`'s own
+    // `SELECT id, name, purpose, instructions, ...`) has always carried
+    // this - this struct just never decoded it, since nothing needed it
+    // before `edit_bot.rs`'s modal had to prefill an Instructions field
+    // from the bot already open. `#[serde(default)]` for the same reason
+    // every other field here has it: a hand-built fixture that omits it
+    // still decodes.
+    #[serde(default)]
+    pub instructions: String,
     #[serde(rename = "sectionId", default)]
     pub section_id: Option<String>,
     #[serde(default)]

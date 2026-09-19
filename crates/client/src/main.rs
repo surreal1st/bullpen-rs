@@ -9,6 +9,7 @@ mod composer;
 // the default `web` feature in practice - see that module's doc).
 #[cfg(feature = "desktop")]
 mod desktop;
+mod edit_bot;
 mod events;
 mod goals_editor;
 // S13b-03-04: the pure half of reading a file a bot asked for - see that

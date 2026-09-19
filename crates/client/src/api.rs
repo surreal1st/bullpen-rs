@@ -923,6 +923,32 @@ pub async fn patch_bot(bot_id: &str, body: serde_json::Value) -> Result<Bot, Str
     }
 }
 
+/// EDIT-01: `PATCH /api/bots/:id`'s `name`/`purpose`/`instructions` half -
+/// `edit_bot.rs`'s "Save" action. A thin named wrapper over `patch_bot`
+/// above, the same "wrap the generic PATCH in a named call" shape
+/// `put_default_model`/`put_mid_model`/`put_premium_model` already take
+/// over `put_model_field`. Always sends all three keys as plain strings
+/// (never omitted, never `null`) - the route's own guards
+/// (`crates/server/src/routes/bots.rs::patch_bot`'s own doc) already treat
+/// a blank `name` as "no change" and an empty `purpose`/`instructions` as
+/// "clear it", so there is nothing left for this wrapper to decide.
+pub async fn update_bot_identity(
+    bot_id: &str,
+    name: &str,
+    purpose: &str,
+    instructions: &str,
+) -> Result<Bot, String> {
+    patch_bot(
+        bot_id,
+        serde_json::json!({
+            "name": name,
+            "purpose": purpose,
+            "instructions": instructions,
+        }),
+    )
+    .await
+}
+
 /* --------------------------------------------------------------- ARCH-01 */
 
 /// `POST /api/bots/:id/archive` - always sends an explicit `{"archived":

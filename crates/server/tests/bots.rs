@@ -1962,3 +1962,261 @@ async fn duplicate_starts_with_empty_memory() {
         "the SOURCE must keep its own memory"
     );
 }
+
+/* ----------------------------------------------------------------- EDIT-01 */
+
+/// Bite: all three identity fields change together in one PATCH, and the
+/// bot's `model`/`effort` (set beforehand through their own PATCH) are
+/// completely untouched by this same request - checked against a fresh
+/// `/api/roster` fetch afterward, not just this PATCH's own echo.
+#[tokio::test]
+async fn patch_identity_changes_all_three_and_leaves_model_and_effort_untouched() {
+    let db = open_db();
+    seed_bot(&db, "test-bot", "Old Name");
+    let session = seed_session(&db);
+    let app = app_with_catalog(db, fixture_catalog());
+
+    let (status, _response) = patch_route(
+        &app,
+        "/api/bots/test-bot",
+        &session,
+        json!({ "model": "anthropic/claude-sonnet-5", "effort": "high" }),
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    let (status, response) = patch_route(
+        &app,
+        "/api/bots/test-bot",
+        &session,
+        json!({
+            "name": "New Name",
+            "purpose": "New purpose",
+            "instructions": "New instructions",
+        }),
+    )
+    .await;
+    assert_eq!(status, 200, "{response:?}");
+    assert_eq!(response["bot"]["name"], "New Name");
+    assert_eq!(response["bot"]["purpose"], "New purpose");
+    assert_eq!(response["bot"]["instructions"], "New instructions");
+    assert_eq!(response["bot"]["model"], "anthropic/claude-sonnet-5");
+    assert_eq!(response["bot"]["effort"], "high");
+
+    let (_status, roster) = get_route(&app, "/api/roster", &session).await;
+    let bots = roster["bots"].as_array().unwrap();
+    let bot = bots.iter().find(|b| b["id"] == "test-bot").unwrap();
+    assert_eq!(bot["name"], "New Name");
+    assert_eq!(bot["purpose"], "New purpose");
+    assert_eq!(bot["instructions"], "New instructions");
+    assert_eq!(bot["model"], "anthropic/claude-sonnet-5");
+    assert_eq!(bot["effort"], "high");
+}
+
+/// Bite: each identity field can be sent ALONE without clobbering the
+/// other two - three sequential PATCHes, each touching one field, checked
+/// after every step so a mutation that clobbered a field only on the SECOND
+/// or THIRD call cannot slip past a test that only checked the first.
+#[tokio::test]
+async fn patch_identity_each_field_alone_does_not_clobber_the_others() {
+    let db = open_db();
+    seed_bot(&db, "test-bot", "Alpha");
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    // Give purpose a real starting value first (`seed_bot`'s own purpose is
+    // `""`, instructions is `"You are Alpha."`).
+    let (status, _response) = patch_route(
+        &app,
+        "/api/bots/test-bot",
+        &session,
+        json!({ "purpose": "Original purpose" }),
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    let (status, response) = patch_route(
+        &app,
+        "/api/bots/test-bot",
+        &session,
+        json!({ "name": "Beta" }),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(response["bot"]["name"], "Beta");
+    assert_eq!(response["bot"]["purpose"], "Original purpose");
+    assert_eq!(response["bot"]["instructions"], "You are Alpha.");
+
+    let (status, response) = patch_route(
+        &app,
+        "/api/bots/test-bot",
+        &session,
+        json!({ "purpose": "Updated purpose" }),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(response["bot"]["name"], "Beta");
+    assert_eq!(response["bot"]["purpose"], "Updated purpose");
+    assert_eq!(response["bot"]["instructions"], "You are Alpha.");
+
+    let (status, response) = patch_route(
+        &app,
+        "/api/bots/test-bot",
+        &session,
+        json!({ "instructions": "Be more helpful." }),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(response["bot"]["name"], "Beta");
+    assert_eq!(response["bot"]["purpose"], "Updated purpose");
+    assert_eq!(response["bot"]["instructions"], "Be more helpful.");
+}
+
+/// Bite: the asymmetry this ticket calls out as most likely to be got
+/// wrong. A whitespace-only `name` is silently IGNORED (the old name
+/// survives, no 400), while `purpose: ""` and `instructions: ""` in the
+/// SAME body DO clear their fields - matching the TS's own `trim() !== ""`
+/// guard on `name` alone.
+#[tokio::test]
+async fn patch_identity_whitespace_name_is_ignored_but_empty_purpose_and_instructions_clear() {
+    let db = open_db();
+    seed_bot(&db, "test-bot", "Original Name");
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    // A real purpose first, so clearing it to "" is actually observable.
+    let (status, _response) = patch_route(
+        &app,
+        "/api/bots/test-bot",
+        &session,
+        json!({ "purpose": "Has a purpose" }),
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    let (status, response) = patch_route(
+        &app,
+        "/api/bots/test-bot",
+        &session,
+        json!({ "name": "   ", "purpose": "", "instructions": "" }),
+    )
+    .await;
+    assert_eq!(status, 200, "{response:?}");
+    assert_eq!(
+        response["bot"]["name"], "Original Name",
+        "a whitespace-only name must be ignored, not applied: {response:?}"
+    );
+    assert_eq!(
+        response["bot"]["purpose"], "",
+        "purpose must clear to an empty string"
+    );
+    assert_eq!(
+        response["bot"]["instructions"], "",
+        "instructions must clear to an empty string"
+    );
+}
+
+/// Bite: a `name` is stored TRIMMED, not verbatim - `"  Trinity  "` becomes
+/// `"Trinity"`.
+#[tokio::test]
+async fn patch_identity_name_is_stored_trimmed() {
+    let db = open_db();
+    seed_bot(&db, "test-bot", "Original Name");
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let (status, response) = patch_route(
+        &app,
+        "/api/bots/test-bot",
+        &session,
+        json!({ "name": "  Trinity  " }),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(response["bot"]["name"], "Trinity");
+}
+
+/// Bite: an unknown id is 404 with the same body every other unknown-id
+/// route in this file answers with, and nothing is created - checked
+/// against the roster afterward (still empty), not just the status code.
+#[tokio::test]
+async fn patch_identity_unknown_id_is_404_and_writes_nothing() {
+    let db = open_db();
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let (status, response) = patch_route(
+        &app,
+        "/api/bots/does-not-exist",
+        &session,
+        json!({ "name": "New Name", "purpose": "x", "instructions": "y" }),
+    )
+    .await;
+    assert_eq!(status, 404);
+    assert_eq!(response["error"], "no such bot");
+
+    let (_status, roster) = get_route(&app, "/api/roster", &session).await;
+    assert!(roster["bots"].as_array().unwrap().is_empty());
+}
+
+/// Bite: the one that proves the refusal happens BEFORE the write. A
+/// `model` the catalogue does not list refuses the WHOLE request, and the
+/// `name` sent in the SAME body is NOT written either - checked against the
+/// roster (the old name survives), not just the 400 status, so a mutation
+/// that judged the pin AFTER writing the identity fields cannot pass.
+#[tokio::test]
+async fn patch_identity_refused_model_pin_blocks_the_name_write_too() {
+    let db = open_db();
+    seed_bot(&db, "test-bot", "Original Name");
+    let session = seed_session(&db);
+    let app = app_with_catalog(db, fixture_catalog());
+
+    let (status, response) = patch_route(
+        &app,
+        "/api/bots/test-bot",
+        &session,
+        json!({ "name": "New Name", "model": "unknown/does-not-exist" }),
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert!(
+        response["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("does not list this model")
+    );
+
+    let (_status, roster) = get_route(&app, "/api/roster", &session).await;
+    let bots = roster["bots"].as_array().unwrap();
+    let bot = bots.iter().find(|b| b["id"] == "test-bot").unwrap();
+    assert_eq!(
+        bot["name"], "Original Name",
+        "a refused model pin must block the WHOLE request, including the name write: {bot:?}"
+    );
+}
+
+/// Bite: the round trip. Edit a bot's instructions through the PATCH, then
+/// `GET /api/bots/{id}/export` and assert the exported markdown BODY
+/// carries the new text - proving the write actually reached the column
+/// `export_bot` reads from, not just the PATCH's own echoed response.
+#[tokio::test]
+async fn patch_instructions_then_export_carries_the_new_text() {
+    let db = open_db();
+    seed_bot(&db, "test-bot", "Test Bot");
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let (status, _response) = patch_route(
+        &app,
+        "/api/bots/test-bot",
+        &session,
+        json!({ "instructions": "Brand new instructions.\n\nWith a second paragraph." }),
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    let (status, _headers, text) = export_route(&app, "/api/bots/test-bot/export", &session).await;
+    assert_eq!(status, 200);
+    let (_frontmatter, body) = split_frontmatter(&text);
+    assert_eq!(body, "Brand new instructions.\n\nWith a second paragraph.");
+}
