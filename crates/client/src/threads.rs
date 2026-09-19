@@ -16,12 +16,34 @@
 //! Archive, the model chip, the permissions grid...), never a flag
 //! invented for this ticket.
 //!
-//! **Rename is out of scope, on purpose.** `PATCH /api/threads/:id` exists
-//! and works (`crates/server/src/routes/conversations.rs::rename_thread`),
-//! but `Threads.tsx` never calls it - this is a port of ONE component, and
-//! that component does not expose renaming a thread. A future ticket that
-//! wants it is a new affordance on `.thread-chip`, not something this one
-//! owes silently.
+//! **THREADS-02: rename, reversing THREADS-01's own scope call, for a
+//! reason rather than a contradiction.** THREADS-01 left `PATCH /api/
+//! threads/:id` unported because `Threads.tsx` itself never calls it - that
+//! was correct at the time. It stops being correct once chips are titled
+//! automatically from a whole first message (THREADS-01's own doc example:
+//! *"Does the chip above pick up this titl…"*): once a conversation is a
+//! place Josh returns to, being able to call it something short is worth
+//! having, and the route was already there, tested, waiting. Rename
+//! happens IN PLACE on the chip - double-click the title, Enter commits,
+//! Escape cancels, blur commits - never a modal, which would be more
+//! chrome than the one short string it edits. `ondoubleclick` was checked
+//! against this crate's pinned Dioxus (`dioxus-html 0.7.10`, `Cargo.lock`)
+//! before assuming it wires cleanly - it does (an alias for `dblclick`,
+//! `dioxus-html-0.7.10/src/events/generated.rs`), so no pencil-icon
+//! fallback was needed.
+//!
+//! **Two traps, both checked in the source, not assumed:**
+//! - `store::rename_thread` does NOT refuse an empty title - it only
+//!   returns `false` (404) when the thread id itself does not exist; an
+//!   empty title against a REAL id succeeds and silently blanks it. So "an
+//!   empty title must not be sent at all" is enforced here, client-side,
+//!   in `commit_rename` - never relying on a server refusal that does not
+//!   exist for this case.
+//! - `store::rename_thread` does NOT trim - it caps at 120 `chars()` and
+//!   stores exactly what it is given otherwise (its own local variable is
+//!   named `trimmed`, which is misleading: nothing there calls `.trim()`).
+//!   `commit_rename` trims before sending, so `"  triage  "` cannot land in
+//!   the database with its padding intact.
 //!
 //! **Picking a thread must actually change where a message goes** - the
 //! ticket's own top risk, and the most likely way to ship this looking
@@ -114,6 +136,33 @@ async fn archive_and_advance(
     }
 }
 
+/// THREADS-02: commits (or silently cancels) an in-place rename. An empty
+/// or whitespace-only `title` is treated as CANCEL and never reaches the
+/// network at all - `store::rename_thread` does not refuse one (see this
+/// module's own top doc), so a stray blank Enter would otherwise silently
+/// blank a title rather than doing nothing. The title is trimmed here too,
+/// since the server does not (same doc) - `"  triage  "` becomes `"triage"`
+/// before it is ever sent.
+///
+/// Reuses `refresh_key` rather than reloading `threads` directly - the
+/// SAME counter `thread.rs`'s own send-completion bump
+/// (THREADS-01a/F1) and `on_pick`'s own bump already drive the one
+/// reload effect in `Threads` above; a rename is a third reason that
+/// effect needs to re-run, not a reason for a second reload path.
+async fn commit_rename(
+    thread_id: String,
+    title: String,
+    mut editing: Signal<Option<String>>,
+    mut refresh_key: Signal<u32>,
+) {
+    let trimmed = title.trim();
+    if !trimmed.is_empty() {
+        let _ = api::rename_thread(&thread_id, trimmed).await;
+        refresh_key.with_mut(|k| *k += 1);
+    }
+    editing.set(None);
+}
+
 #[component]
 pub fn Threads(
     bot_id: String,
@@ -135,6 +184,15 @@ pub fn Threads(
     refresh_key: Signal<u32>,
 ) -> Element {
     let threads = use_signal(Vec::<ThreadSummary>::new);
+    // THREADS-02: which thread (if any) is being renamed in place, and the
+    // input's own live text. One slot for both, not per-chip state - only
+    // one chip is ever being renamed at a time, and this is what makes
+    // switching straight from editing one chip to double-clicking another
+    // simply discard the first edit rather than needing its own recovery
+    // path (see `commit_rename`'s callers below: a blur only ever commits
+    // when `editing` STILL names the chip it fired from).
+    let mut editing = use_signal(|| None::<String>);
+    let mut edit_value = use_signal(String::new);
 
     let effect_bot_id = bot_id.clone();
     use_effect(move || {
@@ -155,18 +213,75 @@ pub fn Threads(
                                 thread.title.clone()
                             };
                             let is_current = current_id.read().as_deref() == Some(thread.id.as_str());
+                            let is_editing = editing.read().as_deref() == Some(thread.id.as_str());
                             rsx! {
                                 span {
                                     key: "{thread.id}",
                                     class: if is_current { "thread-chip is-on" } else { "thread-chip" },
-                                    button {
-                                        class: "thread-pick",
-                                        onclick: {
-                                            let id = thread.id.clone();
-                                            move |_| on_pick.call(id.clone())
-                                        },
-                                        span { class: "thread-pick-title", "{label}" }
-                                        i { "{thread.message_count}" }
+                                    if is_editing {
+                                        input {
+                                            class: "thread-pick thread-pick-editing",
+                                            value: "{edit_value}",
+                                            autofocus: true,
+                                            oninput: move |evt| edit_value.set(evt.value()),
+                                            onkeydown: {
+                                                let id = thread.id.clone();
+                                                move |evt: KeyboardEvent| match evt.key() {
+                                                    Key::Enter => {
+                                                        evt.prevent_default();
+                                                        spawn(commit_rename(
+                                                            id.clone(),
+                                                            edit_value.peek().clone(),
+                                                            editing,
+                                                            refresh_key,
+                                                        ));
+                                                    }
+                                                    Key::Escape => {
+                                                        evt.prevent_default();
+                                                        editing.set(None);
+                                                    }
+                                                    _ => {}
+                                                }
+                                            },
+                                            onblur: {
+                                                let id = thread.id.clone();
+                                                move |_| {
+                                                    // Only this chip's OWN blur commits - Enter/
+                                                    // Escape above (or switching straight to
+                                                    // editing a DIFFERENT chip) already cleared
+                                                    // `editing` by the time an unmount-triggered
+                                                    // blur would otherwise fire here, so this
+                                                    // guard is what stops a double-commit or a
+                                                    // stray commit of the WRONG chip's text.
+                                                    if editing.peek().as_deref() == Some(id.as_str()) {
+                                                        spawn(commit_rename(
+                                                            id.clone(),
+                                                            edit_value.peek().clone(),
+                                                            editing,
+                                                            refresh_key,
+                                                        ));
+                                                    }
+                                                }
+                                            },
+                                        }
+                                    } else {
+                                        button {
+                                            class: "thread-pick",
+                                            onclick: {
+                                                let id = thread.id.clone();
+                                                move |_| on_pick.call(id.clone())
+                                            },
+                                            ondoubleclick: {
+                                                let id = thread.id.clone();
+                                                let raw_title = thread.title.clone();
+                                                move |_| {
+                                                    edit_value.set(raw_title.clone());
+                                                    editing.set(Some(id.clone()));
+                                                }
+                                            },
+                                            span { class: "thread-pick-title", "{label}" }
+                                            i { "{thread.message_count}" }
+                                        }
                                     }
                                     button {
                                         class: "thread-close",

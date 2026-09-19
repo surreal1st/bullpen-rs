@@ -111,6 +111,38 @@ pub async fn archive_thread(thread_id: &str) -> Result<(), String> {
     }
 }
 
+/// THREADS-02: `PATCH /api/threads/:id` - `threads.rs`'s in-place rename.
+/// The caller (`threads.rs::commit_rename`) has already trimmed the title
+/// and confirmed it is non-empty before calling this - verified in
+/// `crates/store/src/conversations.rs::rename_thread` before writing
+/// either of those checks into the caller rather than assuming them: the
+/// server does NOT refuse an empty title (`rename_thread` only reports
+/// `false`/404 when the thread id itself does not exist - an empty title
+/// against a REAL id succeeds and silently blanks it), and it does NOT
+/// trim (it caps at 120 `chars()`, nothing more - a variable there is
+/// named `trimmed` but it never calls `.trim()`), so both guards belong on
+/// this client's side of the call, not assumed to be redundant with the
+/// server's.
+pub async fn rename_thread(thread_id: &str, title: &str) -> Result<(), String> {
+    let url = format!("/api/threads/{thread_id}");
+    let resp = Request::patch(&url)
+        .json(&serde_json::json!({ "title": title }))
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if resp.ok() {
+        return Ok(());
+    }
+    // S13a-01: see `put_model_field`'s comment on why `status` must be
+    // captured before `.json()`.
+    let status = resp.status();
+    match resp.json::<ModelError>().await {
+        Ok(err) => Err(err.error),
+        Err(_) => Err(format!("{url} -> {status}")),
+    }
+}
+
 pub async fn fetch_rooms() -> Result<Vec<RoomSummary>, String> {
     let resp = Request::get("/api/rooms")
         .send()

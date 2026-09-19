@@ -36,7 +36,12 @@
    characters (the title is its first message), and `Threads.tsx` itself
    truncates nothing in markup, so its own CSS must be doing this work.
    Capped here, in CSS, rather than cutting the string in Rust - see
-   `threads.rs`'s own doc on why. */
+   `threads.rs`'s own doc on why.
+
+   THREADS-02 adds `.thread-pick-editing`, an `<input>` standing in for
+   `.thread-pick`'s own `<button>` while a chip is being renamed in place -
+   same sizing/padding/font, just a visible border and a lighter background
+   so it still reads as the same control. */
 
 .muted {
   color: var(--muted);
@@ -148,6 +153,20 @@
   white-space: nowrap;
   text-overflow: ellipsis;
   min-width: 0;
+}
+
+/* THREADS-02: the SAME `.thread-pick` sizing/padding/font, on an `<input>`
+   instead of a `<button>` while a chip is being renamed - a visible border
+   and a lighter background are the only things that need to change, so the
+   swap between "chip" and "editing this chip" reads as the same control,
+   not a different one. */
+.thread-pick-editing {
+  border: 1px solid var(--seam);
+  background: var(--panel);
+  border-radius: var(--radius-sm);
+  outline: none;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .thread-pick i {
