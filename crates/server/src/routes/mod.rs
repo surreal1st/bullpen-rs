@@ -15,6 +15,7 @@ mod egress;
 mod events;
 mod goals;
 mod hooks;
+mod import;
 mod memory;
 mod messages;
 mod permissions;
@@ -57,6 +58,7 @@ pub fn router() -> Router<AppState> {
         .merge(egress::router())
         .merge(goals::router())
         .merge(hooks::router())
+        .merge(import::router())
         .merge(permissions::router())
         .merge(questions::router())
         .merge(rooms::router())

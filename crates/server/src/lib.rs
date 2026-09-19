@@ -10,6 +10,7 @@ pub mod egress_proxy;
 mod error;
 pub mod goals;
 pub mod hooks;
+pub mod import_open;
 pub mod judge;
 pub mod observations;
 pub mod permissions;

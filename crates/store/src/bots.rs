@@ -86,7 +86,22 @@ pub fn list_bots(db: &Db, archived: bool) -> rusqlite::Result<Vec<Bot>> {
     Ok(bots.into_iter().map(row_to_bot).collect())
 }
 
-/// Get a single bot by id, or None if not found or archived.
+/// Get a single bot by id, or `None` if no such row exists - the query
+/// carries no `archived_at` filter, so an ARCHIVED bot IS returned here.
+/// (This doc comment previously said the opposite; it was wrong, not the
+/// query - see IMPORT-01a. Archiving hides a bot from the roster
+/// (`crate::roster::list_roster`'s own `WHERE archived_at IS NULL`) without
+/// deleting anything, and this function is how an archived bot's own data
+/// stays reachable at all - `crates/server/tests/bots.rs`'s
+/// `archived_bots_conversations_messages_and_memory_survive` test depends on
+/// exactly this.)
+///
+/// 🔴 `routes/import.rs`'s duplicate-name check (`get_bot(&db,
+/// &slug_base(&parsed.name))`) relies on this returning `Some` for an
+/// archived bot too - an archived bot is kept, not gone, so importing a file
+/// whose name collides with one must still refuse rather than silently
+/// creating a second row with a numbered suffix. Do not add an
+/// `archived_at IS NULL` filter here without checking that caller first.
 pub fn get_bot(db: &Db, id: &str) -> rusqlite::Result<Option<Bot>> {
     let mut stmt = db.conn().prepare(
         "SELECT id, name, purpose, instructions, model, archived_at, has_routine,
@@ -341,7 +356,12 @@ pub struct BotDraft {
 /// `store.ts:380-386`'s `slugFor` exactly (truncation happens AFTER
 /// trimming, so a cut that lands on an internal `-` is not re-trimmed).
 /// `"bot"` when nothing survives, e.g. a name of only punctuation.
-fn slug_base(name: &str) -> String {
+///
+/// IMPORT-01: `pub`, and re-exported from `crate::lib`, so
+/// `server::routes::import` can compute the id a name WOULD get (its own
+/// duplicate-name check) without a second copy of this logic drifting from
+/// `slug_for`'s own base below.
+pub fn slug_base(name: &str) -> String {
     let mut collapsed = String::new();
     let mut last_was_dash = false;
     for ch in name.to_lowercase().chars() {
