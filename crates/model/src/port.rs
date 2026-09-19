@@ -567,6 +567,24 @@ pub(crate) fn provider_error(raw: &str, key: Option<&str>, image_request: bool) 
     redact(raw, key).chars().take(2000).collect()
 }
 
+/// PORT-01: `native_finish_reason` travels straight from the wire into a
+/// message we build ourselves. It is NOT free-form provider prose - accept
+/// it only in a conservative shape (OpenRouter's own reason tokens look like
+/// `MALFORMED_FUNCTION_CALL`) so a provider cannot smuggle arbitrary bytes
+/// through this field. An anchored full match, not a search: `chars().all`
+/// plus a length check, never `Regex::is_match` (see PROJECT.md section 5's
+/// scar from exactly that kind of unanchored match).
+fn sanitize_native_finish_reason(reason: &str) -> Option<&str> {
+    let len = reason.chars().count();
+    if len == 0 || len > 64 {
+        return None;
+    }
+    let shape_ok = reason
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-');
+    if shape_ok { Some(reason) } else { None }
+}
+
 pub(crate) fn parse_sse_stream_inner<T>(
     body: impl Stream<Item = Result<T, String>> + Send + 'static,
     model: String,
@@ -590,6 +608,7 @@ where
         let mut partial: BTreeMap<u32, PartialCall> = BTreeMap::new();
         let mut saw_tool_finish = false;
         let mut finish_reason: Option<String> = None;
+        let mut native_finish_reason: Option<String> = None;
         // S8b: counted only so the end-of-stream summary below can say what
         // arrived. A run that produces no text and no tool call is
         // indistinguishable, after the fact, from one that was never sent -
@@ -615,9 +634,37 @@ where
                         model = %resolved_model,
                         frames = frame_count,
                         finish_reason = finish_reason.as_deref().unwrap_or("(none)"),
+                        native_finish_reason = native_finish_reason.as_deref().unwrap_or("(none)"),
                         usage = usage.is_some(),
                         "model stream produced no text and no tool call"
                     );
+                    // The provider said why nothing came out - surface that
+                    // instead of a silent empty Done. A stream that produced
+                    // text or a tool call never reaches this branch, so this
+                    // cannot swallow a partial answer.
+                    if finish_reason.as_deref() == Some("error") {
+                        // Server-generated text, not provider text - only the
+                        // sanitised token inside it came off the wire. It
+                        // must NOT go through `provider_error`: that helper's
+                        // image blanking exists for provider-composed error
+                        // bodies that can echo an image payload back, and
+                        // applying it here discarded this exact message on
+                        // every screen-observation run - the one case this
+                        // exists for. Key redaction still applies.
+                        let raw = match native_finish_reason
+                            .as_deref()
+                            .and_then(sanitize_native_finish_reason)
+                        {
+                            Some(reason) => {
+                                format!("The model provider stopped with an error: {reason}.")
+                            }
+                            None => "The model provider stopped with an error.".to_string(),
+                        };
+                        let message = redact(&raw, key.as_deref());
+                        ModelEvent::Error { message, status: None }
+                    } else {
+                        ModelEvent::Done { model: resolved_model.clone(), usage: usage.clone(), finish_reason: finish_reason.clone() }
+                    }
                 } else {
                     tracing::debug!(
                         model = %resolved_model,
@@ -625,18 +672,19 @@ where
                         deltas = delta_count,
                         tool_calls = partial.len(),
                         finish_reason = finish_reason.as_deref().unwrap_or("(none)"),
+                        native_finish_reason = native_finish_reason.as_deref().unwrap_or("(none)"),
                         usage = usage.is_some(),
                         "model stream complete"
                     );
-                }
-                if !partial.is_empty() && saw_tool_finish {
-                    let calls: Vec<ToolCall> = partial
-                        .iter()
-                        .map(|(_, v)| ToolCall { id: v.id.clone(), name: v.name.clone(), arguments: v.args.clone() })
-                        .collect();
-                    ModelEvent::ToolCalls { calls, usage: usage.clone() }
-                } else {
-                    ModelEvent::Done { model: resolved_model.clone(), usage: usage.clone(), finish_reason: finish_reason.clone() }
+                    if !partial.is_empty() && saw_tool_finish {
+                        let calls: Vec<ToolCall> = partial
+                            .iter()
+                            .map(|(_, v)| ToolCall { id: v.id.clone(), name: v.name.clone(), arguments: v.args.clone() })
+                            .collect();
+                        ModelEvent::ToolCalls { calls, usage: usage.clone() }
+                    } else {
+                        ModelEvent::Done { model: resolved_model.clone(), usage: usage.clone(), finish_reason: finish_reason.clone() }
+                    }
                 }
             }};
         }
@@ -754,6 +802,9 @@ where
                     if let Some(fr) = &choice.finish_reason {
                         finish_reason = Some(fr.clone());
                     }
+                    if let Some(nfr) = &choice.native_finish_reason {
+                        native_finish_reason = Some(nfr.clone());
+                    }
                     if let Some(delta) = &choice.delta {
                         for fragment in delta.tool_calls.iter().flatten() {
                             let index = fragment.index.unwrap_or(0);
@@ -850,6 +901,7 @@ struct FrameError {
 #[derive(Debug, Deserialize)]
 struct FrameChoice {
     finish_reason: Option<String>,
+    native_finish_reason: Option<String>,
     delta: Option<FrameDelta>,
 }
 
@@ -929,6 +981,116 @@ mod tests {
         let message = provider_error(&format!("bad request: {secret}"), None, true);
         assert!(!message.contains("data:image"));
         assert!(!message.contains("TOPSECRET"));
+    }
+
+    // PORT-01 correction: the produced-nothing native-reason message is
+    // SERVER-GENERATED text, not provider text, so it must not go through
+    // `provider_error` - that helper unconditionally blanks image-request
+    // messages (see the test just above), which made the original fix inert
+    // on every screen-observation run, the one case PORT-01 exists for.
+    // Drives `parse_sse_stream_inner` directly with the image flags set,
+    // following `image_transport::tests::pending_line_limit_is_checked_segment_by_segment`.
+
+    #[tokio::test]
+    async fn image_request_still_names_the_native_reason_when_it_produced_nothing() {
+        let frame = b"data: {\"choices\":[{\"finish_reason\":\"error\",\"native_finish_reason\":\"MALFORMED_FUNCTION_CALL\",\"delta\":{\"content\":\"\"}}]}\n\ndata: [DONE]\n".to_vec();
+        let body = futures::stream::iter(vec![Ok::<Vec<u8>, String>(frame)]);
+        let events: Vec<ModelEvent> =
+            parse_sse_stream_inner(body, "vision/model".to_string(), None, None, true, true)
+                .collect()
+                .await;
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ModelEvent::Error { message, status } => {
+                assert!(
+                    message.contains("MALFORMED_FUNCTION_CALL"),
+                    "got: {message}"
+                );
+                assert_eq!(*status, None);
+            }
+            other => panic!("expected an Error event, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_hostile_native_reason_is_rejected_and_never_reaches_the_message() {
+        let hostile = "x".repeat(5000);
+        let payload = format!(
+            "data: {{\"choices\":[{{\"finish_reason\":\"error\",\"native_finish_reason\":\"{hostile}\",\"delta\":{{\"content\":\"\"}}}}]}}\n\ndata: [DONE]\n"
+        );
+        let events: Vec<ModelEvent> = parse_sse_stream_inner(
+            futures::stream::iter(vec![Ok::<Vec<u8>, String>(payload.into_bytes())]),
+            "vision/model".to_string(),
+            None,
+            None,
+            true,
+            true,
+        )
+        .collect()
+        .await;
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ModelEvent::Error { message, status } => {
+                assert!(!message.contains(&hostile), "got: {message}");
+                assert!(message.len() < 200, "got: {message}");
+                assert_eq!(*status, None);
+            }
+            other => panic!("expected an Error event, got {other:?}"),
+        }
+
+        // Also reject a short-but-shaped-wrong reason: spaces/quotes/braces.
+        let frame = "data: {\"choices\":[{\"finish_reason\":\"error\",\"native_finish_reason\":\"bad reason{}\\\"\",\"delta\":{\"content\":\"\"}}]}\n\ndata: [DONE]\n";
+        let events: Vec<ModelEvent> = parse_sse_stream_inner(
+            futures::stream::iter(vec![Ok::<Vec<u8>, String>(frame.as_bytes().to_vec())]),
+            "vision/model".to_string(),
+            None,
+            None,
+            true,
+            true,
+        )
+        .collect()
+        .await;
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ModelEvent::Error { message, status } => {
+                assert!(!message.contains("bad reason"), "got: {message}");
+                assert!(!message.contains('{'), "got: {message}");
+                assert_eq!(*status, None);
+            }
+            other => panic!("expected an Error event, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_top_level_provider_error_on_an_image_request_still_blanks() {
+        // Guards the property that must NOT regress: this is provider text
+        // (frame.error), not the server-generated native-reason sentence, so
+        // it must keep going through `provider_error`'s image blanking.
+        let secret = "data:image/png;base64,TOPSECRET";
+        let payload = format!(
+            "data: {{\"error\":{{\"message\":\"bad request: {secret}\"}}}}\n\ndata: [DONE]\n"
+        );
+        let events: Vec<ModelEvent> = parse_sse_stream_inner(
+            futures::stream::iter(vec![Ok::<Vec<u8>, String>(payload.into_bytes())]),
+            "vision/model".to_string(),
+            None,
+            None,
+            true,
+            true,
+        )
+        .collect()
+        .await;
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ModelEvent::Error { message, .. } => {
+                assert!(!message.contains("TOPSECRET"), "got: {message}");
+                assert_eq!(
+                    message,
+                    "The model provider rejected the screen observation without exposing its payload."
+                );
+            }
+            other => panic!("expected an Error event, got {other:?}"),
+        }
     }
 
     #[test]

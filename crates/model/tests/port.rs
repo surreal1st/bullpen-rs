@@ -179,6 +179,72 @@ async fn surfaces_an_error_frame_instead_of_treating_it_as_content() {
     );
 }
 
+// PORT-01: the provider's real reason for an empty stream arrives on the
+// CHOICE (`native_finish_reason`), not the top-level `error` field the block
+// above already handles. `FrameChoice` used to drop it, so a diagnosable
+// `MALFORMED_FUNCTION_CALL` became a generic "no answer" sentence.
+
+#[tokio::test]
+async fn surfaces_the_providers_named_reason_when_it_produced_nothing() {
+    let frame = "data: {\"choices\":[{\"finish_reason\":\"error\",\"native_finish_reason\":\"MALFORMED_FUNCTION_CALL\",\"delta\":{\"content\":\"\",\"role\":\"assistant\"}}]}\n\ndata: [DONE]\n";
+    let events = parse_chunked(frame, "requested/model", 97).await;
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ModelEvent::Error { message, status } => {
+            assert!(
+                message.contains("MALFORMED_FUNCTION_CALL"),
+                "got: {message}"
+            );
+            assert_eq!(*status, None);
+        }
+        other => panic!("expected an Error event, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn surfaces_a_generic_error_when_no_native_reason_is_given() {
+    let frame = "data: {\"choices\":[{\"finish_reason\":\"error\",\"delta\":{\"content\":\"\",\"role\":\"assistant\"}}]}\n\ndata: [DONE]\n";
+    let events = parse_chunked(frame, "requested/model", 97).await;
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ModelEvent::Error { message, status } => {
+            assert!(!message.contains("(none)"), "got: {message}");
+            assert!(message.contains("error"), "got: {message}");
+            assert_eq!(*status, None);
+        }
+        other => panic!("expected an Error event, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_normal_stream_that_finishes_stop_is_unaffected() {
+    let frame = "data: {\"choices\":[{\"finish_reason\":null,\"delta\":{\"content\":\"hi\"}}]}\n\ndata: {\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{}}]}\n\ndata: [DONE]\n";
+    let events = parse_chunked(frame, "requested/model", 97).await;
+    assert_eq!(deltas(&events), "hi");
+    match events.last() {
+        Some(ModelEvent::Done { finish_reason, .. }) => {
+            assert_eq!(finish_reason.as_deref(), Some("stop"));
+        }
+        other => panic!("expected a Done event, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_stream_that_produced_text_stays_done_even_if_it_later_errors() {
+    // The guard that matters: `finish_reason == "error"` only becomes an
+    // Error event on the produced-nothing path. Without this test, the
+    // produced-nothing branch could silently swallow a partial answer.
+    let frame = "data: {\"choices\":[{\"finish_reason\":null,\"delta\":{\"content\":\"partial answer\"}}]}\n\ndata: {\"choices\":[{\"finish_reason\":\"error\",\"native_finish_reason\":\"MALFORMED_FUNCTION_CALL\",\"delta\":{\"content\":\"\"}}]}\n\ndata: [DONE]\n";
+    let events = parse_chunked(frame, "requested/model", 97).await;
+    assert_eq!(deltas(&events), "partial answer");
+    match events.last() {
+        Some(ModelEvent::Done { finish_reason, .. }) => {
+            assert_eq!(finish_reason.as_deref(), Some("error"));
+        }
+        other => panic!("expected a Done event despite the error finish_reason, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn ignores_openrouters_keep_alive_comment_lines() {
     let with_comments = format!(": OPENROUTER PROCESSING\n\n{STREAM_FIXTURE}");
