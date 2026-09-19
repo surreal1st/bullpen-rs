@@ -520,6 +520,71 @@ pub struct BotPatchResponse {
     pub bot: Bot,
 }
 
+/* --------------------------------------------------------------- IMPORT-02 */
+
+/// `POST /api/import/open/preview`'s success shape - the whole parse the
+/// server would use to create a bot, before anything is created. Field
+/// names mirror `ParsedOpenBot` in `crates/server/src/import_open.rs`
+/// exactly, including its one camelCase wire name (`declaredTools`); the
+/// server's `format` field (an `OpenFormat` enum there) is read here as a
+/// plain `String` ("skill" / "subagent" / "agents-md" / "unknown") since
+/// `new_bot.rs` only ever displays it, never branches on it.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenPreview {
+    pub format: String,
+    pub name: String,
+    pub purpose: String,
+    #[serde(default)]
+    pub instructions: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub declared_tools: Vec<String>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+/// `{"preview": {...}}"`, `POST /api/import/open/preview`'s envelope.
+#[derive(Debug, Clone, Deserialize)]
+pub struct OpenPreviewResponse {
+    pub preview: OpenPreview,
+}
+
+/// `POST /api/import/open`'s 201 body - `crates/server/src/routes/
+/// import.rs`'s own response literal, `{"result": {"ok", "botId", "name",
+/// "format", "warnings"}}`, NOT a full bot row (unlike `BotPatchResponse`
+/// above). Only `bot_id` is read (`api::import_open_bot`'s own doc on why it
+/// re-fetches the roster rather than fabricating a `Bot` from these partial
+/// fields), so only `bot_id` is typed here - `ok`/`name`/`format`/
+/// `warnings` are real fields on the wire but nothing in this client reads
+/// them, and a `#[derive(Deserialize)]` struct is not `deny_unknown_fields`,
+/// so leaving them off costs nothing and does not fail decoding.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenImportResult {
+    pub bot_id: String,
+}
+
+/// `{"result": {...}}"`, `POST /api/import/open`'s success envelope.
+#[derive(Debug, Clone, Deserialize)]
+pub struct OpenImportResponse {
+    pub result: OpenImportResult,
+}
+
+/// The 400 body BOTH import routes can answer with - unlike `ModelError`
+/// above, which only ever carries `error`, `crates/server/src/routes/
+/// import.rs`'s two early refusals (no instructions, a duplicate name) carry
+/// `warnings` alongside it, and the model-pin refusal and the "no file
+/// content" 400 carry `error` alone - `#[serde(default)]` on `warnings`
+/// covers that case with an empty list rather than a decode failure.
+#[derive(Debug, Clone, Deserialize)]
+pub struct OpenImportError {
+    pub error: String,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
 /* ------------------------------------------------------------- S3-05: memory */
 
 /// One entry in a bot's own memory log or the shared log. `GET

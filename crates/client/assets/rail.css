@@ -14,7 +14,14 @@
    wholesale; `.modal-*` and `.room-picker-*` use them but are new in S1-07b.
 
    S1-F-11 adds `.gate*` (ported from `shell.css:4220-4298` - see that block's
-   own comment for what is deliberately not ported alongside it). */
+   own comment for what is deliberately not ported alongside it).
+
+   IMPORT-02 adds `.room-picker-modebar`/`.room-picker-textarea` for
+   `NewBotModal`'s second mode ("Import from a file") - reuses this block's
+   own tokens and the same minimal, undecorated posture, not a third modal
+   shape. `.is-on` on a mode button is the same active-state convention
+   `routines_editor.rs`'s own `.routine-kind-toggle button.is-on`
+   (settings.css) already uses, just scoped to this modal's own mode bar. */
 :root {
   --bg: #16181d;
   --panel: #1e2128;
@@ -519,6 +526,37 @@
   border-color: var(--seam);
   color: #14100e;
   font-weight: 600;
+}
+
+/* ---------- IMPORT-02: NewBotModal's second mode ---------- */
+/* NOT a port - the mode bar and its own textarea for "Import from a file",
+   reusing `.thread-new`/`.room-picker-*`'s own tokens above rather than a
+   third modal shape. */
+.room-picker-modebar {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.room-picker-modebar button {
+  flex: 1;
+}
+
+.room-picker-modebar button.is-on {
+  background: var(--seam);
+  border-color: var(--seam);
+  color: #14100e;
+  font-weight: 600;
+}
+
+.room-picker-textarea {
+  background: var(--raised);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  color: var(--ink);
+  padding: 0.4rem 0.55rem;
+  font: inherit;
+  min-height: 140px;
+  resize: vertical;
 }
 
 /* S1-F-11's added item: the sign-in gate. Ported from

@@ -8,9 +8,10 @@ use crate::types::{
     ApprovalsResponse, ArchivedBotsResponse, AuthStatus, AutoReviewLogEntry, AutoReviewLogResponse,
     AutoReviewState, Bot, BotPatchResponse, BotToolsField, ConversationView, CoreStatus, Goal,
     HiddenBotsResponse, MadeTool, MemoryEntry, MemoryEntryField, MemoryView, ModelError,
-    ModelField, ModelsResponse, OpenQuestion, PendingApproval, PermissionsField, ProjectField,
+    ModelField, ModelsResponse, OpenImportError, OpenImportResponse, OpenPreview,
+    OpenPreviewResponse, OpenQuestion, PendingApproval, PermissionsField, ProjectField,
     ProjectSummary, ProjectsField, QuestionsResponse, RoomResponse, RoomSummary, RoomsResponse,
-    Routine, RoutineRun, RoutingState, RulesField, Section, SectionField, SectionsField,
+    Roster, Routine, RoutineRun, RoutingState, RulesField, Section, SectionField, SectionsField,
     SharedCoreField, SharedLogField, SpendView, Tier1Models, Tier1Response, VmState, WorkingBot,
     WorkingResponse,
 };
@@ -1173,6 +1174,119 @@ pub async fn export_bot_markdown(bot_id: &str) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
+/* --------------------------------------------------------------- IMPORT-02 */
+
+/// Shared request body both import routes take - `crates/server/src/
+/// routes/import.rs::read_import_body`'s own two keys.
+#[derive(Serialize)]
+struct OpenImportReq<'a> {
+    #[serde(rename = "fileName")]
+    file_name: &'a str,
+    text: &'a str,
+}
+
+/// Joins a 400's `error` with each of its `warnings`, one per line. Both
+/// import routes can answer with `warnings` alongside `error`
+/// (`OpenImportError`'s own doc in `types.rs`), and the ticket's own framing
+/// is that the warnings are "the useful half," not a detail to drop - but
+/// `preview_open_import`/`import_open_bot` both return a plain `Result<_,
+/// String>`, so this is where the two get folded into one message.
+/// `new_bot.rs` splits it back apart on `\n` to render each line as its own
+/// paragraph, the same "each on its own line" treatment a successful
+/// preview's own warnings already get.
+fn join_error_and_warnings(err: &OpenImportError) -> String {
+    let mut message = err.error.clone();
+    for warning in &err.warnings {
+        message.push('\n');
+        message.push_str(warning);
+    }
+    message
+}
+
+/// `POST /api/import/open/preview` - `new_bot.rs`'s "Import from a file"
+/// mode's Preview step (`crates/server/src/routes/import.rs::preview_open`).
+/// Nothing about the parse happens client-side: the server owns every
+/// format rule (`crates/server/src/import_open.rs`), so this is a straight
+/// decode of its response, never a second copy of those rules in
+/// Rust-for-wasm that could drift from it.
+pub async fn preview_open_import(file_name: &str, text: &str) -> Result<OpenPreview, String> {
+    let resp = Request::post("/api/import/open/preview")
+        .json(&OpenImportReq { file_name, text })
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if resp.ok() {
+        return resp
+            .json::<OpenPreviewResponse>()
+            .await
+            .map(|b| b.preview)
+            .map_err(|e| e.to_string());
+    }
+    // S13a-01: see `put_model_field`'s comment on why `status` must be
+    // captured before `.json()`.
+    let status = resp.status();
+    match resp.json::<OpenImportError>().await {
+        Ok(err) => Err(join_error_and_warnings(&err)),
+        Err(_) => Err(format!("/api/import/open/preview -> {status}")),
+    }
+}
+
+/// `POST /api/import/open` - `new_bot.rs`'s "Import from a file" mode's
+/// final step (`crates/server/src/routes/import.rs::import_open_route`).
+/// **Verified in the route's own source before writing this, not assumed:**
+/// its 201 body is `{"result": {"botId", "name", "format", "warnings",
+/// "ok"}}`, never a full bot row (see `OpenImportResult`'s own doc in
+/// `types.rs`). `NewBotModal`'s `on_created` handler needs a real `Bot` (the
+/// same type `/api/roster` and every other bot-mutating call in this file
+/// already hands it) so the roster refreshes and its thread opens the same
+/// way creating a bot already does - rather than fabricate one from four
+/// partial fields (guessing `purpose`/`sectionId`/`pinned`/etc. at platform
+/// defaults would drift the moment the server's own defaults change), this
+/// re-fetches `/api/roster` after a successful import and returns the entry
+/// matching `botId`. One extra request, only on the path that actually
+/// needs a full row.
+pub async fn import_open_bot(file_name: &str, text: &str) -> Result<Bot, String> {
+    let resp = Request::post("/api/import/open")
+        .json(&OpenImportReq { file_name, text })
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        // S13a-01: see `put_model_field`'s comment on why `status` must be
+        // captured before `.json()`.
+        let status = resp.status();
+        return match resp.json::<OpenImportError>().await {
+            Ok(err) => Err(join_error_and_warnings(&err)),
+            Err(_) => Err(format!("/api/import/open -> {status}")),
+        };
+    }
+
+    let bot_id = resp
+        .json::<OpenImportResponse>()
+        .await
+        .map(|b| b.result.bot_id)
+        .map_err(|e| e.to_string())?;
+
+    let roster_resp = Request::get("/api/roster")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !roster_resp.ok() {
+        return Err(format!("/api/roster -> {}", roster_resp.status()));
+    }
+    let roster = roster_resp
+        .json::<Roster>()
+        .await
+        .map_err(|e| e.to_string())?;
+    roster
+        .bots
+        .into_iter()
+        .find(|b| b.id == bot_id)
+        .ok_or_else(|| "the bot imported, but did not appear in the roster".to_string())
+}
+
 /* --------------------------------------------------------------- S3-05: memory */
 
 /// `GET /api/bots/:id/memory[?q=...]` - core, its token budget, and the log,
@@ -1942,6 +2056,42 @@ mod tests {
                     model: Some("mock".into())
                 },
             ]
+        );
+    }
+
+    /// IMPORT-02: `join_error_and_warnings` with no warnings is just the
+    /// error text, unchanged - a lone 400 (a refused model pin, "no file
+    /// content was sent") must not grow a trailing blank line.
+    #[test]
+    fn join_error_and_warnings_with_no_warnings_is_just_the_error() {
+        let err = OpenImportError {
+            error: "There is already a bot called Trinity.".to_string(),
+            warnings: Vec::new(),
+        };
+        assert_eq!(
+            join_error_and_warnings(&err),
+            "There is already a bot called Trinity."
+        );
+    }
+
+    /// IMPORT-02: each warning lands on its own line after the error -
+    /// `new_bot.rs` splits this back apart on `\n` to render every one of
+    /// them separately, so the join must not run them together.
+    #[test]
+    fn join_error_and_warnings_puts_each_warning_on_its_own_line() {
+        let err = OpenImportError {
+            error: "There are no instructions in that file.".to_string(),
+            warnings: vec![
+                "the file has no instructions in it".to_string(),
+                "the format was not recognised, so the whole file was taken as instructions"
+                    .to_string(),
+            ],
+        };
+        assert_eq!(
+            join_error_and_warnings(&err),
+            "There are no instructions in that file.\n\
+             the file has no instructions in it\n\
+             the format was not recognised, so the whole file was taken as instructions"
         );
     }
 }
