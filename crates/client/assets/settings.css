@@ -18,7 +18,25 @@
    `ChatPane`'s `bot` prop), `.chip-backdrop` (closes the popover on an
    outside click without a `web_sys` document listener - see
    `model_chip.rs`'s own doc), and `.settings-fab` (the settings button
-   itself - `rail.rs` has no gear slot yet, see `app.rs`'s doc comment). */
+   itself - `rail.rs` has no gear slot yet, see `app.rs`'s doc comment).
+
+   THREADS-01 adds `.threads-wrap`/`.threads`/`.thread-chip`/`.thread-pick`/
+   `.thread-close` for `threads.rs`'s conversation strip, which sits right
+   below `.pane-head` above - the closest existing "pane chrome, not a
+   port" section, not `thread.css` (bubbles/composer) or `rail.css` (rail +
+   modal shells). The strip's OWN "New conversation" button reuses
+   `.thread-new` from `rail.css` rather than adding a sixth near-duplicate
+   button style - see `threads.rs`'s own doc for why that is safe here even
+   though the TS `Threads.tsx` uses the identical class name to mean
+   something narrower (its one "New conversation" button, not a generic
+   button style the way this codebase's `.thread-new` already is).
+
+   THREADS-01a/F2 adds `.thread-pick-title` and `.thread-pick`'s own
+   `max-width` - an auto-titled conversation's chip can carry 60+
+   characters (the title is its first message), and `Threads.tsx` itself
+   truncates nothing in markup, so its own CSS must be doing this work.
+   Capped here, in CSS, rather than cutting the string in Rust - see
+   `threads.rs`'s own doc on why. */
 
 .muted {
   color: var(--muted);
@@ -74,6 +92,86 @@
   width: 3rem;
   text-align: center;
   cursor: text;
+}
+
+/* THREADS-01: the conversation strip - see this file's own top doc comment
+   for why it lives here rather than `thread.css`/`rail.css`. */
+.threads-wrap {
+  padding: 0 1.15rem;
+}
+
+.threads {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.4rem 0;
+}
+
+.thread-chip {
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--raised);
+  font-size: 0.78rem;
+  overflow: hidden;
+}
+
+.thread-chip.is-on {
+  border-color: var(--seam);
+}
+
+.thread-pick {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  padding: 0.3rem 0.5rem;
+  font: inherit;
+  cursor: pointer;
+  /* THREADS-01a/F2: the auto-title is a conversation's first message, so a
+     chip can carry 60+ characters - capped here (never by truncating the
+     string in Rust) so a long sentence cannot push "New conversation" off
+     the strip. */
+  max-width: 14rem;
+}
+
+/* `min-width: 0` overrides the flex default (`min-width: auto`, which
+   refuses to shrink a flex item below its own content width) - without it
+   `max-width` above would cap the BUTTON but the title span would still
+   force it wide open. */
+.thread-pick-title {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.thread-pick i {
+  font-style: normal;
+  color: var(--muted);
+  font-size: 0.7rem;
+  /* Never shrinks or ellipsizes alongside the title above - the message
+     count must stay fully visible even when the title itself is cut. */
+  flex-shrink: 0;
+}
+
+.thread-close {
+  border: 0;
+  border-left: 1px solid var(--line-strong);
+  background: transparent;
+  color: var(--muted);
+  padding: 0.3rem 0.5rem;
+  font-size: 0.9rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.thread-close:hover {
+  color: var(--danger);
 }
 
 /* The default `.modal` (420px, `rail.css`) is too narrow for a `perm-row`'s

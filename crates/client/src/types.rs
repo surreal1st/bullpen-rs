@@ -192,6 +192,44 @@ pub struct RoomResponse {
     pub room: RoomSummary,
 }
 
+/// THREADS-01: one of a bot's own conversations, as `threads.rs`'s strip
+/// draws it. Mirrors `shared::ThreadSummary` (`crates/shared/src/lib.rs`) -
+/// kept local for the same reason `Bot`/`RoomSummary` are: this crate does
+/// not depend on `shared`. `kind`/`members` (room vs ordinary chat) are not
+/// carried here - `list_threads` already excludes rooms server-side
+/// (`crates/store/src/conversations.rs::list_threads`'s own `WHERE ...
+/// c.kind != 'room'`), so every entry this type ever decodes is an
+/// ordinary chat.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct ThreadSummary {
+    pub id: String,
+    #[serde(rename = "botId")]
+    pub bot_id: String,
+    #[serde(rename = "botName")]
+    pub bot_name: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(rename = "messageCount", default)]
+    pub message_count: i64,
+    #[serde(rename = "lastAt", default)]
+    pub last_at: Option<String>,
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
+}
+
+/// `GET /api/bots/:id/threads`'s response shape.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ThreadsResponse {
+    #[serde(default)]
+    pub threads: Vec<ThreadSummary>,
+}
+
+/// `POST /api/bots/:id/threads`'s success shape.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ThreadResponse {
+    pub thread: ThreadSummary,
+}
+
 /// One bot's line for the working indicator, from
 /// `GET /api/conversations/:id/working`. Mirrors `shared::working::WorkingBot`.
 /// `Serialize` too - `working_bar.rs` re-serialises a fetched list to

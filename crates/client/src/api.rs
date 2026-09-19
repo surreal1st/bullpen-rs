@@ -12,8 +12,8 @@ use crate::types::{
     OpenPreviewResponse, OpenQuestion, PendingApproval, PermissionsField, ProjectField,
     ProjectSummary, ProjectsField, QuestionsResponse, RoomResponse, RoomSummary, RoomsResponse,
     Roster, Routine, RoutineRun, RoutingState, RulesField, Section, SectionField, SectionsField,
-    SharedCoreField, SharedLogField, SpendView, Tier1Models, Tier1Response, VmState, WorkingBot,
-    WorkingResponse,
+    SharedCoreField, SharedLogField, SpendView, ThreadResponse, ThreadSummary, ThreadsResponse,
+    Tier1Models, Tier1Response, VmState, WorkingBot, WorkingResponse,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -38,6 +38,77 @@ pub async fn fetch_conversation(
     resp.json::<ConversationView>()
         .await
         .map_err(|e| e.to_string())
+}
+
+/* ------------------------------------------------------------- THREADS-01 */
+
+/// `GET /api/bots/:id/threads` - `threads.rs`'s strip. This route never
+/// refuses anything once the bot exists at all (a fresh bot with no
+/// threads yet gets one created for it server-side -
+/// `crates/server/src/routes/conversations.rs::list_threads`'s own "make
+/// sure there is always one to talk in"), so unlike most fetches in this
+/// file there is no error body shape worth trying to parse on a non-2xx.
+pub async fn fetch_threads(bot_id: &str) -> Result<Vec<ThreadSummary>, String> {
+    let url = format!("/api/bots/{bot_id}/threads");
+    let resp = Request::get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("{url} -> {}", resp.status()));
+    }
+    resp.json::<ThreadsResponse>()
+        .await
+        .map(|b| b.threads)
+        .map_err(|e| e.to_string())
+}
+
+/// `POST /api/bots/:id/threads` - `threads.rs`'s "New conversation". No
+/// body at all: the route reads `members` (`crates/server/src/routes/
+/// conversations.rs::CreateThreadBody`, `#[serde(default)]`) and an absent
+/// body means an ordinary chat, never a room - this client only ever wants
+/// the ordinary-chat path, the same one `Threads.tsx`'s own bodyless
+/// `POST` reaches.
+pub async fn create_thread(bot_id: &str) -> Result<ThreadSummary, String> {
+    let url = format!("/api/bots/{bot_id}/threads");
+    let resp = Request::post(&url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if resp.ok() {
+        return resp
+            .json::<ThreadResponse>()
+            .await
+            .map(|b| b.thread)
+            .map_err(|e| e.to_string());
+    }
+    // S13a-01: see `put_model_field`'s comment on why `status` must be
+    // captured before `.json()`.
+    let status = resp.status();
+    match resp.json::<ModelError>().await {
+        Ok(err) => Err(err.error),
+        Err(_) => Err(format!("{url} -> {status}")),
+    }
+}
+
+/// `DELETE /api/threads/:id` - `threads.rs`'s "×" on a chip. `Result<(),
+/// String>`: the success body (`{"ok": true}`) carries nothing a caller
+/// needs - `threads.rs` reloads its own list right after this resolves,
+/// the same "reload rather than trust the echo" posture that reload
+/// already takes after creating one.
+pub async fn archive_thread(thread_id: &str) -> Result<(), String> {
+    let url = format!("/api/threads/{thread_id}");
+    let resp = Request::delete(&url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if resp.ok() {
+        return Ok(());
+    }
+    // S13a-01: see `put_model_field`'s comment on why `status` must be
+    // captured before `.json()`.
+    let status = resp.status();
+    match resp.json::<ModelError>().await {
+        Ok(err) => Err(err.error),
+        Err(_) => Err(format!("{url} -> {status}")),
+    }
 }
 
 pub async fn fetch_rooms() -> Result<Vec<RoomSummary>, String> {

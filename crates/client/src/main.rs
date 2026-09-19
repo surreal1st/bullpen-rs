@@ -44,6 +44,7 @@ mod routines_editor;
 mod settings;
 mod slack_card;
 mod thread;
+mod threads;
 mod transport;
 mod types;
 // S6-VM-01: the per-bot machine card - see that module's own doc.

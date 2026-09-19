@@ -19,6 +19,7 @@ use crate::model_chip::ModelChip;
 use crate::permissions_editor::PermissionsModal;
 use crate::questions::Questions;
 use crate::routines_editor::RoutinesModal;
+use crate::threads::Threads;
 use crate::types::{Bot, Message, Role, Section};
 use crate::vm_card::VmCard;
 use crate::working_bar::WorkingBar;
@@ -110,6 +111,41 @@ pub fn ChatPane(
     // `Thread` takes rather than owned values.
     let mut conversation_id = use_signal(|| None::<String>);
 
+    // THREADS-01: which of the bot's own conversations is open, as a
+    // reactive LOCAL copy of the `thread_id` prop - `threads.rs`'s strip
+    // picks/creates/archives WITHOUT this pane remounting (unlike switching
+    // bots or rooms entirely, which does remount - see this component's own
+    // top doc on "remounted, never patched"), so the prop itself cannot be
+    // what the fetch/send effects below read: a plain prop clone only ever
+    // reflects its value at mount. Every place that used to read the
+    // `thread_id` PROP for loading or sending now reads THIS instead - the
+    // ticket's own top risk was exactly this: a strip that changes what is
+    // DISPLAYED without also changing what `send_message` sends to would
+    // let Josh watch the right conversation while every reply lands in the
+    // default one. Verified, not just intended, by tracing every remaining
+    // use of the `thread_id` PROP in this file (`grep thread_id
+    // crates/client/src/thread.rs`): only the F14 "seen" effect below still
+    // reads it directly (deliberately - see that effect's own doc, it is
+    // about room-vs-bot, not which of a bot's OWN threads is open), while
+    // the fetch effect and `on_send` both now read `active_thread_id`
+    // instead. `active_thread_id.read()` is called synchronously inside
+    // both (never only inside their own `spawn`ed future) - the same
+    // "`let _ = signal.read();` before the async work" shape
+    // `working_bar.rs`'s own effect already uses for `conversation_id`
+    // (line ~80 there), which is what makes Dioxus track the read as a real
+    // effect dependency, and what gives `on_send` the CURRENT value on
+    // every call rather than the value captured at mount.
+    let mut active_thread_id = use_signal(|| thread_id.clone());
+    // Bumped every time a chip is picked (see `on_pick` below) so
+    // `threads.rs`'s own list-reload effect re-runs even when picking an
+    // EXISTING chip changes nothing else this component would otherwise
+    // notice (creating/archiving already reload the list themselves).
+    // THREADS-01a/F1 also bumps this from `on_send`, once a send is fully
+    // over (see that closure's own comment) - the server titles a
+    // conversation from its first message and grows its count with every
+    // one, and neither reaches the strip without this.
+    let mut thread_refresh = use_signal(|| 0u32);
+
     // F14: opening this pane is what makes it read. `thread_id` distinguishes
     // a room (owns its own `seen_at` on the `conversations` row) from a bot's
     // own default conversation (owns `last_seen_at` on the `bots` row) - see
@@ -135,10 +171,12 @@ pub fn ChatPane(
     });
 
     let fetch_bot_id = bot_id.clone();
-    let fetch_thread_id = thread_id.clone();
     use_effect(move || {
         let bot_id = fetch_bot_id.clone();
-        let thread_id = fetch_thread_id.clone();
+        // Read here, synchronously, not inside the `spawn`ed future below -
+        // this is what registers `active_thread_id` as a real dependency of
+        // this effect, so picking a different chip actually re-fetches.
+        let thread_id = active_thread_id.read().clone();
         spawn(async move {
             match api::fetch_conversation(&bot_id, thread_id.as_deref()).await {
                 // Ported behaviour from 0.4.8 (the ticket's own callout):
@@ -158,10 +196,12 @@ pub fn ChatPane(
     });
 
     let send_bot_id = bot_id.clone();
-    let send_thread_id = thread_id.clone();
     let on_send = move |text: String| {
         let bot_id = send_bot_id.clone();
-        let thread_id = send_thread_id.clone();
+        // THREADS-01: read fresh on every call, not captured once at
+        // component creation - this is the exact line the ticket's own top
+        // risk is about. See `active_thread_id`'s own doc above.
+        let thread_id = active_thread_id.read().clone();
         messages.write().push(Message {
             id: format!("local-{}", now_iso()),
             role: Role::User,
@@ -216,6 +256,19 @@ pub fn ChatPane(
                 load_error.set(Some(err));
             }
             sending.set(false);
+            // THREADS-01a/F1: the strip went stale the moment it mattered
+            // most - the server titles a conversation from its first
+            // message and grows its count with every one, and nothing told
+            // `Threads` to reload for either, so a chip could still read
+            // "Untitled 0" after a reply had already landed. Bumped HERE,
+            // once, because `sending.set(false)` right above is already the
+            // one place this pane learns a send is fully over, regardless
+            // of how it ended (a normal reply, an in-band `StreamEvent::
+            // Error`, or the outer request-level failure above) - the same
+            // three outcomes the TS's own two `setThreadKey` calls cover
+            // across its success/catch split (`App.tsx:608,624`), collapsed
+            // to one call since all three already converge on this line.
+            thread_refresh.with_mut(|k| *k += 1);
         });
     };
 
@@ -652,6 +705,23 @@ pub fn ChatPane(
                             p { class: "composer-error", "{err}" }
                         }
                     }
+                }
+                // THREADS-01: right after the header, before the VM card and
+                // the message list - the same placement the TS `App.tsx`
+                // gives it (straight after `</header>`). Inside this same
+                // `if let Some(current) = ...` block, not a sibling of it -
+                // this is how a group chat never gets this strip: `bot` is
+                // `None` for a room (see this component's own doc on that),
+                // so this whole block, `Threads` included, simply never
+                // renders there. No new flag was added for this.
+                Threads {
+                    bot_id: bot_id.clone(),
+                    current_id: conversation_id,
+                    refresh_key: thread_refresh,
+                    on_pick: move |id: String| {
+                        active_thread_id.set(Some(id));
+                        thread_refresh.with_mut(|k| *k += 1);
+                    },
                 }
                 // S6-VM-01: the bot's own computer, live, at the top of the
                 // panel - same placement the TS `BotPanel.tsx` gives it,
