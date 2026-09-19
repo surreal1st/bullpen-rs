@@ -1554,3 +1554,411 @@ async fn export_unknown_id_is_404_json_not_markdown() {
     let parsed: Value = serde_json::from_str(&text).expect("404 body must be JSON");
     assert_eq!(parsed["error"], "no such bot");
 }
+
+/* ------------------------------------------------------------------ DUP-01 */
+
+/// Bite: the copy carries `purpose`/`instructions`/`model`, and the SOURCE
+/// is left completely unchanged - checked by re-reading BOTH bots off a
+/// fresh `/api/roster` fetch afterward, not just the duplicate response's
+/// own echo, so a mutation that wrote the copy's fields onto the source row
+/// by mistake (or vice versa) cannot pass.
+#[tokio::test]
+async fn duplicate_carries_purpose_instructions_and_model_and_leaves_the_source_untouched() {
+    let db = open_db();
+    let session = seed_session(&db);
+    let app = app_with_catalog(db, fixture_catalog());
+
+    let (status, created) = post_route(
+        &app,
+        "/api/bots",
+        &session,
+        json!({
+            "name": "Devon",
+            "purpose": "Watches the deploy pipeline",
+            "instructions": "Be terse. Flag red builds immediately.",
+            "model": "anthropic/claude-sonnet-5",
+        }),
+    )
+    .await;
+    assert_eq!(status, 201);
+    let source_id = created["bot"]["id"].as_str().unwrap().to_string();
+
+    let (status, response) = post_route(
+        &app,
+        &format!("/api/bots/{source_id}/duplicate"),
+        &session,
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, 201, "{response:?}");
+    let copy = &response["bot"];
+    assert_eq!(copy["purpose"], "Watches the deploy pipeline");
+    assert_eq!(
+        copy["instructions"],
+        "Be terse. Flag red builds immediately."
+    );
+    assert_eq!(copy["model"], "anthropic/claude-sonnet-5");
+    assert_ne!(copy["id"], source_id, "the copy must have its own id");
+
+    let (_status, roster) = get_route(&app, "/api/roster", &session).await;
+    let bots = roster["bots"].as_array().unwrap();
+    let source = bots
+        .iter()
+        .find(|b| b["id"] == source_id)
+        .expect("source bot must still be in the roster");
+    assert_eq!(source["purpose"], "Watches the deploy pipeline");
+    assert_eq!(
+        source["instructions"],
+        "Be terse. Flag red builds immediately."
+    );
+    assert_eq!(source["model"], "anthropic/claude-sonnet-5");
+    assert_eq!(
+        source["name"], "Devon",
+        "duplicating must not rename the source"
+    );
+}
+
+/// Bite: the naming rule. The TS just appends `" copy"` and stops, so
+/// duplicating the same bot twice would show two IDENTICAL names on the
+/// rail; this numbers past the collision instead - `"Devon copy"`, then
+/// `"Devon copy 2"` - with different ids, checked against the roster (not
+/// just each duplicate response) so a mutation that only fixed the echoed
+/// response cannot pass.
+#[tokio::test]
+async fn duplicate_twice_numbers_the_name_past_the_first_collision() {
+    let db = open_db();
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let (status, created) =
+        post_route(&app, "/api/bots", &session, json!({ "name": "Devon" })).await;
+    assert_eq!(status, 201);
+    let source_id = created["bot"]["id"].as_str().unwrap().to_string();
+
+    let (status, first) = post_route(
+        &app,
+        &format!("/api/bots/{source_id}/duplicate"),
+        &session,
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, 201);
+    assert_eq!(first["bot"]["name"], "Devon copy");
+
+    let (status, second) = post_route(
+        &app,
+        &format!("/api/bots/{source_id}/duplicate"),
+        &session,
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, 201);
+    assert_eq!(second["bot"]["name"], "Devon copy 2");
+    assert_ne!(
+        first["bot"]["id"], second["bot"]["id"],
+        "two duplicates must be two distinct rows"
+    );
+
+    let (_status, roster) = get_route(&app, "/api/roster", &session).await;
+    let names: Vec<&str> = roster["bots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"Devon"));
+    assert!(names.contains(&"Devon copy"));
+    assert!(names.contains(&"Devon copy 2"));
+}
+
+/// Bite: an unknown id is 404 with the same body every other unknown-id
+/// route in this file answers with, and nothing is created - checked
+/// against the roster afterward (still empty), not just the status code.
+#[tokio::test]
+async fn duplicate_unknown_id_is_404_and_creates_nothing() {
+    let db = open_db();
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let (status, response) = post_route(
+        &app,
+        "/api/bots/does-not-exist/duplicate",
+        &session,
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, 404);
+    assert_eq!(response["error"], "no such bot");
+
+    let (_status, roster) = get_route(&app, "/api/roster", &session).await;
+    assert!(roster["bots"].as_array().unwrap().is_empty());
+}
+
+/// Bite: a routine is copied - same prompt and schedule, but `active` is
+/// FALSE on the copy even though the source routine was left ACTIVE with a
+/// real `nextRunAt` before duplicating (so a mutation that carried those two
+/// fields across would be caught, not just a mutation that never touches
+/// them), the copy gets its own routine id, and the bot-level `hasRoutine`
+/// flag is set on the copy. This is the guard the coordinator is mutating
+/// directly: a duplicate that starts firing on its own is the worst outcome
+/// this feature has.
+#[tokio::test]
+async fn duplicate_copies_a_routine_inactive_with_its_own_id() {
+    let db = open_db();
+    seed_bot(&db, "source-bot", "Source Bot");
+    let routine_id = store::create_routine(
+        &db,
+        "source-bot",
+        "Daily Check",
+        "Check the overnight logs",
+        "0 9 * * *".to_string(),
+        None,
+        None,
+        Some("prompt"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .expect("create routine");
+    // Left ACTIVE with a real next run before duplicating - the copy must
+    // NOT inherit either of these, so the test actually exercises the
+    // guard rather than trivially passing because the source was already
+    // inactive.
+    store::set_routine_active(
+        &db,
+        &routine_id,
+        true,
+        Some("2026-06-01T09:00:00Z".to_string()),
+    )
+    .expect("activate source routine");
+
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let (status, response) =
+        post_route(&app, "/api/bots/source-bot/duplicate", &session, json!({})).await;
+    assert_eq!(status, 201, "{response:?}");
+    let copy_id = response["bot"]["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        response["bot"]["hasRoutine"], true,
+        "the copy must carry hasRoutine once a routine was copied onto it"
+    );
+
+    let (_status, copy_routines) =
+        get_route(&app, &format!("/api/routines?bot={copy_id}"), &session).await;
+    let copy_list = copy_routines["routines"].as_array().unwrap();
+    assert_eq!(copy_list.len(), 1, "exactly one routine must be copied");
+    let copied = &copy_list[0];
+    assert_eq!(copied["prompt"], "Check the overnight logs");
+    assert_ne!(
+        copied["id"], routine_id,
+        "the copy's routine must have its own id"
+    );
+    assert_eq!(
+        copied["active"], false,
+        "a copied routine must never start active"
+    );
+    assert!(
+        copied["nextRunAt"].is_null(),
+        "a copied routine must carry no next run time: {copied:?}"
+    );
+
+    let (_status, source_routines) =
+        get_route(&app, "/api/routines?bot=source-bot", &session).await;
+    let source_list = source_routines["routines"].as_array().unwrap();
+    assert_eq!(
+        source_list[0]["active"], true,
+        "the SOURCE routine must be untouched"
+    );
+}
+
+/// Bite: `hook_secret` is NOT carried onto the copy - a webhook secret is a
+/// credential for one routine, not something a duplicate should inherit.
+/// Checked through `hasHook` (the only wire-visible reflection of
+/// `hook_secret`, per `store::routines::routine_from_row`'s own
+/// `has_hook: hook_secret.is_some()`): the source keeps `hasHook: true`
+/// after minting a real secret, and the copy's own routine shows
+/// `hasHook: false`.
+#[tokio::test]
+async fn duplicate_does_not_carry_the_hook_secret() {
+    let db = open_db();
+    seed_bot(&db, "source-bot", "Source Bot");
+    let routine_id = store::create_routine(
+        &db,
+        "source-bot",
+        "On Push",
+        "React to the push",
+        "".to_string(),
+        None,
+        None,
+        Some("prompt"),
+        None,
+        None,
+        Some("github"),
+        None,
+        None,
+        None,
+    )
+    .expect("create routine");
+    store::mint_routine_hook(&db, &routine_id)
+        .expect("mint hook")
+        .expect("routine must exist");
+
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let (status, response) =
+        post_route(&app, "/api/bots/source-bot/duplicate", &session, json!({})).await;
+    assert_eq!(status, 201, "{response:?}");
+    let copy_id = response["bot"]["id"].as_str().unwrap().to_string();
+
+    let (_status, copy_routines) =
+        get_route(&app, &format!("/api/routines?bot={copy_id}"), &session).await;
+    let copied = &copy_routines["routines"].as_array().unwrap()[0];
+    assert_eq!(
+        copied["hasHook"], false,
+        "the copy must not carry the source's webhook secret: {copied:?}"
+    );
+
+    let (_status, source_routines) =
+        get_route(&app, "/api/routines?bot=source-bot", &session).await;
+    let source = &source_routines["routines"].as_array().unwrap()[0];
+    assert_eq!(
+        source["hasHook"], true,
+        "the SOURCE routine must keep its own hook secret"
+    );
+}
+
+/// Bite: `sectionId`/`avatar`/`shape`/`effort` (set through the same real
+/// routes a user would use) and `voice` (no route writes this column yet in
+/// this port - set directly, see this test's own comment) are ALL carried
+/// onto the copy - the deliberate divergence from the TS this ticket calls
+/// for, so a copy does not land in Unassigned wearing a different face.
+#[tokio::test]
+async fn duplicate_carries_section_avatar_shape_effort_and_voice() {
+    let db = open_db();
+    seed_bot(&db, "source-bot", "Source Bot");
+    // RAIL-01/03 wired PATCH .../rail for sectionId/avatar/shape and
+    // PATCH .../{id} for effort below, but nothing in this port ever
+    // writes `voice` (S11's device-voice field is not built yet -
+    // `crates/store/src/bots.rs::BotDraft`'s own doc says so) - set
+    // directly, before the db moves into `app_for` below, so this test
+    // still proves the COLUMN carries, ready for whenever a route does
+    // write it.
+    db.conn()
+        .execute(
+            "UPDATE bots SET voice = ?1 WHERE id = 'source-bot'",
+            rusqlite::params!["alloy"],
+        )
+        .expect("seed voice directly");
+
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let (status, section) =
+        post_route(&app, "/api/sections", &session, json!({ "name": "SHOOT" })).await;
+    assert_eq!(status, 201);
+    let section_id = section["section"]["id"].as_str().unwrap().to_string();
+
+    let (status, _response) = patch_route(
+        &app,
+        "/api/bots/source-bot/rail",
+        &session,
+        json!({ "sectionId": section_id, "avatar": "🚀", "shape": shared::faces::SHAPES[0].0 }),
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    let (status, _response) = patch_route(
+        &app,
+        "/api/bots/source-bot",
+        &session,
+        json!({ "effort": "high" }),
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    let (status, response) =
+        post_route(&app, "/api/bots/source-bot/duplicate", &session, json!({})).await;
+    assert_eq!(status, 201, "{response:?}");
+    let copy = &response["bot"];
+    assert_eq!(copy["sectionId"], section_id);
+    assert_eq!(copy["avatar"], "🚀");
+    assert_eq!(copy["shape"], shared::faces::SHAPES[0].0);
+    assert_eq!(copy["effort"], "high");
+    assert_eq!(copy["voice"], "alloy");
+}
+
+/// Bite: `pinned`/`hidden` are NOT carried - pin and hide the source
+/// through the real rail route, duplicate it, and assert the copy is
+/// neither. A duplicate appearing pinned above everything, or invisible
+/// from the moment it exists, would be a surprise, not a copy.
+#[tokio::test]
+async fn duplicate_does_not_carry_pinned_or_hidden() {
+    let db = open_db();
+    seed_bot(&db, "source-bot", "Source Bot");
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let (status, _response) = patch_route(
+        &app,
+        "/api/bots/source-bot/rail",
+        &session,
+        json!({ "pinned": true, "hidden": true }),
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    let (status, response) =
+        post_route(&app, "/api/bots/source-bot/duplicate", &session, json!({})).await;
+    assert_eq!(status, 201, "{response:?}");
+    let copy = &response["bot"];
+    assert_eq!(
+        copy["pinned"], false,
+        "a duplicate must not be pinned: {copy:?}"
+    );
+    assert_eq!(
+        copy["hidden"], false,
+        "a duplicate must not be hidden: {copy:?}"
+    );
+}
+
+/// Bite: the copy's memory is empty although the source has an entry - a
+/// duplicate remembers nothing the source ever learned, checked by reading
+/// the copy's own `/memory` route.
+#[tokio::test]
+async fn duplicate_starts_with_empty_memory() {
+    let db = open_db();
+    seed_bot(&db, "source-bot", "Source Bot");
+    store::remember(
+        &db,
+        "source-bot",
+        "The deploy key rotates every 90 days.",
+        "josh",
+    )
+    .expect("seed source memory");
+
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let (status, response) =
+        post_route(&app, "/api/bots/source-bot/duplicate", &session, json!({})).await;
+    assert_eq!(status, 201, "{response:?}");
+    let copy_id = response["bot"]["id"].as_str().unwrap().to_string();
+
+    let (_status, memory) = get_route(&app, &format!("/api/bots/{copy_id}/memory"), &session).await;
+    assert_eq!(memory["core"], "");
+    assert!(
+        memory["log"].as_array().unwrap().is_empty(),
+        "the copy must start with no memory log entries: {memory:?}"
+    );
+
+    let (_status, source_memory) = get_route(&app, "/api/bots/source-bot/memory", &session).await;
+    assert!(
+        !source_memory["log"].as_array().unwrap().is_empty(),
+        "the SOURCE must keep its own memory"
+    );
+}

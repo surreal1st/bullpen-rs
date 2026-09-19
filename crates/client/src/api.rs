@@ -976,6 +976,37 @@ pub async fn fetch_archived_bots() -> Result<Vec<Bot>, String> {
         .map_err(|e| e.to_string())
 }
 
+/* ---------------------------------------------------------------- DUP-01 */
+
+/// `POST /api/bots/:id/duplicate` - `thread.rs`'s header "Duplicate"
+/// action. No request body at all (`crates/server/src/routes/bots.rs::
+/// duplicate_bot`'s own doc), otherwise the exact same shape `create_bot`/
+/// `archive_bot` above already take: `201 {"bot": ...}` on success, reusing
+/// `BotPatchResponse`/`ModelError` rather than a second pair of response
+/// types, and `status` captured before `.json()` on the error path (the
+/// trap `put_model_field`'s own comment records).
+pub async fn duplicate_bot(bot_id: &str) -> Result<Bot, String> {
+    let url = format!("/api/bots/{bot_id}/duplicate");
+    let resp = Request::post(&url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if resp.ok() {
+        return resp
+            .json::<BotPatchResponse>()
+            .await
+            .map(|b| b.bot)
+            .map_err(|e| e.to_string());
+    }
+    // S13a-01: see `put_model_field`'s comment on why `status` must be
+    // captured before `.json()`.
+    let status = resp.status();
+    match resp.json::<ModelError>().await {
+        Ok(err) => Err(err.error),
+        Err(_) => Err(format!("{url} -> {status}")),
+    }
+}
+
 /* --------------------------------------------------------------- RAIL-01 */
 
 /// `PATCH /api/bots/:id/rail` with a single explicit key - pin and hide

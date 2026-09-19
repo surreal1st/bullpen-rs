@@ -103,6 +103,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/bots/hidden", get(list_hidden_bots))
         .route("/api/bots/{id}", patch(patch_bot))
         .route("/api/bots/{id}/archive", post(archive_bot))
+        .route("/api/bots/{id}/duplicate", post(duplicate_bot))
         .route("/api/bots/{id}/rail", patch(patch_rail))
         .route("/api/bots/{id}/export", get(export_bot))
 }
@@ -306,6 +307,26 @@ async fn archive_bot(
     let db = state.db();
     match store::set_archived(&db, &id, archived)? {
         Some(bot) => Ok(Json(json!({ "bot": bot })).into_response()),
+        None => Ok(no_such_bot()),
+    }
+}
+
+/// DUP-01: `POST /api/bots/:id/duplicate` - port of `app.ts:1241-1244`. No
+/// request body at all - the route takes only the id in the path, same as
+/// the TS. `201 {"bot": ...}` on success (the same envelope `create_bot`/
+/// `archive_bot` above already answer with); `404 {"error": "no such bot"}`
+/// through the shared `no_such_bot()` helper, not a second copy of that
+/// body. All the actual copying decisions (which fields carry, which do
+/// not, the numbered name, the routine copy and its dropped `hook_secret`)
+/// live in `store::duplicate_bot`'s own doc comment - this handler is only
+/// the 404/201 shape around it.
+async fn duplicate_bot(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, crate::AppError> {
+    let db = state.db();
+    match store::duplicate_bot(&db, &id)? {
+        Some(bot) => Ok((StatusCode::CREATED, Json(json!({ "bot": bot }))).into_response()),
         None => Ok(no_such_bot()),
     }
 }

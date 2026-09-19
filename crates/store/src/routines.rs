@@ -546,6 +546,125 @@ pub fn delete_routine(db: &Db, id: &str) -> rusqlite::Result<bool> {
     }
 }
 
+/// DUP-01: copies every routine belonging to `source_bot_id` onto
+/// `target_bot_id`, each with a fresh id (the same `Uuid::new_v4()`
+/// generator `create_routine` above already uses) and `created_at` = now.
+/// Returns whether anything was copied, so the caller (`bots::
+/// duplicate_bot`) knows whether to set `has_routine` on the copy. Port of
+/// `store.ts:469-506`'s own "copy routines" block, minus the one column it
+/// never carries either:
+///
+/// - `active = 0`, `next_run_at = NULL`, `last_run_at = NULL` - a copy must
+///   never start firing on its own. This is the TS's own choice and the
+///   one that matters most here.
+/// - `consecutive_failures = 0`, `paused_reason = NULL`, `last_error = NULL`
+///   - a copy has no run history of its own yet.
+/// - **`hook_secret` is NOT carried** - simply left out of the INSERT's own
+///   column list below, so it lands on that column's schema default
+///   (`NULL`, `ensure_routine_columns`'s own `ALTER TABLE ... ADD COLUMN
+///   hook_secret TEXT` names no default). A webhook secret is a credential
+///   for ONE routine; a copy gets its own the next time Josh asks for one
+///   (`mint_routine_hook`). This is the TS's own reasoning and it stands.
+/// - Everything else that makes the routine what it is - `name`, `prompt`,
+///   `schedule`, `kind`, `tool`, `tool_args`, `tools`, `hook_kind`,
+///   `hook_events`, `hook_match`, `conditions`, `second_opinion` - is
+///   copied as the exact raw TEXT already stored (never decoded through
+///   `parse_tools`/`parse_conditions`/`parse_hook_events` and
+///   re-serialized), so a copy cannot drift from its source through a lossy
+///   JSON round trip.
+///
+/// The column list here is read from THIS file's own `ensure_routine_columns`
+/// above, not `migrations.rs`'s `CREATE TABLE routines`, which is missing
+/// most of them (`tools`, `kind`, `tool`, `tool_args`, `hook_secret`,
+/// `hook_kind`, `hook_events`, `hook_match`, `conditions`,
+/// `consecutive_failures`, `paused_reason`, `last_error` are all
+/// self-created columns, not part of the base table).
+pub(crate) fn copy_routines_for_bot(
+    db: &Db,
+    source_bot_id: &str,
+    target_bot_id: &str,
+) -> rusqlite::Result<bool> {
+    struct RawRoutine {
+        name: String,
+        prompt: String,
+        schedule: String,
+        kind: String,
+        tool: Option<String>,
+        tool_args: Option<String>,
+        tools: Option<String>,
+        hook_kind: String,
+        hook_events: Option<String>,
+        hook_match: Option<String>,
+        conditions: Option<String>,
+        second_opinion: i32,
+    }
+
+    let sources: Vec<RawRoutine> = {
+        let mut stmt = db.conn().prepare(
+            "SELECT name, prompt, schedule, kind, tool, tool_args, tools,
+                    hook_kind, hook_events, hook_match, conditions, second_opinion
+             FROM routines WHERE bot_id = ?1",
+        )?;
+        stmt.query_map(params![source_bot_id], |row| {
+            Ok(RawRoutine {
+                name: row.get(0)?,
+                prompt: row.get(1)?,
+                schedule: row.get(2)?,
+                kind: row.get(3)?,
+                tool: row.get(4)?,
+                tool_args: row.get(5)?,
+                tools: row.get(6)?,
+                hook_kind: row.get(7)?,
+                hook_events: row.get(8)?,
+                hook_match: row.get(9)?,
+                conditions: row.get(10)?,
+                second_opinion: row.get(11)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?
+    };
+
+    if sources.is_empty() {
+        return Ok(false);
+    }
+
+    let now = Utc::now().to_rfc3339();
+    for routine in &sources {
+        db.conn().execute(
+            "INSERT INTO routines (
+                id, bot_id, name, prompt, schedule, active, next_run_at, last_run_at,
+                created_at, kind, tool, tool_args, tools, hook_kind, hook_events,
+                hook_match, conditions, second_opinion, consecutive_failures,
+                paused_reason, last_error
+             ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, 0, NULL, NULL,
+                ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                ?13, ?14, ?15, 0,
+                NULL, NULL
+             )",
+            params![
+                Uuid::new_v4().to_string(),
+                target_bot_id,
+                routine.name,
+                routine.prompt,
+                routine.schedule,
+                now,
+                routine.kind,
+                routine.tool,
+                routine.tool_args,
+                routine.tools,
+                routine.hook_kind,
+                routine.hook_events,
+                routine.hook_match,
+                routine.conditions,
+                routine.second_opinion,
+            ],
+        )?;
+    }
+
+    Ok(true)
+}
+
 /// Get the last N runs for a routine.
 pub fn routine_runs(db: &Db, routine_id: &str, limit: i32) -> rusqlite::Result<Vec<RoutineRun>> {
     let mut stmt = db.conn().prepare(

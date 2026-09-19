@@ -325,6 +325,16 @@ fn AppShell() -> Element {
                                     roster.set(Some(fetch_roster().await));
                                 });
                             },
+                            // DUP-01: `thread.rs` never renders "Duplicate"
+                            // for a room either (same `bot` is `None` gap
+                            // the two props above already note) - still a
+                            // required prop, wired to the same harmless
+                            // refresh for when it ever could.
+                            on_duplicated: move |_bot: Bot| {
+                                spawn(async move {
+                                    roster.set(Some(fetch_roster().await));
+                                });
+                            },
                         }
                     } else if let Some(bot) = selected_bot {
                         ChatPane {
@@ -366,6 +376,27 @@ fn AppShell() -> Element {
                                 spawn(async move {
                                     roster.set(Some(fetch_roster().await));
                                 });
+                            },
+                            // DUP-01: hands the new bot up exactly the way
+                            // `NewBotModal`'s own `on_created` below does -
+                            // merge it into the roster (or push it, if this
+                            // fetch races the roster's own eventual
+                            // refresh), then select it, so "the copy should
+                            // be what you are looking at" (the ticket's own
+                            // requirement) holds without a second refetch.
+                            // `on_rail_changed` above cannot do this itself:
+                            // it carries no payload, so it can refresh the
+                            // roster but has nothing to select.
+                            on_duplicated: move |bot: Bot| {
+                                let mut current = roster.write();
+                                if let Some(Ok(data)) = current.as_mut() {
+                                    match data.bots.iter_mut().find(|b| b.id == bot.id) {
+                                        Some(existing) => *existing = bot.clone(),
+                                        None => data.bots.push(bot.clone()),
+                                    }
+                                }
+                                drop(current);
+                                selected.set(Some(Selection::Bot(bot.id.clone())));
                             },
                         }
                     } else {

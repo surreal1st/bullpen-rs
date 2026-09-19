@@ -577,3 +577,120 @@ pub fn create_bot(db: &Db, draft: BotDraft) -> rusqlite::Result<Bot> {
     )?;
     Ok(get_bot(db, &id)?.expect("just-inserted bot row must exist"))
 }
+
+/// DUP-01: duplicates a bot - port of `store.ts:446-508`'s `duplicateBot`,
+/// narrowed to this schema: **`bot_skills` does not exist here** (verified -
+/// `grep bot_skills crates/` returns nothing; skills are S10 and unbuilt),
+/// so that half of the TS is skipped entirely rather than stubbed or given
+/// a table of its own.
+///
+/// **Carried onto the copy**, each a deliberate decision:
+/// - `purpose`, `instructions`, `model` - the bot itself; the TS carries
+///   these too.
+/// - `section_id`, `avatar`, `shape`, `effort`, `voice` - **a divergence
+///   from the TS, which carries none of these five.** A copy that lands in
+///   Unassigned wearing a different face, on a different reasoning effort,
+///   with a different voice, is not a copy of the bot Josh asked for - it
+///   is a new bot that happens to share some text. These are copied with a
+///   follow-up `UPDATE` after `create_bot` below, since `create_bot` itself
+///   only ever writes `name`/`purpose`/`instructions`/`model` (see its own
+///   doc) and every other column starts at its schema default.
+///
+/// **Deliberately NOT carried:**
+/// - `pinned_at`/`hidden_at` - position state Josh set for the SOURCE bot
+///   specifically. A duplicate appearing pinned above everything, or
+///   invisible on the rail from the moment it exists, would be a surprise,
+///   not a copy.
+/// - `is_template`, `archived_at` - a copy is neither of these by default.
+/// - Memory, conversations, messages, permissions, egress - **the copy
+///   starts on every platform default**, the same as the TS's own
+///   behaviour. This is a known, deliberate consequence, written down here
+///   rather than left to be discovered: a duplicated bot remembers nothing
+///   the source ever learned, and starts with the platform's default
+///   permissions/egress, not the source's own.
+///
+/// **The name.** The TS just appends `" copy"` and stops, so duplicating
+/// the same bot twice produces two bots the RAIL shows with the identical
+/// name (their ids differ - `slug_for` appends `-2` - but the name, which
+/// is what Josh actually reads, does not). `duplicate_name` below numbers
+/// past the first collision instead - `"X copy"`, `"X copy 2"`, `"X copy
+/// 3"`, ... - compared against every bot's NAME, not its slug.
+///
+/// **Routines** are copied by `routines::copy_routines_for_bot` (see its
+/// own doc for the column-by-column reasoning, especially `active = 0` and
+/// the dropped `hook_secret`); `has_routine` is set on the copy only when
+/// that returns `true`, the same condition the TS's own `if (routines.length
+/// > 0)` block guards.
+///
+/// `None` when no such bot exists, so the route can 404 rather than
+/// silently writing nothing - the same shape `set_archived` already uses.
+pub fn duplicate_bot(db: &Db, id: &str) -> rusqlite::Result<Option<Bot>> {
+    let Some(source) = get_bot(db, id)? else {
+        return Ok(None);
+    };
+
+    let name = duplicate_name(db, &source.name)?;
+    let draft = BotDraft {
+        name,
+        purpose: source.purpose.clone(),
+        instructions: source.instructions.clone(),
+        model: source.model.clone(),
+    };
+    let copy = create_bot(db, draft)?;
+
+    // Divergence from the TS (see this function's own doc): carried onto
+    // the copy so it does not land in Unassigned wearing a different face.
+    db.conn().execute(
+        "UPDATE bots SET section_id = ?1, avatar = ?2, shape = ?3, effort = ?4, voice = ?5
+         WHERE id = ?6",
+        params![
+            source.section_id,
+            source.avatar,
+            source.shape,
+            source.effort.as_str(),
+            source.voice,
+            copy.id,
+        ],
+    )?;
+
+    if crate::routines::copy_routines_for_bot(db, id, &copy.id)? {
+        db.conn().execute(
+            "UPDATE bots SET has_routine = 1 WHERE id = ?1",
+            params![copy.id],
+        )?;
+    }
+
+    get_bot(db, &copy.id)
+}
+
+/// The name a duplicate gets: `"{source_name} copy"`, then `" 2"`, `" 3"`,
+/// ... past the first collision - see `duplicate_bot`'s own doc for why
+/// this improves on the TS, which stops after the first append and lets
+/// the rail show two bots with the identical name. Compared against every
+/// bot's `name` column directly (archived or not - a duplicate landing on
+/// an archived bot's exact name is still a collision the rail would show
+/// twice over if that bot were ever restored), never the slug, since the
+/// slug is not what Josh reads.
+fn duplicate_name(db: &Db, source_name: &str) -> rusqlite::Result<String> {
+    let base = format!("{source_name} copy");
+    if !name_taken(db, &base)? {
+        return Ok(base);
+    }
+    let mut n = 2;
+    loop {
+        let candidate = format!("{base} {n}");
+        if !name_taken(db, &candidate)? {
+            return Ok(candidate);
+        }
+        n += 1;
+    }
+}
+
+fn name_taken(db: &Db, name: &str) -> rusqlite::Result<bool> {
+    db.conn()
+        .query_row("SELECT 1 FROM bots WHERE name = ?1", params![name], |_| {
+            Ok(())
+        })
+        .optional()
+        .map(|found| found.is_some())
+}

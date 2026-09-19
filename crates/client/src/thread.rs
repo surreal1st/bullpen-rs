@@ -85,6 +85,17 @@ pub fn ChatPane(
     // own doc on why `hidden` never leaves the roster response the way
     // `archived` does).
     on_rail_changed: EventHandler<()>,
+    // DUP-01: fires once "Duplicate" below resolves, carrying the NEW bot -
+    // deliberately not reusing `on_rail_changed` (`EventHandler<()>`, no
+    // payload): a plain roster refresh alone would leave Josh looking at
+    // the SOURCE bot while the copy sits somewhere else on the rail, and
+    // "the copy should be what you are looking at" is the ticket's own
+    // requirement. This carries the same `Bot` payload `new_bot.rs`'s own
+    // `on_created` does, and `app.rs` wires it to the identical "merge into
+    // the roster, then select it" logic that prop already uses - the
+    // pattern this ticket asked to reuse, just under its own name since
+    // `ChatPane` (not `NewBotModal`) is where this fires from.
+    on_duplicated: EventHandler<Bot>,
 ) -> Element {
     let mut messages = use_signal(Vec::<Message>::new);
     let mut streaming = use_signal(|| None::<String>);
@@ -267,6 +278,12 @@ pub fn ChatPane(
     // stale download never sits next to a new in-flight fetch).
     let mut export_busy = use_signal(|| false);
     let mut export_ready = use_signal(|| None::<String>);
+    // DUP-01: "Duplicate" - same direct-action, no-confirm posture as
+    // Export above (`rail_error` shared with all seven controls in this
+    // header now). Unlike every other action here, success does not patch
+    // `local_bot` at all - the new bot is a DIFFERENT row, handed straight
+    // up through `on_duplicated` instead (see that prop's own doc).
+    let mut duplicate_busy = use_signal(|| false);
 
     rsx! {
         div { class: "pane",
@@ -489,6 +506,34 @@ pub fn ChatPane(
                         });
                     };
 
+                    // DUP-01: same direct-action posture as
+                    // `on_export_click` above, `rail_error` shared. On
+                    // success this hands the NEW bot straight up through
+                    // `on_duplicated` (see that prop's own doc for why -
+                    // there is no local row to patch, unlike every pin/
+                    // hide/move/avatar/shape toggle above).
+                    let duplicate_bot_id = bot_id.clone();
+                    let on_duplicate_click = move |_| {
+                        if *duplicate_busy.read() {
+                            return;
+                        }
+                        duplicate_busy.set(true);
+                        rail_error.set(None);
+                        let bot_id = duplicate_bot_id.clone();
+                        spawn(async move {
+                            match api::duplicate_bot(&bot_id).await {
+                                Ok(bot) => {
+                                    duplicate_busy.set(false);
+                                    on_duplicated.call(bot);
+                                }
+                                Err(err) => {
+                                    duplicate_busy.set(false);
+                                    rail_error.set(Some(err));
+                                }
+                            }
+                        });
+                    };
+
                     rsx! {
                         div { class: "pane-head",
                             div { class: "pane-head-who",
@@ -574,6 +619,12 @@ pub fn ChatPane(
                                         onclick: move |_| export_ready.set(None),
                                         "Download .md"
                                     }
+                                }
+                                button {
+                                    class: "pane-perms-btn",
+                                    disabled: *duplicate_busy.read(),
+                                    onclick: on_duplicate_click,
+                                    if *duplicate_busy.read() { "Duplicating…" } else { "Duplicate" }
                                 }
                                 button {
                                     class: "pane-perms-btn",
