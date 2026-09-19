@@ -13,7 +13,8 @@ use crate::model_chip::short_model;
 use crate::slack_card::SlackCard;
 use crate::transport::sleep;
 use crate::types::{
-    AutoReviewLogEntry, AutoReviewState, CatalogEntry, RoutingState, Section, SpendView,
+    AutoReviewLogEntry, AutoReviewState, CatalogEntry, RoutingState, Section, SkillSummary,
+    SpendView,
 };
 use dioxus::prelude::*;
 use std::cell::Cell;
@@ -81,6 +82,7 @@ fn GeneralSettings(
                 RulesSection {}
                 RoutingSection {}
                 AutoReviewSection {}
+                SkillsSection {}
                 SectionsManagerSection { sections, on_changed: on_restored }
                 ArchivedBotsSection { on_restored }
                 HiddenBotsSection { on_restored }
@@ -951,6 +953,131 @@ fn AutoReviewSection() -> Element {
                                     }
                                     td { "{entry.description}" }
                                     td { "{entry.decision}" }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/* ------------------------------------------------------------- S10-02 */
+
+/// S10-02: the skill library - a reusable "how to do this job", written
+/// once and shared across bots (`edit_bot.rs`'s per-bot checkbox list is
+/// the other half - see that module's own doc). Same fetch-on-mount,
+/// plain-list shape `ArchivedBotsSection`/`HiddenBotsSection` below already
+/// take.
+///
+/// 🔴 Lists DESCRIPTIONS, never bodies - `store::skills`'s own "one line per
+/// skill" doc: 37 imported skills is a megabyte of markdown nobody reads,
+/// and it buries the one line that actually decides anything (when to use
+/// it). `show` below fetches a row's body only once Josh opens it, mirroring
+/// `Skills.tsx`'s own `show()`.
+///
+/// Ported from `Skills.tsx`'s Skills section only - NOT its "The shared
+/// computer" section at the top of that file. That block calls
+/// `GET /api/desk` and links to `/desk/`; in the TS product that IS live
+/// TypeScript Bullpen's own browser (`bullpen-desk` is not an orphan
+/// there). bullpen-rs uses per-bot VMs instead (`vm_card.rs`,
+/// `vm::vm_desk`), and `PROJECT.md` section 7 forbids new code reaching
+/// `desk_config(env)` - so there is nothing here to port that block to.
+///
+/// The empty state says plainly that nothing is set up - unlike the TS
+/// original's `npm run import-skills` (there is no skill import in this
+/// client yet, and naming a command that does not work here would be a
+/// lie the TS original could get away with and this port cannot).
+#[component]
+fn SkillsSection() -> Element {
+    let mut skills = use_signal(|| None::<Vec<SkillSummary>>);
+    let mut load_error = use_signal(|| None::<String>);
+    let mut open = use_signal(|| None::<String>);
+    let mut body = use_signal(String::new);
+    let mut body_error = use_signal(|| None::<String>);
+
+    use_effect(move || {
+        spawn(async move {
+            match api::fetch_skills().await {
+                Ok(list) => skills.set(Some(list)),
+                Err(err) => load_error.set(Some(err)),
+            }
+        });
+    });
+
+    let show = move |name: String| {
+        if open.read().as_deref() == Some(name.as_str()) {
+            open.set(None);
+            return;
+        }
+        open.set(Some(name.clone()));
+        body.set(String::new());
+        body_error.set(None);
+        spawn(async move {
+            match api::fetch_skill_body(&name).await {
+                Ok(text) => body.set(if text.is_empty() {
+                    "(empty)".to_string()
+                } else {
+                    text
+                }),
+                Err(err) => body_error.set(Some(err)),
+            }
+        });
+    };
+
+    let list = skills.read().clone();
+    let open_name = open.read().clone();
+
+    rsx! {
+        div { class: "stg-sub",
+            h4 { class: "stg-sub-h", "Skills" }
+            p { class: "set-note",
+                "A way of doing a job, written once. Each bot gets the ones you give it in its own editor, and loads the instructions only when it needs them."
+            }
+
+            if let Some(err) = load_error.read().clone() {
+                div { class: "refusal",
+                    b { "Could not load skills." }
+                    p { "{err}" }
+                }
+            }
+
+            if list.is_none() && load_error.read().is_none() {
+                p { class: "muted", "Loading…" }
+            }
+
+            if let Some(list) = list {
+                if list.is_empty() {
+                    p { class: "muted",
+                        "None yet. There is no skill import in this client yet."
+                    }
+                } else {
+                    div { class: "skill-list",
+                        for skill in list.iter() {
+                            div { key: "{skill.id}", class: "skill-row",
+                                button {
+                                    r#type: "button",
+                                    class: "skill-head",
+                                    onclick: {
+                                        let mut show = show;
+                                        let name = skill.name.clone();
+                                        move |_| show(name.clone())
+                                    },
+                                    span { class: "skill-name", "{skill.name}" }
+                                    if skill.source == "claude-code" {
+                                        span { class: "skill-tag", "Claude Code" }
+                                    }
+                                    span { class: "skill-when", "{skill.description}" }
+                                }
+                                if open_name.as_deref() == Some(skill.name.as_str()) {
+                                    if let Some(err) = body_error.read().clone() {
+                                        p { class: "notice-inline", "{err}" }
+                                    } else {
+                                        pre { class: "mono skill-body",
+                                            if body.read().is_empty() { "Loading…" } else { "{body}" }
+                                        }
+                                    }
                                 }
                             }
                         }

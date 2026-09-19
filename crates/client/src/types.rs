@@ -567,6 +567,64 @@ pub struct BotPatchResponse {
     pub bot: Bot,
 }
 
+/* ---------------------------------------------------------------- S10-02 */
+
+/// `GET /api/skills`'s list shape - body STRIPPED, `bytes` carrying its
+/// length instead (`routes/skills.rs::get_skills`'s own shape, mirroring
+/// `store::skills::Skill` minus `body`). The library list renders this and
+/// only this; the body is a separate fetch, see `SkillBodyField` below.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillSummary {
+    pub id: String,
+    pub name: String,
+    /// When to use it - the one line the library row shows and the only
+    /// thing rendered before a row is opened.
+    pub description: String,
+    #[serde(default)]
+    pub bytes: u64,
+    /// "bullpen" | "claude-code" - kept as a plain string, same convention
+    /// `Bot.shape`/`RoutingLogEntry.verdict` already use elsewhere in this
+    /// crate rather than a duplicate enum for a value only ever compared
+    /// against one literal.
+    pub source: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// `GET /api/skills`'s response shape.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct SkillsField {
+    #[serde(default)]
+    pub skills: Vec<SkillSummary>,
+}
+
+/// `GET /api/skills/:name`'s response shape - the ONLY route that ever
+/// carries a skill's body. Only `body` is decoded: `settings.rs`'s expanded
+/// row already has every other field from the `SkillSummary` it fetched
+/// this on behalf of, so there is nothing else here worth a second copy of.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SkillBodyField {
+    pub skill: SkillBodyOnly,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SkillBodyOnly {
+    #[serde(default)]
+    pub body: String,
+}
+
+/// `GET /api/bots/:id/skills` and `PUT /api/bots/:id/skills/:name`'s shared
+/// response shape - the bot's enabled skill NAMES, never full `Skill`/
+/// `SkillSummary` rows (`routes/skills.rs`'s own doc on both routes). The PUT
+/// route's list is what `edit_bot.rs` must paint a toggle from - never the
+/// click that sent the request, see that module's own doc.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct BotSkillNames {
+    #[serde(default)]
+    pub skills: Vec<String>,
+}
+
 /* --------------------------------------------------------------- IMPORT-02 */
 
 /// `POST /api/import/open/preview`'s success shape - the whole parse the

@@ -6,14 +6,15 @@
 use crate::transport::{Request, Response};
 use crate::types::{
     ApprovalsResponse, ArchivedBotsResponse, AuthStatus, AutoReviewLogEntry, AutoReviewLogResponse,
-    AutoReviewState, Bot, BotPatchResponse, BotToolsField, ConversationView, CoreStatus, Goal,
-    HiddenBotsResponse, MadeTool, MemoryEntry, MemoryEntryField, MemoryView, ModelError,
-    ModelField, ModelsResponse, OpenImportError, OpenImportResponse, OpenPreview,
+    AutoReviewState, Bot, BotPatchResponse, BotSkillNames, BotToolsField, ConversationView,
+    CoreStatus, Goal, HiddenBotsResponse, MadeTool, MemoryEntry, MemoryEntryField, MemoryView,
+    ModelError, ModelField, ModelsResponse, OpenImportError, OpenImportResponse, OpenPreview,
     OpenPreviewResponse, OpenQuestion, PendingApproval, PermissionsField, ProjectField,
     ProjectSummary, ProjectsField, QuestionsResponse, RoomResponse, RoomSummary, RoomsResponse,
     Roster, Routine, RoutineRun, RoutingState, RulesField, Section, SectionField, SectionsField,
-    SharedCoreField, SharedLogField, SpendView, ThreadResponse, ThreadSummary, ThreadsResponse,
-    Tier1Models, Tier1Response, VmState, WorkingBot, WorkingResponse,
+    SharedCoreField, SharedLogField, SkillBodyField, SkillSummary, SkillsField, SpendView,
+    ThreadResponse, ThreadSummary, ThreadsResponse, Tier1Models, Tier1Response, VmState,
+    WorkingBot, WorkingResponse,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -1445,6 +1446,89 @@ pub async fn import_open_bot(file_name: &str, text: &str) -> Result<Bot, String>
         .into_iter()
         .find(|b| b.id == bot_id)
         .ok_or_else(|| "the bot imported, but did not appear in the roster".to_string())
+}
+
+/* ---------------------------------------------------------------- S10-02 */
+
+/// `GET /api/skills` - the library list, body STRIPPED (`bytes` carries its
+/// length instead - see `SkillSummary`'s own doc). Port of `Skills.tsx`'s
+/// own fetch; this route never refuses anything
+/// (`crates/server/src/routes/skills.rs::get_skills`), so a non-2xx here is
+/// a plain `{url} -> {status}` string, same posture `fetch_archived_bots`
+/// already takes for the same reason.
+pub async fn fetch_skills() -> Result<Vec<SkillSummary>, String> {
+    let resp = Request::get("/api/skills")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("/api/skills -> {}", resp.status()));
+    }
+    resp.json::<SkillsField>()
+        .await
+        .map(|b| b.skills)
+        .map_err(|e| e.to_string())
+}
+
+/// `GET /api/skills/:name` - the ONE place a skill's body is ever fetched.
+/// 🔴 Called only when `settings.rs`'s `SkillsSection` opens a row, never up
+/// front alongside `fetch_skills` above - the library list shows
+/// descriptions, never bodies (this module's own doc, and `store::skills`'s
+/// own "one line per skill" doc). 404 ("no such skill") surfaces as a plain
+/// status string, same as every other named-lookup fetch in this file.
+pub async fn fetch_skill_body(name: &str) -> Result<String, String> {
+    let encoded = crate::transport::encode_uri_component(name);
+    let url = format!("/api/skills/{encoded}");
+    let resp = Request::get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("{url} -> {}", resp.status()));
+    }
+    resp.json::<SkillBodyField>()
+        .await
+        .map(|b| b.skill.body)
+        .map_err(|e| e.to_string())
+}
+
+/// `GET /api/bots/:id/skills` - the bot's enabled skill NAMES, backing
+/// `edit_bot.rs`'s checkbox list. 404 ("no such bot") folds into the plain
+/// status string, same posture as `fetch_permissions` above.
+pub async fn fetch_bot_skills(bot_id: &str) -> Result<Vec<String>, String> {
+    let url = format!("/api/bots/{bot_id}/skills");
+    let resp = Request::get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("{url} -> {}", resp.status()));
+    }
+    resp.json::<BotSkillNames>()
+        .await
+        .map(|b| b.skills)
+        .map_err(|e| e.to_string())
+}
+
+/// `PUT /api/bots/:id/skills/:name` - `{"on": bool}`, returns the bot's
+/// FULL new enabled-name list.
+///
+/// 🔴 This is the single most important call in this ticket: `edit_bot.rs`
+/// MUST paint its checkbox from this return value, never from the click
+/// that sent the request - a toggle that paints itself on after a failed
+/// request is a skill Josh believes a bot has and it does not (this
+/// module's own doc, and `store::skills::set_bot_skill`'s doc on the same
+/// contract server-side).
+pub async fn set_bot_skill(bot_id: &str, name: &str, on: bool) -> Result<Vec<String>, String> {
+    let encoded = crate::transport::encode_uri_component(name);
+    let url = format!("/api/bots/{bot_id}/skills/{encoded}");
+    let resp = Request::put(&url)
+        .json(&serde_json::json!({ "on": on }))
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("{url} -> {}", resp.status()));
+    }
+    resp.json::<BotSkillNames>()
+        .await
+        .map(|b| b.skills)
+        .map_err(|e| e.to_string())
 }
 
 /* --------------------------------------------------------------- S3-05: memory */
