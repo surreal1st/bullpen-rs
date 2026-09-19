@@ -37,18 +37,18 @@ wins and ports exactly, tests and all.
 
 ---
 
-## 2. Current state (measured 2026-09-18)
+## 2. Current state (measured 2026-09-19)
 
 | | |
 |---|---|
-| HEAD | `241c750` on `main`, tree clean |
+| HEAD | `5ede17a` on `main`, tree clean |
 | Live at | `https://meridian.tail74afb5.ts.net:8452` |
-| Gate | 76 suites, **1064 tests**, exit 0 |
+| Gate | **1,268 tests**, exit 0 |
 | Code | **90,703 lines of Rust** across 5 crates, 220 commits since 2026-09-14 |
 | Deployed | meridian, `bullpen-rs.service` on :4380, binary hash-verified on both ends |
 | Tools | 23 registered |
 | API | 63 routes |
-| Schema | 20 migrations, byte-compatible with the TS product's `bullpen.db` |
+| Schema | 22 migrations, byte-compatible with the TS product's `bullpen.db` |
 
 Crate sizes: `server` 56,467 · `client` 21,817 · `store` 8,236 ·
 `model` 3,207 · `shared` 976.
@@ -323,19 +323,36 @@ desktop client.
 
 ## 9. The spec for the next work
 
-### 9a. "A bot sees its own screen" — DESIGN PASS FIRST, not a ticket
+### 9a. "A bot sees its own screen" — BUILT, and accepted 2026-09-19
 
 **Decided by Josh, 2026-09-17:** a bot should get its own screenshot back.
 Video stays out for now.
 
-**This is the single highest-value piece of unbuilt work**, because it converts
-`desk_act` from half-blind to the full computer-use surface. Every mouse action
-is waiting on it.
+🔴 **This section described this as unbuilt design work until 2026-09-19. That
+was stale and cost nothing only because it was caught.** The image path EXISTS:
+`snap_desk` is registered and dispatched (`tools/snap_desk.rs`,
+`tools/mod.rs`), and `runs::screen_observation_request_message`
+(`runs.rs:431`) builds a real `MessageContent::Parts` carrying a base64 PNG
+plus provenance text that fences visible screen text as untrusted. The design
+question below was answered IN CODE: the image arrives as a **following user
+message**, not as a tool result.
 
-**Why it is a design pass and not a port.** The model port has
-`ContentPart::ImageUrl` and `MessageContent::Parts`, but **nothing in
-`crates/server` has ever constructed a `Parts` message.** There is no image
-path to a model at all today. So the real question has no obvious answer:
+**What the acceptance actually proved** — see
+`.scratch/bullpen-rs/reviews/S8d-native-gui-acceptance-RESULT.md` for the
+evidence, the cost and the reproduction:
+
+- A bot READ a random token off its own screen with every other tool denied.
+- `desk_act`'s mouse physically acts (pointer moved; window stacking changed),
+  and it correctly REFUSES a click that carries no `observation_id`.
+- **Neither model could reliably hit a target** — `gemini-3.8-flash` missed a
+  button by 123px in y — and both then asserted a success they had not
+  achieved. Aiming, not plumbing, is what is unsolved.
+- 🔴 `google/gemini-2.5-flash-lite` returns `MALFORMED_FUNCTION_CALL`
+  deterministically on the SECOND screenshot in history. Since `modelForRun`
+  holds a hard cheap floor for unattended runs, an unattended computer-use
+  loop is pushed onto exactly the model that cannot sustain one.
+
+**The original design questions, kept because two are still open:**
 
 - Does the screenshot come back as the **tool result**? Tool messages are
   text-only in the OpenAI/OpenRouter shape, and support for an image there is
@@ -348,20 +365,19 @@ path to a model at all today. So the real question has no obvious answer:
 - What does it cost per screenshot, and does the cheap floor still hold for an
   unattended run that is taking pictures in a loop?
 
-**Do not ship `snap_desk` first.** The rejected shortcut, recorded so nobody
-re-proposes it: writing a PNG into the VM and telling the model to open it with
-`review_media` points the model at a tool that is a permission row with **no
-implementation**, and leaves the file unviewable in the VM's own filesystem.
-That is why the tool was held back rather than ported.
+**The rejected shortcut, still rejected:** writing a PNG into the VM and
+telling the model to open it with `review_media` points the model at a tool
+that is a permission row with **no implementation**. `snap_desk` was built
+properly instead — it returns the observation to the run, which turns it into
+an image message.
 
-**What exists to build on:** `vm::capture_frame` already produces PNG bytes and
-already serves them to the app at `/api/bots/{id}/vm/thumbnail.png`, with a 5s
-server-side cache. The capture half is solved; the "how does a model receive
-it" half is the design.
+**What remains open, and both are Josh's calls:**
 
-**Deliverable:** a design doc in `.scratch/bullpen-rs/designs/`, reviewed before
-any ticket is written. Precedent for why: S15 skipped this and collected five
-independent BLOCKER verdicts.
+1. May the cheap floor select a model for a run that carries screen
+   observations? Today it may, and the cheapest one breaks on the second
+   image.
+2. Should history carry more than the latest observation? Every extra
+   screenshot is paid for on every later step of the same run.
 
 ### 9b. `tool_choice`, with a per-model capability flag
 
@@ -381,11 +397,16 @@ caller that wants it, and a fallback path for the models that 400.
 
 ### 9c. Smaller open items
 
-- **S8b-F1 — ~9% of chat runs finish with no text.** Cause unknown. Instrumented
-  but **not fixed**. Look for `model stream produced no text and no tool call`
-  in `journalctl -u bullpen-rs`. Re-checked 2026-09-18: zero occurrences and 23
-  of 23 streams completed, but those are tool-call runs, not the chat mix the
-  9% was measured on. **Not recurred is not fixed.**
+- **S8b-F1 — runs that finish with no text.** 🔴 **A cause is now PROVEN for
+  one member of this class** (2026-09-19): the provider returns a choice-level
+  `finish_reason: "error"` carrying `native_finish_reason:
+  "MALFORMED_FUNCTION_CALL"`, and `port.rs`'s `FrameChoice` models neither
+  field, so serde discards the diagnosis and the operator sees "The model
+  provider completed without an answer." Reproduced 3/3 with
+  `gemini-2.5-flash-lite` and two images in history. **This does not establish
+  that the historical ~9% — measured on a chat mix with no images — had the
+  same root cause.** Look for `model stream produced no text and no tool call`
+  in `journalctl -u bullpen-rs`.
 - **`message_bot`'s `ModelEvent::Error` branch is unfenced.** Probably correct —
   that text is the model port's error surface, not a bot's answer — but nobody
   has decided it deliberately.
