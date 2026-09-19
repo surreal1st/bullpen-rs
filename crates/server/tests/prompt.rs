@@ -253,3 +253,80 @@ fn history_budget_uses_utf16_code_units() {
         kept.len()
     );
 }
+
+// ---------------------------------------------------------------------
+// S10-01: the skill index carries the DESCRIPTION, never the body
+// ---------------------------------------------------------------------
+
+/// The whole design of `store::skills::skill_index_for` (see its own doc):
+/// a skill's body is loaded only on demand via `use_skill`, never pasted
+/// into every prompt. A regression here (accidentally inlining `body`) is
+/// invisible in the UI and shows up only as a bigger bill - this is the one
+/// test that would catch it.
+#[test]
+fn skill_index_carries_the_description_and_never_the_body() {
+    let db = Db::open(":memory:").unwrap();
+    seed_bot(&db, "t", "T", "testing", "instructions");
+
+    store::skills::save_skill(
+        &db,
+        store::skills::SkillInput {
+            name: "pdf-extract".to_string(),
+            description: "SKILL-DESCRIPTION-MARKER: when Josh sends a PDF.".to_string(),
+            body: "SKILL-BODY-MARKER: run pdftotext on it, then summarise.".to_string(),
+            source: None,
+        },
+        chrono::Utc::now(),
+    )
+    .unwrap()
+    .unwrap();
+    store::skills::set_bot_skill(&db, "t", "pdf-extract", true).unwrap();
+
+    let bot = store::get_bot(&db, "t").unwrap().unwrap();
+    let messages = build_prompt(&db, &bot, &[]);
+    let system = system_text(&messages);
+
+    assert!(
+        system.contains("## Skills you can load"),
+        "prompt must carry the skills heading when a bot has one enabled"
+    );
+    assert!(
+        system.contains("- pdf-extract: SKILL-DESCRIPTION-MARKER: when Josh sends a PDF."),
+        "prompt must carry the skill's name and description: {system}"
+    );
+    assert!(
+        !system.contains("SKILL-BODY-MARKER"),
+        "prompt must NEVER carry the skill's body: {system}"
+    );
+}
+
+/// A bot with no skills enabled gets no heading at all - `skill_index_for`
+/// returns `""`, and `build_prompt` must not push an empty section for it.
+#[test]
+fn no_skills_enabled_means_no_skills_heading_at_all() {
+    let db = Db::open(":memory:").unwrap();
+    seed_bot(&db, "t", "T", "testing", "instructions");
+    // A skill exists in the library, but is never enabled for "t".
+    store::skills::save_skill(
+        &db,
+        store::skills::SkillInput {
+            name: "unused-skill".to_string(),
+            description: "should never appear".to_string(),
+            body: "should never appear either".to_string(),
+            source: None,
+        },
+        chrono::Utc::now(),
+    )
+    .unwrap()
+    .unwrap();
+
+    let bot = store::get_bot(&db, "t").unwrap().unwrap();
+    let messages = build_prompt(&db, &bot, &[]);
+    let system = system_text(&messages);
+
+    assert!(
+        !system.contains("## Skills you can load"),
+        "no enabled skills must mean no heading at all: {system}"
+    );
+    assert!(!system.contains("unused-skill"));
+}

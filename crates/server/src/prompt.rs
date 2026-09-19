@@ -308,7 +308,16 @@ pub fn build_prompt(db: &Db, bot: &Bot, history: &[HistoryTurn]) -> Vec<ModelMes
         blocks.push(core.to_string());
     }
 
-    // Skill index: SKIP for now (hook for a later ticket).
+    // S10-01: one line per enabled skill, never the body - see
+    // `store::skills`'s own doc for why. Pushed immediately after "## What
+    // you already know" above, matching the TS's own order
+    // (`prompt.ts:372-375`).
+    let skill_index = store::skills::skill_index_for(db, &bot.id);
+    if !skill_index.is_empty() {
+        blocks.push(String::new());
+        blocks.push(skill_index);
+    }
+
     // Open tasks / questions: SKIP for now (hook for a later ticket).
 
     // S3-03: tiered recall - own > project > shared, newest first within

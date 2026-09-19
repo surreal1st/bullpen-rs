@@ -472,4 +472,31 @@ pub const MIGRATIONS: &[&str] = &[
     r#"
   ALTER TABLE runs ADD COLUMN cost_unknown INTEGER NOT NULL DEFAULT 0;
   "#,
+    // 23. S10-01: skills - a reusable set of instructions for how to do a
+    //     task, shared across bots and enabled per bot. Exact TS shape
+    //     (`skills.ts`'s `ensureSkillTables`). `IF NOT EXISTS` on both
+    //     tables is REQUIRED, not defensive padding: in the TS these tables
+    //     are self-creating, so a database already opened by live Bullpen
+    //     has them before this migration ever runs against it, and this
+    //     entry must be a no-op there rather than fail on an existing
+    //     table. `bot_skills` carries no `FOREIGN KEY` (same as the TS,
+    //     which declares none either) - `store::skills::delete_skill`
+    //     removes its rows explicitly before deleting the skill itself.
+    r#"
+  CREATE TABLE IF NOT EXISTS skills (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL UNIQUE,
+    description TEXT NOT NULL DEFAULT '',
+    body        TEXT NOT NULL DEFAULT '',
+    source      TEXT NOT NULL DEFAULT 'bullpen',
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS bot_skills (
+    bot_id   TEXT NOT NULL,
+    skill_id TEXT NOT NULL,
+    PRIMARY KEY (bot_id, skill_id)
+  );
+  "#,
 ];

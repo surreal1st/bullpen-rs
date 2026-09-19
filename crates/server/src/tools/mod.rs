@@ -52,6 +52,7 @@ mod say;
 mod search_memory;
 mod shell;
 mod snap_desk;
+mod use_skill;
 
 use std::future::Future;
 use std::pin::Pin;
@@ -325,6 +326,9 @@ fn all_specs() -> Vec<ToolSpec> {
         // module doc.
         desk_act::desk_act_spec(),
         snap_desk::spec(),
+        // S10-01: a READ of instructions Josh already enabled for this bot -
+        // see `use_skill`'s own module doc for why it grants nothing.
+        use_skill::spec(),
     ]
 }
 
@@ -465,6 +469,7 @@ pub fn build(params: BuildParams) -> ToolBox {
                     "set_goal" => (goal_tools::run_set_goal(&db, &bot_id, &args), None),
                     "update_goal" => (goal_tools::run_update_goal(&db, &bot_id, &args), None),
                     "reflect" => (goal_tools::run_reflect(&db, &bot_id, &args), None),
+                    "use_skill" => (use_skill::run(&db, &bot_id, &args), None),
                     // S8a-02: the `Cdp` is resolved HERE, at call time, by
                     // `desk::cdp_for_bot` - the calling bot's OWN machine
                     // (`vm::desk_for_in` -> `vm::vm_desk`) when per-bot VMs

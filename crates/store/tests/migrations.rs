@@ -37,11 +37,11 @@ fn copy_fixture_to_temp() -> std::path::PathBuf {
 }
 
 /// Test 1: `Db::open(":memory:")` leaves `user_version` at the full
-/// migration count (22, after COST-02's `runs.cost_unknown` migration).
+/// migration count (23, after S10-01's `skills`/`bot_skills` migration).
 #[test]
 fn memory_db_migrates_to_latest_version() {
     let db = Db::open(":memory:").expect("open :memory:");
-    assert_eq!(user_version(db.conn()), 22);
+    assert_eq!(user_version(db.conn()), 23);
 }
 
 #[test]
@@ -58,12 +58,12 @@ fn run_image_counters_are_self_created_without_bumping_schema_version() {
 
     assert!(columns.contains("screen_capture_attempts"));
     assert!(columns.contains("screen_image_dispatches"));
-    assert_eq!(user_version(db.conn()), 22);
+    assert_eq!(user_version(db.conn()), 23);
 }
 
 /// Test 2: opening a copy of the TS-made fixture (checked in at
-/// user_version 16) brings it forward to 22 and leaves the `sqlite_master`
-/// object set the same names as before - migrations 17-22 add tables/columns/indexes
+/// user_version 16) brings it forward to 23 and leaves the `sqlite_master`
+/// object set the same names as before - migrations 17-23 add tables/columns/indexes
 /// but keep existing table and index names. Migrations 21 (COST-01) and 22
 /// (COST-02) only add a column to an existing table (`messages`, `runs`),
 /// so neither contributes a new schema object name here.
@@ -86,8 +86,8 @@ fn fixture_db_opens_unchanged() {
 
     assert_eq!(
         user_version(db.conn()),
-        22,
-        "user_version must reach 22 after open"
+        23,
+        "user_version must reach 23 after open"
     );
 
     let after = schema_names(db.conn());
@@ -114,6 +114,17 @@ fn fixture_db_opens_unchanged() {
     expected_new.insert("sqlite_autoindex_goals_1".to_string());
     expected_new.insert("idx_goals_due".to_string());
     expected_new.insert("idx_goals_bot".to_string());
+    // Migration 23 (S10-01): `skills` gets one autoindex for its own `id
+    // TEXT PRIMARY KEY` and a second for the column-level `name ... UNIQUE`
+    // constraint (same two-autoindex shape a non-integer PK plus a separate
+    // UNIQUE column always produces in SQLite); `bot_skills` gets one
+    // autoindex for its composite `PRIMARY KEY (bot_id, skill_id)`, the
+    // same shape `project_members` above already has.
+    expected_new.insert("skills".to_string());
+    expected_new.insert("bot_skills".to_string());
+    expected_new.insert("sqlite_autoindex_skills_1".to_string());
+    expected_new.insert("sqlite_autoindex_skills_2".to_string());
+    expected_new.insert("sqlite_autoindex_bot_skills_1".to_string());
 
     // After must equal before plus the new objects.
     let expected_after = {
@@ -125,12 +136,12 @@ fn fixture_db_opens_unchanged() {
     for new_obj in &expected_new {
         assert!(
             after.contains(new_obj),
-            "migrations 18-20 should add {new_obj}"
+            "migrations 18-23 should add {new_obj}"
         );
     }
     assert_eq!(
         after, expected_after,
-        "schema must be the fixture's schema plus migrations 18-20's new objects only"
+        "schema must be the fixture's schema plus migrations 18-23's new objects only"
     );
 
     drop(db);

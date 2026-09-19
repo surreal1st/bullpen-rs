@@ -21,7 +21,8 @@ fn seed_bot(db: &Db, id: &str) {
         .unwrap();
 }
 
-/// Test 1: Fixture opens at the latest migration (22, after COST-02).
+/// Test 1: Fixture opens at the latest migration (23, after S10-01's skills
+/// migration).
 #[test]
 fn fixture_opens_at_migration_20() {
     let temp = copy_fixture_to_temp();
@@ -33,7 +34,7 @@ fn fixture_opens_at_migration_20() {
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("read user_version");
 
-    assert_eq!(version, 22, "user_version must be 22 after open");
+    assert_eq!(version, 23, "user_version must be 23 after open");
 
     drop(db);
     let _ = fs::remove_file(&temp);

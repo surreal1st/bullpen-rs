@@ -13,6 +13,7 @@ pub mod questions;
 pub mod rooms;
 pub mod roster;
 pub mod routines;
+pub mod skills;
 pub mod slack;
 pub mod vms;
 
