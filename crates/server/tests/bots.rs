@@ -105,6 +105,24 @@ async fn post_route(app: &Router, path: &str, session: &str, body: Value) -> (u1
     (status, value)
 }
 
+async fn delete_route(app: &Router, path: &str, session: &str) -> (u16, Value) {
+    let request = Request::delete(path)
+        .header("cookie", session)
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    let status = response.status().as_u16();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: Value = if bytes.is_empty() {
+        json!({})
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or(json!({}))
+    };
+    (status, value)
+}
+
 async fn get_route(app: &Router, path: &str, session: &str) -> (u16, Value) {
     let request = Request::get(path)
         .header("cookie", session)
@@ -711,6 +729,71 @@ async fn archived_bots_conversations_messages_and_memory_survive() {
     assert!(
         log.iter().any(|e| e["content"] == "A logged memory entry."),
         "an archived bot's memory log must survive: {log:?}"
+    );
+}
+
+/* ------------------------------------------------------------- SEC5-09 */
+
+/// Bite: hard delete is gated on archive - a live roster bot gets 409, not
+/// a silent no-op or a 404.
+#[tokio::test]
+async fn hard_delete_refuses_a_live_bot() {
+    let db = open_db();
+    seed_bot(&db, "test-bot", "Test Bot");
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let (status, body) = delete_route(&app, "/api/bots/test-bot", &session).await;
+    assert_eq!(status, 409, "live bot: {body:?}");
+    assert!(
+        body["error"].as_str().unwrap_or("").contains("archive"),
+        "409 must explain archive first: {body:?}"
+    );
+
+    let (_status, roster) = get_route(&app, "/api/roster", &session).await;
+    assert!(
+        roster["bots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| b["id"] == "test-bot"),
+        "live bot must still be on the roster"
+    );
+}
+
+/// Bite: deleting an archived bot removes it from the archived listing and
+/// destroys its memory - the opposite of `archived_bots_conversations_messages_and_memory_survive`.
+#[tokio::test]
+async fn hard_delete_removes_archived_bot_and_memory() {
+    let db = open_db();
+    seed_bot(&db, "test-bot", "Test Bot");
+    let session = seed_session(&db);
+    store::remember(&db, "test-bot", "gone after delete", "josh").expect("remember");
+
+    let app = app_for(db);
+
+    let (status, _) = post_route(
+        &app,
+        "/api/bots/test-bot/archive",
+        &session,
+        json!({ "archived": true }),
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    let (status, _) = delete_route(&app, "/api/bots/test-bot", &session).await;
+    assert_eq!(status, 204);
+
+    let (_status, archived) = get_route(&app, "/api/bots/archived", &session).await;
+    assert!(
+        archived["bots"].as_array().unwrap().is_empty(),
+        "archived listing must drop the bot"
+    );
+
+    let (mem_status, _) = get_route(&app, "/api/bots/test-bot/memory", &session).await;
+    assert_eq!(
+        mem_status, 404,
+        "deleted bot must not expose memory anymore"
     );
 }
 

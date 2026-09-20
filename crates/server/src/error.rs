@@ -36,6 +36,14 @@ impl AppError {
             message: message.into(),
         }
     }
+
+    /// A 409 when the request is valid but the resource is in the wrong state.
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            message: message.into(),
+        }
+    }
 }
 
 impl IntoResponse for AppError {

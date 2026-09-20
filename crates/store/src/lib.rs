@@ -29,9 +29,10 @@ pub use bot_tools::{
     upsert_proposal_row,
 };
 pub use bots::{
-    BotDraft, create_bot, create_section, delete_section, duplicate_bot, get_bot, get_bot_egress,
-    list_bots, list_hidden, list_sections, move_bot, rename_section, set_archived, set_avatar,
-    set_bot_egress, set_hidden, set_identity, set_pinned, set_shape, slug_base,
+    BotDraft, HardDeleteBotOutcome, create_bot, create_section, delete_section, duplicate_bot,
+    get_bot, get_bot_egress, hard_delete_bot, list_bots, list_hidden, list_sections, move_bot,
+    rename_section, set_archived, set_avatar, set_bot_egress, set_hidden, set_identity, set_pinned,
+    set_shape, slug_base,
 };
 pub use conversations::{
     archive_thread, create_thread, get_conversation, get_or_create_conversation, list_threads,

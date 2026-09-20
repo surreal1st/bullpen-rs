@@ -2,7 +2,8 @@
 
 use chrono::Utc;
 use store::{
-    BotDraft, Db, create_bot, duplicate_bot,
+    BotDraft, Db, HardDeleteBotOutcome, create_bot, duplicate_bot, get_bot, hard_delete_bot,
+    set_archived,
     skills::{SkillInput, save_skill, set_bot_skill, skills_for},
 };
 
@@ -75,4 +76,46 @@ fn duplicate_bot_copies_enabled_bot_skills_only() {
         vec!["enabled-on-source"],
         "source toggles must be unchanged after duplicate"
     );
+}
+
+/// SEC5-09: hard delete removes the bot row and its memory; live bots are refused.
+#[test]
+fn hard_delete_bot_requires_archive_and_removes_data() {
+    let db = Db::open(":memory:").expect("open :memory:");
+    let bot = create_bot(
+        &db,
+        BotDraft {
+            name: "Gone Bot".to_string(),
+            purpose: "p".to_string(),
+            instructions: "i".to_string(),
+            model: None,
+        },
+    )
+    .expect("create_bot");
+
+    assert_eq!(
+        hard_delete_bot(&db, &bot.id).expect("hard_delete_bot"),
+        HardDeleteBotOutcome::NotArchived,
+        "a live bot must not be hard-deleted"
+    );
+    assert!(get_bot(&db, &bot.id).expect("get_bot").is_some());
+
+    set_archived(&db, &bot.id, true).expect("archive");
+    store::remember(&db, &bot.id, "secret memory", "josh").expect("remember");
+
+    assert_eq!(
+        hard_delete_bot(&db, &bot.id).expect("hard_delete_bot"),
+        HardDeleteBotOutcome::Deleted
+    );
+    assert!(get_bot(&db, &bot.id).expect("get_bot").is_none());
+
+    let memory_left: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM memory_log WHERE bot_id = ?1",
+            rusqlite::params![bot.id],
+            |row| row.get(0),
+        )
+        .expect("count memory");
+    assert_eq!(memory_left, 0, "memory_log rows must be removed");
 }

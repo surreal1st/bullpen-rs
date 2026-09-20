@@ -427,6 +427,80 @@ pub fn set_archived(db: &Db, id: &str, archived: bool) -> rusqlite::Result<Optio
     get_bot(db, id)
 }
 
+/// SEC5-09: whether `hard_delete_bot` did anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HardDeleteBotOutcome {
+    Deleted,
+    NotFound,
+    NotArchived,
+}
+
+/// SEC5-09: permanently removes a bot and every row that references it.
+/// The bot must already be archived (`set_archived` above); live roster bots
+/// are refused so archive stays the first, reversible step. Unlike archiving,
+/// this removes conversations, messages, memory, routines, skills toggles,
+/// goals, VM rows, and the bot row itself.
+pub fn hard_delete_bot(db: &Db, id: &str) -> rusqlite::Result<HardDeleteBotOutcome> {
+    let archived_at: Option<Option<String>> = db
+        .conn()
+        .query_row(
+            "SELECT archived_at FROM bots WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(archived_at) = archived_at else {
+        return Ok(HardDeleteBotOutcome::NotFound);
+    };
+    if archived_at.is_none() {
+        return Ok(HardDeleteBotOutcome::NotArchived);
+    }
+
+    let tx = db.conn().unchecked_transaction()?;
+    tx.execute("DELETE FROM approvals WHERE bot_id = ?1", params![id])?;
+    tx.execute("DELETE FROM runs WHERE bot_id = ?1", params![id])?;
+    tx.execute("DELETE FROM questions WHERE bot_id = ?1", params![id])?;
+    tx.execute(
+        "DELETE FROM attachments WHERE id IN (
+            SELECT attachment_id FROM messages
+            WHERE attachment_id IS NOT NULL
+              AND conversation_id IN (SELECT id FROM conversations WHERE bot_id = ?1)
+        )",
+        params![id],
+    )?;
+    tx.execute(
+        "DELETE FROM messages WHERE conversation_id IN (
+            SELECT id FROM conversations WHERE bot_id = ?1
+        )",
+        params![id],
+    )?;
+    tx.execute("DELETE FROM conversations WHERE bot_id = ?1", params![id])?;
+    tx.execute("DELETE FROM memory_log WHERE bot_id = ?1", params![id])?;
+    tx.execute(
+        "DELETE FROM hook_arrivals WHERE routine_id IN (
+            SELECT id FROM routines WHERE bot_id = ?1
+        )",
+        params![id],
+    )?;
+    tx.execute("DELETE FROM routines WHERE bot_id = ?1", params![id])?;
+    tx.execute("DELETE FROM bot_connectors WHERE bot_id = ?1", params![id])?;
+    tx.execute("DELETE FROM bot_skills WHERE bot_id = ?1", params![id])?;
+    tx.execute("DELETE FROM goals WHERE bot_id = ?1", params![id])?;
+    tx.execute("DELETE FROM project_members WHERE bot_id = ?1", params![id])?;
+    tx.execute("DELETE FROM auto_review_log WHERE bot_id = ?1", params![id])?;
+    tx.execute("DELETE FROM twitch_pings WHERE bot_id = ?1", params![id])?;
+    tx.execute("DELETE FROM slack_threads WHERE bot_id = ?1", params![id])?;
+    tx.execute(
+        "DELETE FROM bot_tool_proposals WHERE bot_id = ?1",
+        params![id],
+    )?;
+    tx.execute("DELETE FROM bot_tools WHERE bot_id = ?1", params![id])?;
+    tx.execute("DELETE FROM vms WHERE bot_id = ?1", params![id])?;
+    tx.execute("DELETE FROM bots WHERE id = ?1", params![id])?;
+    tx.commit()?;
+    Ok(HardDeleteBotOutcome::Deleted)
+}
+
 /// RAIL-01: pins or unpins a bot - same shape as `set_archived` above,
 /// port of `roster.ts:95`'s `setPinned` (itself the `flag` helper bound to
 /// `pinned_at`). `None` when no such bot exists. Pinning stamps `pinned_at`

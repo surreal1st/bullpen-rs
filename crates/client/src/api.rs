@@ -1062,6 +1062,24 @@ pub async fn update_bot_identity(
 /// client and old scripts) - a call from THIS client should say exactly
 /// what it means. `archived: true` archives (`thread.rs`'s confirm modal);
 /// `archived: false` restores (`settings.rs`'s archived-bots section).
+/// SEC5-09: `DELETE /api/bots/:id` — permanent removal. The bot must already
+/// be archived; the server answers 409 otherwise.
+pub async fn hard_delete_bot(bot_id: &str) -> Result<(), String> {
+    let url = format!("/api/bots/{bot_id}");
+    let resp = Request::delete(&url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if resp.status() == 204 {
+        return Ok(());
+    }
+    let status = resp.status();
+    match resp.json::<ModelError>().await {
+        Ok(err) => Err(err.error),
+        Err(_) => Err(format!("{url} -> {status}")),
+    }
+}
+
 pub async fn archive_bot(bot_id: &str, archived: bool) -> Result<Bot, String> {
     let url = format!("/api/bots/{bot_id}/archive");
     let resp = Request::post(&url)

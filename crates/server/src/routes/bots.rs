@@ -139,7 +139,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/bots", post(create_bot))
         .route("/api/bots/archived", get(list_archived_bots))
         .route("/api/bots/hidden", get(list_hidden_bots))
-        .route("/api/bots/{id}", patch(patch_bot))
+        .route("/api/bots/{id}", patch(patch_bot).delete(hard_delete_bot))
         .route("/api/bots/{id}/archive", post(archive_bot))
         .route("/api/bots/{id}/duplicate", post(duplicate_bot))
         .route("/api/bots/{id}/rail", patch(patch_rail))
@@ -380,6 +380,23 @@ async fn patch_bot(
 /// spell out because the iOS client and existing scripts already rely on
 /// it - tightening this to "only `true` archives" would flip every one of
 /// those callers' missing-body archive calls into silent no-ops.
+/// SEC5-09: `DELETE /api/bots/:id` - permanent removal. No TS equivalent
+/// (live Bullpen and iOS only archive). Requires the bot to already be
+/// archived; returns 409 otherwise so archive stays the reversible step.
+async fn hard_delete_bot(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, crate::AppError> {
+    let db = state.db();
+    match store::hard_delete_bot(&db, &id)? {
+        store::HardDeleteBotOutcome::Deleted => Ok(StatusCode::NO_CONTENT.into_response()),
+        store::HardDeleteBotOutcome::NotFound => Ok(no_such_bot()),
+        store::HardDeleteBotOutcome::NotArchived => Err(crate::AppError::conflict(
+            "archive the bot before deleting it permanently",
+        )),
+    }
+}
+
 async fn archive_bot(
     State(state): State<AppState>,
     Path(id): Path<String>,

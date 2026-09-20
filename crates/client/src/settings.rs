@@ -1574,6 +1574,7 @@ fn ArchivedBotsSection(#[props(default)] on_restored: Option<EventHandler<()>>) 
     let mut load_error = use_signal(|| None::<String>);
     let mut restore_error = use_signal(|| None::<String>);
     let mut restoring = use_signal(|| None::<String>);
+    let mut confirm_delete = use_signal(|| None::<(String, String)>);
 
     use_effect(move || {
         spawn(async move {
@@ -1591,7 +1592,7 @@ fn ArchivedBotsSection(#[props(default)] on_restored: Option<EventHandler<()>>) 
         div { class: "stg-sub",
             h4 { class: "stg-sub-h", "Archived bots" }
             p { class: "set-note",
-                "Hidden from the roster, not deleted - conversations, memory and spend history are all still there. Restore one to bring it back."
+                "Hidden from the roster. Restore brings a bot back; Delete permanently removes it and all of its conversations, memory, and routines."
             }
 
             if let Some(err) = load_error.read().clone() {
@@ -1642,6 +1643,110 @@ fn ArchivedBotsSection(#[props(default)] on_restored: Option<EventHandler<()>>) 
                             },
                             if busy_id.as_deref() == Some(bot.id.as_str()) { "Restoring…" } else { "Restore" }
                         }
+                        button {
+                            class: "stg-btn danger",
+                            disabled: busy_id.as_deref() == Some(bot.id.as_str()),
+                            onclick: {
+                                let id = bot.id.clone();
+                                let name = bot.name.clone();
+                                move |_| confirm_delete.set(Some((id.clone(), name.clone())))
+                            },
+                            "Delete"
+                        }
+                    }
+                }
+            }
+        }
+        if let Some((id, name)) = confirm_delete.read().clone() {
+            HardDeleteBotConfirmModal {
+                bot_id: id,
+                bot_name: name,
+                on_close: move |_| confirm_delete.set(None),
+                on_deleted: move |deleted_id| {
+                    bots.write().retain(|b| b.id != deleted_id);
+                    confirm_delete.set(None);
+                },
+            }
+        }
+    }
+}
+
+/// SEC5-09: confirm before permanently deleting an archived bot.
+#[component]
+fn HardDeleteBotConfirmModal(
+    bot_id: String,
+    bot_name: String,
+    on_close: EventHandler<()>,
+    on_deleted: EventHandler<String>,
+) -> Element {
+    let mut busy = use_signal(|| false);
+    let mut error = use_signal(|| None::<String>);
+    let confirm_id = bot_id.clone();
+
+    let confirm = move |_| {
+        if *busy.read() {
+            return;
+        }
+        busy.set(true);
+        error.set(None);
+        let id = confirm_id.clone();
+        spawn(async move {
+            match api::hard_delete_bot(&id).await {
+                Ok(()) => {
+                    busy.set(false);
+                    on_deleted.call(id);
+                }
+                Err(err) => {
+                    busy.set(false);
+                    error.set(Some(err));
+                }
+            }
+        });
+    };
+
+    let is_busy = *busy.read();
+
+    rsx! {
+        div {
+            class: "modal-scrim",
+            role: "presentation",
+            onclick: move |_| on_close.call(()),
+            div {
+                class: "modal archive-confirm-modal",
+                onclick: move |evt| evt.stop_propagation(),
+                role: "dialog",
+                "aria-modal": "true",
+                "aria-label": "Delete {bot_name}",
+                div { class: "modal-head",
+                    h2 { "Delete {bot_name} permanently?" }
+                    button {
+                        class: "modal-x",
+                        "aria-label": "Close",
+                        onclick: move |_| on_close.call(()),
+                        "×"
+                    }
+                }
+                p {
+                    "This cannot be undone. All conversations, memory, routines, and spend history for this bot will be removed."
+                }
+                if let Some(err) = error.read().clone() {
+                    div { class: "refusal",
+                        b { "Could not delete." }
+                        p { "{err}" }
+                    }
+                }
+                div { class: "rules-foot",
+                    button {
+                        class: "stg-btn",
+                        disabled: is_busy,
+                        onclick: move |_| on_close.call(()),
+                        "Cancel"
+                    }
+                    button {
+                        class: "stg-btn danger",
+                        disabled: is_busy,
+                        onclick: confirm,
+                        if is_busy { "Deleting…" } else { "Delete permanently" }
                     }
                 }
             }
