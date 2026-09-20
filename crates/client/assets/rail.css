@@ -342,6 +342,41 @@
   color: var(--ink);
 }
 
+.rail-new-wrap {
+  position: relative;
+}
+
+.rail-new-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 20;
+  min-width: 10.5rem;
+  padding: 0.25rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--panel);
+  box-shadow: 0 6px 18px rgb(0 0 0 / 0.18);
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.rail-new-menu-item {
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+  padding: 0.35rem 0.5rem;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font: inherit;
+}
+
+.rail-new-menu-item:hover {
+  background: var(--sel);
+}
+
 /* A group chat's stacked-faces avatar: up to four of the members' own
    faces, in a 2x2 cluster - ported from `shell.css:5934-5989` (the styling
    backing `GroupAvatar.tsx`, which S1-07b's ticket names directly even

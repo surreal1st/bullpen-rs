@@ -382,6 +382,31 @@ pub(crate) fn base64_encode(bytes: &[u8]) -> String {
     out
 }
 
+/// One-click markdown save after an authenticated export fetch (EXPORT-01 /
+/// SEC5-05). No-ops when `window` is unavailable (native desktop).
+pub(crate) fn download_markdown_file(filename: &str, bytes: &[u8]) {
+    use wasm_bindgen::JsCast;
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Some(document) = window.document() else {
+        return;
+    };
+    let Ok(element) = document.create_element("a") else {
+        return;
+    };
+    let Ok(anchor) = element.dyn_into::<web_sys::HtmlAnchorElement>() else {
+        return;
+    };
+    let href = format!(
+        "data:text/markdown;charset=utf-8;base64,{}",
+        base64_encode(bytes)
+    );
+    anchor.set_href(&href);
+    anchor.set_download(filename);
+    anchor.click();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

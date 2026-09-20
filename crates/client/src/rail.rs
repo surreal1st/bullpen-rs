@@ -30,6 +30,7 @@ pub fn Rail(
     // group chat", so it never overlaps the thread.
     on_settings: EventHandler<()>,
 ) -> Element {
+    let mut new_menu_open = use_signal(|| false);
     let section_ids: Vec<String> = sections.iter().map(|s| s.id.clone()).collect();
 
     // Group visible bots by section, in section order; anything that does
@@ -97,19 +98,38 @@ pub fn Rail(
                 div { class: "rail-group-head",
                     span { class: "rail-group-title", "Group chats" }
                     div { class: "rail-group-acts",
-                        button {
-                            class: "rail-new-room",
-                            title: "New bot",
-                            "aria-label": "New bot",
-                            onclick: move |_| on_new_bot.call(()),
-                            "+"
-                        }
-                        button {
-                            class: "rail-new-room",
-                            title: "New group chat",
-                            "aria-label": "New group chat",
-                            onclick: move |_| on_new_room.call(()),
-                            "+"
+                        div { class: "rail-new-wrap",
+                            button {
+                                class: "rail-new-room",
+                                title: "New",
+                                "aria-label": "New",
+                                "aria-haspopup": "menu",
+                                "aria-expanded": "{new_menu_open()}",
+                                onclick: move |_| new_menu_open.set(!new_menu_open()),
+                                "+"
+                            }
+                            if new_menu_open() {
+                                div { class: "rail-new-menu", role: "menu",
+                                    button {
+                                        role: "menuitem",
+                                        class: "rail-new-menu-item",
+                                        onclick: move |_| {
+                                            new_menu_open.set(false);
+                                            on_new_bot.call(());
+                                        },
+                                        "New bot"
+                                    }
+                                    button {
+                                        role: "menuitem",
+                                        class: "rail-new-menu-item",
+                                        onclick: move |_| {
+                                            new_menu_open.set(false);
+                                            on_new_room.call(());
+                                        },
+                                        "New group chat"
+                                    }
+                                }
+                            }
                         }
                         button {
                             class: "rail-settings",

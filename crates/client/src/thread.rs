@@ -328,15 +328,8 @@ pub fn ChatPane(
     // five now, still only one busy at a time).
     let mut avatar_busy = use_signal(|| false);
     let mut shape_busy = use_signal(|| false);
-    // EXPORT-01: the "Export" action - same direct-action, no-confirm
-    // posture, `rail_error` shared with the five above. `export_ready`
-    // holds the `data:` URI once a fetch completes; see the closure below
-    // that fills it for why this is two signals rather than one `Result`
-    // (busy and "there is a ready download" are not mutually exclusive
-    // with error - a fresh click clears `export_ready` immediately so a
-    // stale download never sits next to a new in-flight fetch).
+    // EXPORT-01 / SEC5-05: one-click export after authenticated fetch.
     let mut export_busy = use_signal(|| false);
-    let mut export_ready = use_signal(|| None::<String>);
     // DUP-01: "Duplicate" - same direct-action, no-confirm posture as
     // Export above (`rail_error` shared with all seven controls in this
     // header now). Unlike every other action here, success does not patch
@@ -531,13 +524,9 @@ pub fn ChatPane(
                     // function's own doc) and hands the bytes to a `data:`
                     // URI once they arrive - the same "authenticated fetch,
                     // then a fully declarative element" split `vm_card.rs`
-                    // already uses for the thumbnail. `export_ready` holds
-                    // that URI; the `<a download>` below only appears once
-                    // it is set, and clicking it is the platform's own
-                    // save-file UI, not anything this app drives itself.
-                    // `rail_error` is shared by every control in this
-                    // header, same posture as pin/hide/move/avatar/shape
-                    // above.
+                    // SEC5-05: one click fetches then triggers the platform
+                    // save dialog via `download_markdown_file` (same bytes
+                    // path as the old two-step `<a download>`).
                     let export_bot_id = bot_id.clone();
                     let export_filename = format!("{bot_id}.md");
                     let on_export_click = move |_| {
@@ -546,16 +535,16 @@ pub fn ChatPane(
                         }
                         export_busy.set(true);
                         rail_error.set(None);
-                        export_ready.set(None);
                         let bot_id = export_bot_id.clone();
+                        let export_filename = export_filename.clone();
                         spawn(async move {
                             match api::export_bot_markdown(&bot_id).await {
                                 Ok(bytes) => {
                                     export_busy.set(false);
-                                    export_ready.set(Some(format!(
-                                        "data:text/markdown;charset=utf-8;base64,{}",
-                                        crate::vm_card::base64_encode(&bytes)
-                                    )));
+                                    crate::vm_card::download_markdown_file(
+                                        &export_filename,
+                                        &bytes,
+                                    );
                                 }
                                 Err(err) => {
                                     export_busy.set(false);
@@ -674,15 +663,6 @@ pub fn ChatPane(
                                     disabled: *export_busy.read(),
                                     onclick: on_export_click,
                                     if *export_busy.read() { "Exporting…" } else { "Export" }
-                                }
-                                if let Some(href) = export_ready.read().clone() {
-                                    a {
-                                        class: "pane-perms-btn",
-                                        href: "{href}",
-                                        download: "{export_filename}",
-                                        onclick: move |_| export_ready.set(None),
-                                        "Download .md"
-                                    }
                                 }
                                 button {
                                     class: "pane-perms-btn",
