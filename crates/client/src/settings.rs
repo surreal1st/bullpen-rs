@@ -986,9 +986,8 @@ fn AutoReviewSection() -> Element {
 /// `desk_config(env)` - so there is nothing here to port that block to.
 ///
 /// The empty state says plainly that nothing is set up - unlike the TS
-/// original's `npm run import-skills` (there is no skill import in this
-/// client yet, and naming a command that does not work here would be a
-/// lie the TS original could get away with and this port cannot).
+/// original's `npm run import-skills`; bulk import is the
+/// `import-skills` CLI, not an in-app picker (S10-04).
 ///
 /// S10-03: create and edit via `PUT /api/skills/{name}`; list and open-row
 /// body always follow server truth after a successful save (see
@@ -1231,7 +1230,13 @@ fn SkillsSection() -> Element {
             if let Some(list) = list {
                 if list.is_empty() {
                     p { class: "muted",
-                        "None yet. There is no skill import in this client yet — use Add skill above."
+                        "None yet. From the repo root, "
+                        code { "cargo run -p server --bin import-skills -- --dry" }
+                        " previews Claude Code skills; drop "
+                        code { "--dry" }
+                        " and set "
+                        code { "BULLPEN_PASSWORD" }
+                        " to import. Or use Add skill above."
                     }
                 } else {
                     div { class: "skill-list",

@@ -5,7 +5,12 @@ pub mod ask_josh;
 pub mod faces;
 pub mod mentions;
 pub mod nothing_new;
+pub mod skill_file;
+pub mod skill_fit;
 pub mod working;
+
+pub use skill_file::parse_skill_file;
+pub use skill_fit::{SkillFit, assess_skill, body_for_bullpen, capability_note};
 
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
