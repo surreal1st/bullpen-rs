@@ -1059,6 +1059,50 @@
   font-size: 0.76rem;
 }
 
+.skill-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.skill-form {
+  margin-top: 0.75rem;
+  padding: 0.85rem 0.9rem;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.skill-name-input,
+.skill-desc-input {
+  width: 100%;
+  box-sizing: border-box;
+  background: #0f151d;
+  border: 1px solid var(--line);
+  color: var(--ink);
+  border-radius: 6px;
+  padding: 0.35rem 0.5rem;
+  font: inherit;
+  font-size: 0.82rem;
+}
+
+.skill-name-input:read-only {
+  color: var(--muted);
+  cursor: default;
+}
+
+.skill-body-box {
+  min-height: 8rem;
+}
+
+.skill-open-actions {
+  margin: 0 0.25rem 0.35rem;
+}
+
 @media (max-width: 640px) {
   .skill-head {
     grid-template-columns: 1fr;

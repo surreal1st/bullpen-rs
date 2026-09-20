@@ -1489,6 +1489,35 @@ pub async fn fetch_skill_body(name: &str) -> Result<String, String> {
         .map_err(|e| e.to_string())
 }
 
+/// `PUT /api/skills/:name` - create or update description + body; returns the
+/// full saved skill (including normalised `name`). 400 ("that name is not
+/// usable") surfaces as a plain status string, same posture as
+/// `set_bot_skill` above.
+pub async fn put_skill(
+    name: &str,
+    description: &str,
+    body: &str,
+) -> Result<crate::types::Skill, String> {
+    let encoded = crate::transport::encode_uri_component(name);
+    let url = format!("/api/skills/{encoded}");
+    let resp = Request::put(&url)
+        .json(&serde_json::json!({
+            "description": description,
+            "body": body,
+        }))
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("{url} -> {}", resp.status()));
+    }
+    resp.json::<crate::types::SkillPutField>()
+        .await
+        .map(|b| b.skill)
+        .map_err(|e| e.to_string())
+}
+
 /// `GET /api/bots/:id/skills` - the bot's enabled skill NAMES, backing
 /// `edit_bot.rs`'s checkbox list. 404 ("no such bot") folds into the plain
 /// status string, same posture as `fetch_permissions` above.

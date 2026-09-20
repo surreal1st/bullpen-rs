@@ -13,7 +13,7 @@ use crate::model_chip::short_model;
 use crate::slack_card::SlackCard;
 use crate::transport::sleep;
 use crate::types::{
-    AutoReviewLogEntry, AutoReviewState, CatalogEntry, RoutingState, Section, SkillSummary,
+    AutoReviewLogEntry, AutoReviewState, CatalogEntry, RoutingState, Section, Skill, SkillSummary,
     SpendView,
 };
 use dioxus::prelude::*;
@@ -989,6 +989,10 @@ fn AutoReviewSection() -> Element {
 /// original's `npm run import-skills` (there is no skill import in this
 /// client yet, and naming a command that does not work here would be a
 /// lie the TS original could get away with and this port cannot).
+///
+/// S10-03: create and edit via `PUT /api/skills/{name}`; list and open-row
+/// body always follow server truth after a successful save (see
+/// `skills_save_outcome` below).
 #[component]
 fn SkillsSection() -> Element {
     let mut skills = use_signal(|| None::<Vec<SkillSummary>>);
@@ -996,6 +1000,13 @@ fn SkillsSection() -> Element {
     let mut open = use_signal(|| None::<String>);
     let mut body = use_signal(String::new);
     let mut body_error = use_signal(|| None::<String>);
+    let mut editor = use_signal(|| None::<SkillEditorMode>);
+    let mut form_name = use_signal(String::new);
+    let mut form_description = use_signal(String::new);
+    let mut form_body = use_signal(String::new);
+    let mut save_error = use_signal(|| None::<String>);
+    let mut saving = use_signal(|| false);
+    let mut saved_name_note = use_signal(|| None::<String>);
 
     use_effect(move || {
         spawn(async move {
@@ -1007,6 +1018,9 @@ fn SkillsSection() -> Element {
     });
 
     let show = move |name: String| {
+        if editor.read().is_some() {
+            return;
+        }
         if open.read().as_deref() == Some(name.as_str()) {
             open.set(None);
             return;
@@ -1026,14 +1040,181 @@ fn SkillsSection() -> Element {
         });
     };
 
+    let start_create = move |_| {
+        editor.set(Some(SkillEditorMode::Create));
+        form_name.set(String::new());
+        form_description.set(String::new());
+        form_body.set(String::new());
+        save_error.set(None);
+        saved_name_note.set(None);
+    };
+
+    let mut start_edit = move |name: String, description: String| {
+        editor.set(Some(SkillEditorMode::Edit(name.clone())));
+        form_description.set(description);
+        save_error.set(None);
+        saved_name_note.set(None);
+        if open.read().as_deref() == Some(name.as_str()) && !body.read().is_empty() {
+            let raw = body.read().clone();
+            form_body.set(if raw == "(empty)" { String::new() } else { raw });
+        } else {
+            form_body.set(String::new());
+            let fetch_name = name.clone();
+            spawn(async move {
+                match api::fetch_skill_body(&fetch_name).await {
+                    Ok(text) => form_body.set(text),
+                    Err(err) => save_error.set(Some(err)),
+                }
+            });
+        }
+    };
+
+    let cancel_editor = move |_| {
+        editor.set(None);
+        save_error.set(None);
+        saved_name_note.set(None);
+    };
+
+    let submit_save = move |_| {
+        saving.set(true);
+        save_error.set(None);
+        saved_name_note.set(None);
+        let mode = editor.read().clone();
+        let path_name = match &mode {
+            Some(SkillEditorMode::Create) => form_name.read().clone(),
+            Some(SkillEditorMode::Edit(n)) => n.clone(),
+            None => {
+                saving.set(false);
+                return;
+            }
+        };
+        let description = form_description.read().clone();
+        let body_text = form_body.read().clone();
+        let typed_create_name = form_name.read().clone();
+        spawn(async move {
+            let response = api::put_skill(&path_name, &description, &body_text).await;
+            let err_msg = response.as_ref().err().cloned();
+            let before = skills.read().clone().unwrap_or_default();
+            if let Some((next_list, saved)) = skills_save_outcome(&before, response) {
+                skills.set(Some(next_list));
+                editor.set(None);
+                open.set(Some(saved.name.clone()));
+                body.set(if saved.body.is_empty() {
+                    "(empty)".to_string()
+                } else {
+                    saved.body.clone()
+                });
+                body_error.set(None);
+                if matches!(mode, Some(SkillEditorMode::Create))
+                    && saved.name != typed_create_name.trim()
+                {
+                    saved_name_note.set(Some(format!(
+                        "Saved as \"{}\" (names are normalised).",
+                        saved.name
+                    )));
+                }
+            } else if let Some(err) = err_msg {
+                save_error.set(Some(err));
+            }
+            saving.set(false);
+        });
+    };
+
     let list = skills.read().clone();
     let open_name = open.read().clone();
+    let editor_mode = editor.read().clone();
+    let is_saving = *saving.read();
 
     rsx! {
         div { class: "stg-sub",
             h4 { class: "stg-sub-h", "Skills" }
             p { class: "set-note",
                 "A way of doing a job, written once. Each bot gets the ones you give it in its own editor, and loads the instructions only when it needs them."
+            }
+
+            div { class: "skill-toolbar",
+                button {
+                    r#type: "button",
+                    class: "stg-btn",
+                    disabled: editor_mode.is_some() || is_saving,
+                    onclick: start_create,
+                    "Add skill"
+                }
+            }
+
+            if let Some(note) = saved_name_note.read().clone() {
+                p { class: "notice-inline", "{note}" }
+            }
+
+            if let Some(mode) = editor_mode.clone() {
+                div { class: "skill-form",
+                    if let SkillEditorMode::Create = mode {
+                        div { class: "field",
+                            span { "Name" }
+                            small { "Required. Becomes the skill key after normalisation (spaces to hyphens, lower case)." }
+                            input {
+                                class: "skill-name-input",
+                                r#type: "text",
+                                spellcheck: "false",
+                                value: "{form_name}",
+                                oninput: move |evt| form_name.set(evt.value()),
+                            }
+                        }
+                    } else if let SkillEditorMode::Edit(name) = mode {
+                        div { class: "field",
+                            span { "Name" }
+                            small { "Cannot be renamed here — create a new skill instead." }
+                            input {
+                                class: "skill-name-input",
+                                r#type: "text",
+                                spellcheck: "false",
+                                value: "{name}",
+                                readonly: true,
+                            }
+                        }
+                    }
+                    div { class: "field",
+                        span { "When to use it" }
+                        input {
+                            class: "skill-desc-input",
+                            r#type: "text",
+                            spellcheck: "false",
+                            value: "{form_description}",
+                            oninput: move |evt| form_description.set(evt.value()),
+                        }
+                    }
+                    div { class: "field",
+                        span { "Instructions" }
+                        textarea {
+                            class: "rules-box skill-body-box",
+                            spellcheck: "false",
+                            rows: "10",
+                            value: "{form_body}",
+                            oninput: move |evt| form_body.set(evt.value()),
+                        }
+                    }
+                    if let Some(err) = save_error.read().clone() {
+                        p { class: "notice-inline", "{err}" }
+                    }
+                    div { class: "rules-foot",
+                        button {
+                            r#type: "button",
+                            class: "stg-btn",
+                            disabled: is_saving
+                                || (matches!(editor_mode, Some(SkillEditorMode::Create))
+                                    && form_name.read().trim().is_empty()),
+                            onclick: submit_save,
+                            if is_saving { "Saving…" } else { "Save skill" }
+                        }
+                        button {
+                            r#type: "button",
+                            class: "stg-btn",
+                            disabled: is_saving,
+                            onclick: cancel_editor,
+                            "Cancel"
+                        }
+                    }
+                }
             }
 
             if let Some(err) = load_error.read().clone() {
@@ -1050,7 +1231,7 @@ fn SkillsSection() -> Element {
             if let Some(list) = list {
                 if list.is_empty() {
                     p { class: "muted",
-                        "None yet. There is no skill import in this client yet."
+                        "None yet. There is no skill import in this client yet — use Add skill above."
                     }
                 } else {
                     div { class: "skill-list",
@@ -1059,6 +1240,7 @@ fn SkillsSection() -> Element {
                                 button {
                                     r#type: "button",
                                     class: "skill-head",
+                                    disabled: editor_mode.is_some(),
                                     onclick: {
                                         let mut show = show;
                                         let name = skill.name.clone();
@@ -1071,9 +1253,24 @@ fn SkillsSection() -> Element {
                                     span { class: "skill-when", "{skill.description}" }
                                 }
                                 if open_name.as_deref() == Some(skill.name.as_str()) {
-                                    if let Some(err) = body_error.read().clone() {
+                                    if editor_mode == Some(SkillEditorMode::Edit(skill.name.clone())) {
+                                        // Form is rendered above; keep the row open.
+                                    } else if let Some(err) = body_error.read().clone() {
                                         p { class: "notice-inline", "{err}" }
                                     } else {
+                                        div { class: "skill-open-actions",
+                                            button {
+                                                r#type: "button",
+                                                class: "stg-btn",
+                                                disabled: editor_mode.is_some(),
+                                                onclick: {
+                                                    let name = skill.name.clone();
+                                                    let desc = skill.description.clone();
+                                                    move |_| start_edit(name.clone(), desc.clone())
+                                                },
+                                                "Edit"
+                                            }
+                                        }
                                         pre { class: "mono skill-body",
                                             if body.read().is_empty() { "Loading…" } else { "{body}" }
                                         }
@@ -1085,6 +1282,122 @@ fn SkillsSection() -> Element {
                 }
             }
         }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+enum SkillEditorMode {
+    Create,
+    Edit(String),
+}
+
+/// List row derived from a full PUT/GET skill - body length only, never the
+/// body text (`SkillSummary`'s own contract).
+fn skill_summary_from_skill(skill: &Skill) -> SkillSummary {
+    SkillSummary {
+        id: skill.id.clone(),
+        name: skill.name.clone(),
+        description: skill.description.clone(),
+        bytes: skill.body.len() as u64,
+        source: skill.source.clone(),
+        created_at: skill.created_at.clone(),
+        updated_at: skill.updated_at.clone(),
+    }
+}
+
+/// Insert or replace one library row from a successful save; sort by name so
+/// the list stays stable regardless of upsert vs create.
+fn skills_list_after_save(before: &[SkillSummary], saved: &Skill) -> Vec<SkillSummary> {
+    let summary = skill_summary_from_skill(saved);
+    let mut out = before.to_vec();
+    if let Some(i) = out
+        .iter()
+        .position(|s| s.id == summary.id || s.name == summary.name)
+    {
+        out[i] = summary;
+    } else {
+        out.push(summary);
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+/// After PUT: refresh the library from server truth, or change nothing on
+/// failure - same discipline as `edit_bot.rs`'s `skill_set_after_response`.
+fn skills_save_outcome(
+    before: &[SkillSummary],
+    response: Result<Skill, String>,
+) -> Option<(Vec<SkillSummary>, Skill)> {
+    match response {
+        Ok(skill) => Some((skills_list_after_save(before, &skill), skill)),
+        Err(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod skill_save_tests {
+    use super::*;
+
+    fn sample_summary(name: &str, desc: &str) -> SkillSummary {
+        SkillSummary {
+            id: format!("id-{name}"),
+            name: name.to_string(),
+            description: desc.to_string(),
+            bytes: 0,
+            source: "bullpen".to_string(),
+            created_at: "t0".to_string(),
+            updated_at: "t0".to_string(),
+        }
+    }
+
+    fn sample_skill(name: &str, desc: &str, body: &str) -> Skill {
+        Skill {
+            id: format!("id-{name}"),
+            name: name.to_string(),
+            description: desc.to_string(),
+            body: body.to_string(),
+            source: "bullpen".to_string(),
+            created_at: "t1".to_string(),
+            updated_at: "t1".to_string(),
+        }
+    }
+
+    #[test]
+    fn save_outcome_updates_list_without_body_in_summary() {
+        let before = vec![sample_summary("alpha", "old")];
+        let saved = sample_skill("alpha", "new when", "secret body");
+
+        let Some((after, _)) = skills_save_outcome(&before, Ok(saved.clone())) else {
+            panic!("expected success");
+        };
+
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].description, "new when");
+        assert_eq!(after[0].bytes, saved.body.len() as u64);
+        assert!(!after[0].name.is_empty());
+    }
+
+    #[test]
+    fn save_outcome_inserts_new_row_sorted() {
+        let before = vec![sample_summary("beta", "")];
+        let saved = sample_skill("alpha", "a", "");
+
+        let Some((after, _)) = skills_save_outcome(&before, Ok(saved)) else {
+            panic!("expected success");
+        };
+
+        assert_eq!(after.len(), 2);
+        assert_eq!(after[0].name, "alpha");
+        assert_eq!(after[1].name, "beta");
+    }
+
+    #[test]
+    fn save_outcome_err_leaves_before_untouched() {
+        let before = vec![sample_summary("keep", "x")];
+
+        let after = skills_save_outcome(&before, Err("nope".to_string()));
+
+        assert_eq!(after, None);
     }
 }
 

@@ -614,6 +614,27 @@ pub struct SkillBodyOnly {
     pub body: String,
 }
 
+/// Full skill row - body included. Returned by `GET /api/skills/:name` and
+/// `PUT /api/skills/:name` (`routes/skills.rs`'s `get_skill`/`put_skill`).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Skill {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    #[serde(default)]
+    pub body: String,
+    pub source: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// `PUT /api/skills/:name`'s success shape.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SkillPutField {
+    pub skill: Skill,
+}
+
 /// `GET /api/bots/:id/skills` and `PUT /api/bots/:id/skills/:name`'s shared
 /// response shape - the bot's enabled skill NAMES, never full `Skill`/
 /// `SkillSummary` rows (`routes/skills.rs`'s own doc on both routes). The PUT
