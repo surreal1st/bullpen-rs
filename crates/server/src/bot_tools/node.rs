@@ -14,6 +14,17 @@ fn night_root() -> PathBuf {
 }
 
 fn run_script() -> PathBuf {
+    if let Ok(path) = std::env::var("BULLPEN_W5_SCRIPT") {
+        return PathBuf::from(path);
+    }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let beside_binary = dir.join("w5/run.mjs");
+        if beside_binary.is_file() {
+            return beside_binary;
+        }
+    }
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("w5/run.mjs")
 }
 

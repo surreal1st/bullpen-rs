@@ -449,7 +449,7 @@ async fn export_bot(
         markdown.push_str(&format!("model: {}\n", serde_json::to_string(model)?));
     }
     markdown.push_str("---\n\n");
-    markdown.push_str(&bot.instructions);
+    markdown.push_str(&crate::export_scrub::scrub_export_text(&bot.instructions));
 
     let mut response = (StatusCode::OK, markdown).into_response();
     response.headers_mut().insert(

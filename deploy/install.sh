@@ -66,6 +66,13 @@ if [[ -d "$INCOMING/templates" ]]; then
   chown -R bullpen:bullpen "$BULLPEN_RS_HOME/templates"
 fi
 
+if [[ -d "$INCOMING/w5" ]]; then
+  echo "Installing W5 runner..."
+  mkdir -p "$BULLPEN_RS_HOME/w5"
+  cp -r "$INCOMING/w5/"* "$BULLPEN_RS_HOME/w5/"
+  chown -R bullpen:bullpen "$BULLPEN_RS_HOME/w5"
+fi
+
 # Install systemd unit (F8: use path relative to script directory)
 echo "Installing systemd unit..."
 install -o root -g root -m 644 "$INCOMING/bullpen-rs.service" /etc/systemd/system/bullpen-rs.service

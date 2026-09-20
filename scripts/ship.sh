@@ -94,6 +94,11 @@ if [[ -d templates ]]; then
   scp -rq templates "$MERIDIAN_HOST:$INCOMING/templates"
 fi
 
+if [[ -d crates/server/w5 ]]; then
+  echo "Transferring W5 runner (propose_tool)..."
+  scp -rq crates/server/w5 "$MERIDIAN_HOST:$INCOMING/w5"
+fi
+
 echo "Transferring deploy files (F8)..."
 scp -q "deploy/install.sh" "$MERIDIAN_HOST:$INCOMING/install.sh"
 scp -q "deploy/bullpen-rs.service" "$MERIDIAN_HOST:$INCOMING/bullpen-rs.service"

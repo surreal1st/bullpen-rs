@@ -1469,6 +1469,31 @@ async fn export_with_a_model_pin_includes_name_description_model_then_instructio
     assert_eq!(body, "Be helpful.");
 }
 
+/// S10-10: instructions body is scrubbed before download — keys and URL
+/// credentials must not survive export.
+#[tokio::test]
+async fn export_scrubs_secrets_and_url_credentials_from_instructions() {
+    let db = open_db();
+    let instructions =
+        "Use sk-or-abcdefghijklmnopqrstuvwxyz and hook https://user:pass@example.com/hook";
+    db.conn()
+        .execute(
+            "INSERT INTO bots (id, name, purpose, instructions, model, created_at, permissions)
+             VALUES ('scrub-bot', 'Scrub Bot', 'test', ?1, NULL, '2026-01-01T00:00:00Z', '{}')",
+            rusqlite::params![instructions],
+        )
+        .expect("seed bot");
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let (status, _headers, text) = export_route(&app, "/api/bots/scrub-bot/export", &session).await;
+    assert_eq!(status, 200);
+    let (_frontmatter, body) = split_frontmatter(&text);
+    assert!(!body.contains("sk-or-abcdefghijklmnopqrstuvwxyz"));
+    assert!(!body.contains("user:pass"));
+    assert!(body.contains("[redacted]"));
+}
+
 /// Bite: an unpinned bot's export carries NO `model:` line at all - not an
 /// empty one, not a `null` one, absent - checked both through the parsed
 /// frontmatter map (no `model` key) and directly against the raw text (no

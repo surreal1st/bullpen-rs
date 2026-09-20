@@ -9,6 +9,7 @@ pub mod desk;
 pub mod egress;
 pub mod egress_proxy;
 mod error;
+mod export_scrub;
 pub mod goals;
 pub mod hooks;
 pub mod import_open;
