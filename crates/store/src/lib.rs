@@ -5,6 +5,7 @@ pub mod auth;
 pub mod auto_review;
 pub mod bot_tools;
 pub mod bots;
+pub mod connectors;
 pub mod conversations;
 pub mod goals;
 pub mod memory;
@@ -33,6 +34,10 @@ pub use bots::{
     get_bot, get_bot_egress, hard_delete_bot, list_bots, list_hidden, list_sections, move_bot,
     rename_section, set_archived, set_avatar, set_bot_egress, set_hidden, set_identity, set_pinned,
     set_shape, slug_base,
+};
+pub use connectors::{
+    AddConnectorResult, Connector, ConnectorFull, add_connector, connectors_for_bot, get_connector,
+    list_connectors, remove_connector, set_bot_connector, strip_secret,
 };
 pub use conversations::{
     archive_thread, create_thread, get_conversation, get_or_create_conversation, list_threads,

@@ -1,6 +1,6 @@
 //! Marketplace manifest parsing and bot install — port of
 //! `projects/bullpen-night/src/server/marketplace.ts` (pure + bot install;
-//! connector install waits on MCP / S7).
+//! connector install wired in S7-01).
 
 use crate::import_open::parse_open_bot;
 use serde::{Deserialize, Serialize};
@@ -166,18 +166,46 @@ pub fn install_open_markdown(
     install_parsed(db, &parsed)
 }
 
+/// Installs a marketplace offering (bot or connector).
+pub fn install_offering(db: &Db, offering: &Offering) -> rusqlite::Result<InstallResult> {
+    match offering {
+        Offering::Connector { name, url, .. } => install_connector(db, name, url),
+        Offering::Bot { .. } => {
+            let Some((file_name, text)) = offering_to_open_markdown(offering) else {
+                return Ok(InstallResult {
+                    ok: false,
+                    what: None,
+                    id: None,
+                    error: Some("connectors are not available yet".to_string()),
+                });
+            };
+            install_open_markdown(db, &file_name, &text)
+        }
+    }
+}
+
 /// Installs a bot offering through the same open-format path as file import.
 pub fn install_bot(db: &Db, offering: &Offering) -> rusqlite::Result<InstallResult> {
-    let Some((file_name, text)) = offering_to_open_markdown(offering) else {
-        return Ok(InstallResult {
+    install_offering(db, offering)
+}
+
+pub fn install_connector(db: &Db, name: &str, url: &str) -> rusqlite::Result<InstallResult> {
+    let added = store::add_connector(db, name, url, None)?;
+    if added.ok {
+        Ok(InstallResult {
+            ok: true,
+            what: Some("connector".to_string()),
+            id: added.connector.as_ref().map(|c| c.id.clone()),
+            error: None,
+        })
+    } else {
+        Ok(InstallResult {
             ok: false,
             what: None,
             id: None,
-            error: Some("connectors are not available yet".to_string()),
-        });
-    };
-
-    install_open_markdown(db, &file_name, &text)
+            error: added.error,
+        })
+    }
 }
 
 fn install_parsed(

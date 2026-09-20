@@ -174,6 +174,34 @@ async fn install_starter_template_creates_bot() {
 }
 
 #[tokio::test]
+async fn install_gmail_connector_from_marketplace() {
+    no_network_directory();
+    let db = open_db();
+    let session = seed_session(&db);
+    let app = build_app(AppState::new(db));
+    let (status, body) = post_json(
+        &app,
+        "/api/marketplace/install",
+        &session,
+        json!({ "kind": "connector", "name": "Gmail" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body["ok"], true);
+    assert_eq!(body["installed"], "connector");
+    assert_eq!(body["nextStep"], "authorize");
+    let connector_id = body["id"].as_str().expect("connector id");
+    let (_, list) = get_json(&app, "/api/connectors", &session).await;
+    assert!(
+        list["connectors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["id"].as_str() == Some(connector_id))
+    );
+}
+
+#[tokio::test]
 async fn install_refuses_duplicate_name() {
     unsafe { std::env::set_var("BULLPEN_TEMPLATES_DIR", templates_dir()) };
     no_network_directory();

@@ -109,15 +109,11 @@ async fn install_card(
         .to_string();
     let kind = parsed.get("kind").and_then(|v| v.as_str()).unwrap_or("bot");
 
-    if kind == "connector" {
-        return Ok((
-            StatusCode::NOT_IMPLEMENTED,
-            Json(json!({ "error": "connector install is not available yet" })),
-        )
-            .into_response());
-    }
-
-    let pool = resolve_bot_pool(&state).await?;
+    let pool = if kind == "connector" {
+        built_in_plugin_cards()
+    } else {
+        resolve_bot_pool(&state).await?
+    };
     let Some(card) = pool.into_iter().find(|c| c.name == wanted) else {
         return Ok((
             StatusCode::NOT_FOUND,
@@ -185,7 +181,13 @@ async fn install_card(
     }
 
     let db = state.db();
-    let result = if let Some(text) = template_markdown {
+    let result = if kind == "connector" {
+        crate::marketplace::install_connector(
+            &db,
+            &card.name,
+            card.connector_url.as_deref().unwrap_or(""),
+        )?
+    } else if let Some(text) = template_markdown {
         install_open_markdown(&db, "template.md", &text)?
     } else {
         install_bot(&db, &offering)?
@@ -198,16 +200,17 @@ async fn install_card(
             .into_response());
     }
 
-    Ok((
-        StatusCode::CREATED,
-        Json(json!({
-            "ok": true,
-            "installed": result.what,
-            "id": result.id,
-            "grants": describe_install(&offering),
-        })),
-    )
-        .into_response())
+    let mut body = json!({
+        "ok": true,
+        "installed": result.what,
+        "id": result.id,
+        "grants": describe_install(&offering),
+    });
+    if kind == "connector" {
+        body["nextStep"] = json!("authorize");
+    }
+
+    Ok((StatusCode::CREATED, Json(body)).into_response())
 }
 
 async fn resolve_bot_pool(state: &AppState) -> Result<Vec<MarketplaceCard>, crate::AppError> {

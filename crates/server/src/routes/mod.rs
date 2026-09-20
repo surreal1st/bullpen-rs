@@ -11,6 +11,7 @@ mod auth;
 mod auto_review;
 mod bot_tools;
 mod bots;
+mod connectors;
 mod conversations;
 mod egress;
 mod events;
@@ -58,6 +59,7 @@ pub fn router() -> Router<AppState> {
         .merge(auto_review::router())
         .merge(bot_tools::router())
         .merge(bots::router())
+        .merge(connectors::router())
         .merge(conversations::router())
         .merge(egress::router())
         .merge(goals::router())
