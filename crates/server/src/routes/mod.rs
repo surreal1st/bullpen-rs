@@ -9,6 +9,7 @@
 mod approvals;
 mod auth;
 mod auto_review;
+mod bot_tools;
 mod bots;
 mod conversations;
 mod egress;
@@ -55,6 +56,7 @@ pub fn router() -> Router<AppState> {
         .merge(approvals::router())
         .merge(auth::router())
         .merge(auto_review::router())
+        .merge(bot_tools::router())
         .merge(bots::router())
         .merge(conversations::router())
         .merge(egress::router())

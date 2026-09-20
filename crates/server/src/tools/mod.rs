@@ -46,6 +46,7 @@ mod local_read;
 mod message_bot;
 mod note;
 mod project_remember;
+mod propose_tool;
 mod read_file;
 mod remember;
 mod remember_shared;
@@ -268,6 +269,10 @@ pub struct BuildParams {
     pub capture_observation: ObservationCapture,
     pub observations: Arc<ObservationRegistry>,
     pub desktop_states: Arc<DesktopStateRegistry>,
+    /// S10-09: file path backing `db` — W5's node bridge opens the same file.
+    pub db_path: Arc<String>,
+    /// S10-09: data directory for proposed/approved tool sources on disk.
+    pub data_dir: Arc<String>,
 }
 
 /// F1: the full spec list this crate's toolbox can offer, before either
@@ -331,6 +336,7 @@ fn all_specs() -> Vec<ToolSpec> {
         // see `use_skill`'s own module doc for why it grants nothing.
         use_skill::spec(),
         hire_bot::spec(),
+        propose_tool::spec(),
     ]
 }
 
@@ -379,7 +385,10 @@ pub fn build(params: BuildParams) -> ToolBox {
     let capture_observation = params.capture_observation;
     let observations = params.observations;
     let desktop_states = params.desktop_states;
+    let db_path = Arc::clone(&params.db_path);
+    let data_dir = Arc::clone(&params.data_dir);
     let toolbox_bot_id = bot_id.clone();
+    let bot_made_specs = crate::bot_tools::approved_tool_specs(&db, db_path.as_str());
     // F3: `always_on_set()` rides through any `only` narrowing whatever it
     // says (TS `app.ts:5783`) - a routine's phrasing turn narrowed to `[]`
     // must still be able to say something or ask Josh a question, not lose
@@ -393,6 +402,7 @@ pub fn build(params: BuildParams) -> ToolBox {
     // alone.
     let specs: Vec<ToolSpec> = all_specs()
         .into_iter()
+        .chain(bot_made_specs)
         .filter(|spec| perms.get(spec.name.as_str()).copied() != Some(Decision::Deny))
         .filter(|spec| match &only {
             None => true,
@@ -423,10 +433,30 @@ pub fn build(params: BuildParams) -> ToolBox {
             let capture_observation = Arc::clone(&capture_observation);
             let observations = Arc::clone(&observations);
             let desktop_states = Arc::clone(&desktop_states);
+            let db_path = Arc::clone(&db_path);
+            let data_dir = Arc::clone(&data_dir);
             let execution_context = handler_execution_context.clone();
             Box::pin(async move {
+                if crate::bot_tools::is_bot_made_tool(&db, &name) {
+                    let text = crate::bot_tools::run_bot_tool(
+                        &db,
+                        db_path.as_str(),
+                        &sandbox,
+                        &bot_id,
+                        &name,
+                        &args,
+                    )
+                    .await;
+                    return ToolOutcome::new(text, None);
+                }
                 if name == "snap_desk" {
                     return snap_desk::run(&args, &capture_observation).await;
+                }
+                if name == "propose_tool" {
+                    let text =
+                        propose_tool::run(&db, db_path.as_str(), data_dir.as_str(), &bot_id, &args)
+                            .await;
+                    return ToolOutcome::new(text, None);
                 }
                 let legacy = match name.as_str() {
                     "say" => (say::run(&db, &bot_id, &args), None),

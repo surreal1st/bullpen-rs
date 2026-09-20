@@ -33,6 +33,7 @@ pub mod teams;
 // `server::tools::browse`: Rust visibility is not transitive around a
 // private ancestor, so no amount of `pub` on the items mattered while this
 // module stayed private (S6-W-03).
+pub mod bot_tools;
 pub mod tools;
 pub mod vm;
 pub mod vm_proxy;
@@ -558,6 +559,11 @@ impl AppState {
     // and is the only caller.
     pub fn db_handle(&self) -> Arc<Mutex<Db>> {
         Arc::clone(&self.db)
+    }
+
+    /// S10-09: point W5 at the same on-disk db and data directory the server uses.
+    pub fn configure_w5(&self, db_path: String, data_dir: String) {
+        self.runs.set_w5_paths(db_path, data_dir);
     }
 
     /// S5c-03: registers what `routes/slack.rs`'s DM/mention branch should

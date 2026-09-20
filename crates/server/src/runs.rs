@@ -336,6 +336,10 @@ pub struct RunManager {
     /// `with_backlog_ttl` so a test proving the bound (S1-F-04) does not
     /// have to sleep out a full minute.
     backlog_ttl: Duration,
+    /// S10-09: path to `bullpen.db` for W5's node bridge (`:memory:` disables it).
+    db_path: Mutex<String>,
+    /// S10-09: data directory for proposed/approved tool sources.
+    data_dir: Mutex<String>,
 }
 
 /// S13b-F/S13b-03: tools whose result the CLIENT computes rather than the
@@ -667,7 +671,27 @@ impl RunManager {
             on_run_done: Mutex::new(None),
             start_room_turn: Arc::new(Mutex::new(None)),
             backlog_ttl,
+            db_path: Mutex::new(":memory:".to_string()),
+            data_dir: Mutex::new("./data".to_string()),
         }
+    }
+
+    /// S10-09: W5 needs the on-disk db path and data dir (same files the
+    /// server opened in production).
+    pub fn set_w5_paths(&self, db_path: String, data_dir: String) {
+        *self.db_path.lock().expect("db_path mutex poisoned") = db_path;
+        *self.data_dir.lock().expect("data_dir mutex poisoned") = data_dir;
+    }
+
+    fn db_path(&self) -> String {
+        self.db_path.lock().expect("db_path mutex poisoned").clone()
+    }
+
+    fn data_dir(&self) -> String {
+        self.data_dir
+            .lock()
+            .expect("data_dir mutex poisoned")
+            .clone()
     }
 
     /// S1-06 wires this to chain a room round: fired for both an answered
@@ -1391,6 +1415,8 @@ impl RunManager {
             capture_observation,
             observations: Arc::clone(&self.observations),
             desktop_states: Arc::clone(&self.desktop_states),
+            db_path: Arc::new(self.db_path()),
+            data_dir: Arc::new(self.data_dir()),
         })
     }
 
@@ -2330,6 +2356,16 @@ were doing unless he changed it."
                             }
                         }
                     }
+                }
+
+                if decision != Decision::Deny && call.name == "propose_tool" {
+                    decision = crate::bot_tools::before_ask_propose_tool(
+                        &self.db_path(),
+                        &self.data_dir(),
+                        bot_id,
+                        &call.arguments,
+                    )
+                    .await;
                 }
 
                 match decision {

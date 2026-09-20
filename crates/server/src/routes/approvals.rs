@@ -1,7 +1,5 @@
-//! `GET /api/approvals`, `POST /api/approvals/:id`. Port of
-//! `app.ts:4027-4032,4064-4160`. `GET /api/approvals/:id/proposal` is
-//! explicitly SKIPPED - it is W5's `propose_tool` diagnostics card, and
-//! nothing in this Rust port proposes tools yet.
+//! `GET /api/approvals`, `POST /api/approvals/:id`, `GET /api/approvals/:id/proposal`.
+//! Port of `app.ts:4027-4032,4038-4054,4064-4160`.
 //!
 //! S2-07: `remember` on `POST /api/approvals/:id` (the "always allow" /
 //! "never" press) and the four `/api/auto-review/rules` CRUD routes both
@@ -25,6 +23,7 @@ use crate::{ApiResult, AppError, AppState};
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/approvals", get(list_approvals))
+        .route("/api/approvals/{id}/proposal", get(get_proposal))
         .route("/api/approvals/{id}", post(decide))
         .route("/api/auto-review/rules", get(list_rules).post(create_rule))
         .route(
@@ -66,6 +65,39 @@ impl From<crate::approvals::Approval> for ApprovalView {
             judge_verdict: a.judge_verdict,
             judge_reason: a.judge_reason,
         }
+    }
+}
+
+async fn get_proposal(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Response> {
+    let db = state.db();
+    let approval = crate::approvals::list_pending(&db)?
+        .into_iter()
+        .find(|a| a.id == id);
+    let approval = match approval {
+        Some(a) if a.tool_name == "propose_tool" => a,
+        _ => {
+            return Ok((
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "no proposal for that approval" })),
+            )
+                .into_response());
+        }
+    };
+    let proposal = crate::bot_tools::proposal_for_approval(
+        &state.db_handle(),
+        &approval.bot_id,
+        &approval.tool_args,
+    );
+    match proposal {
+        Some(proposal) => Ok(Json(json!({ "proposal": proposal })).into_response()),
+        None => Ok((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "no proposal for that approval" })),
+        )
+            .into_response()),
     }
 }
 
@@ -217,10 +249,28 @@ async fn decide(
     }
 
     let approved = remember.unwrap_or(parsed.approved);
+    let proposal_target = if approved {
+        None
+    } else {
+        let db = state.db();
+        crate::approvals::list_pending(&db)?
+            .into_iter()
+            .find(|a| a.id == id && a.tool_name == "propose_tool")
+    };
     let ok = state
         .runs
         .decide_approval(&id, approved, parsed.result)
         .await;
+    if ok
+        && let Some(target) = proposal_target
+        && let Some(proposal) = crate::bot_tools::proposal_for_approval(
+            &state.db_handle(),
+            &target.bot_id,
+            &target.tool_args,
+        )
+    {
+        crate::bot_tools::reject_proposal_id(&state.db_handle(), &proposal.id);
+    }
     Ok(if ok {
         Json(json!({ "ok": true, "approved": approved })).into_response()
     } else {

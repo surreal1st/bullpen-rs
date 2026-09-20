@@ -113,15 +113,23 @@ async fn main() {
     });
 
     #[cfg(debug_assertions)]
-    let state = match (fake_port, fake_credits) {
-        (Some(port), Some(credits)) => server::AppState::with_port_and_credits(db, port, credits),
-        (Some(port), None) => server::AppState::with_port(db, port),
-        (None, Some(credits)) => server::AppState::with_credits(db, credits),
-        (None, None) => server::AppState::new(db),
+    let state = {
+        let state = match (fake_port, fake_credits) {
+            (Some(port), Some(credits)) => {
+                server::AppState::with_port_and_credits(db, port, credits)
+            }
+            (Some(port), None) => server::AppState::with_port(db, port),
+            (None, Some(credits)) => server::AppState::with_credits(db, credits),
+            (None, None) => server::AppState::new(db),
+        };
+        state.configure_w5(db_path.to_string_lossy().to_string(), data_dir.clone());
+        state
     };
 
     #[cfg(not(debug_assertions))]
     let state = server::AppState::new(db);
+
+    state.configure_w5(db_path.to_string_lossy().to_string(), data_dir.clone());
 
     // S5-03: the routine scheduler, ticking every 30s - started here so it
     // runs against the same `AppState` (same `Arc<Mutex<Db>>`, same

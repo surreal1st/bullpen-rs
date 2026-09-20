@@ -3,6 +3,7 @@
 
 pub mod auth;
 pub mod auto_review;
+pub mod bot_tools;
 pub mod bots;
 pub mod conversations;
 pub mod goals;
@@ -20,6 +21,12 @@ pub mod vms;
 pub use auth::{
     PasswordRecord, create_session, destroy_session, is_configured, password_record, session_valid,
     set_password, verify_password,
+};
+pub use bot_tools::{
+    BotMadeToolRow, LiveToolRow, ToolExampleResult, ToolProposal, ensure_bot_tool_tables,
+    increment_tool_calls, insert_live_tool, is_live_bot_tool, latest_proposal, list_bot_tools,
+    list_live_tool_rows, live_tool_row, proposal_by_id, reject_proposal, revoke_bot_tool,
+    upsert_proposal_row,
 };
 pub use bots::{
     BotDraft, create_bot, create_section, delete_section, duplicate_bot, get_bot, get_bot_egress,
@@ -184,6 +191,7 @@ impl Db {
         // `Db` passes through.
         slack::ensure_slack_tables(&db)?;
         vms::ensure_vm_tables(&db)?;
+        bot_tools::ensure_bot_tool_tables(&db)?;
 
         Ok(db)
     }
