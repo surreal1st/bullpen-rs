@@ -379,9 +379,10 @@ an image message.
 
 **What remains open, and both are Josh's calls:**
 
-1. May the cheap floor select a model for a run that carries screen
-   observations? Today it may, and the cheapest one breaks on the second
-   image.
+1. ~~May the cheap floor select a model for a run that carries screen
+   observations?~~ **Settled 2026-09-20 (SEC5-01):** unattended runs (and
+   room rounds) lift off flash-lite to tier-1 vision when the provider call
+   carries images; Josh-initiated chat keeps his pin.
 2. Should history carry more than the latest observation? Every extra
    screenshot is paid for on every later step of the same run.
 
