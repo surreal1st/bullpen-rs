@@ -32,6 +32,7 @@ mod goals_editor;
 #[cfg(all(not(target_arch = "wasm32"), feature = "desktop"))]
 mod local_read;
 mod markdown;
+mod marketplace;
 mod memory_editor;
 mod message_time;
 mod model_chip;

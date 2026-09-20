@@ -59,6 +59,13 @@ echo "Installing client..."
 cp -r "$INCOMING/client/"* "$BULLPEN_RS_HOME/client/"
 chown -R bullpen:bullpen "$BULLPEN_RS_HOME/client"
 
+if [[ -d "$INCOMING/templates" ]]; then
+  echo "Installing starter templates..."
+  mkdir -p "$BULLPEN_RS_HOME/templates"
+  cp -r "$INCOMING/templates/"* "$BULLPEN_RS_HOME/templates/"
+  chown -R bullpen:bullpen "$BULLPEN_RS_HOME/templates"
+fi
+
 # Install systemd unit (F8: use path relative to script directory)
 echo "Installing systemd unit..."
 install -o root -g root -m 644 "$INCOMING/bullpen-rs.service" /etc/systemd/system/bullpen-rs.service

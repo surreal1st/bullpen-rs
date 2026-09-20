@@ -8,6 +8,7 @@
 //! have no bullpen-rs equivalent yet).
 
 use crate::api;
+use crate::marketplace::MarketplaceModal;
 use crate::message_time::format_time;
 use crate::model_chip::short_model;
 use crate::slack_card::SlackCard;
@@ -36,6 +37,7 @@ pub fn SettingsModal(
     // a prop rather than a second `/api/roster` call.
     #[props(default)] sections: Vec<Section>,
 ) -> Element {
+    let mut marketplace_open = use_signal(|| false);
     rsx! {
         div {
             class: "modal-scrim",
@@ -61,9 +63,19 @@ pub fn SettingsModal(
                         button { class: "stg-nav-item is-on", "aria-current": "true", "General" }
                     }
                     div { class: "stg-panel",
-                        GeneralSettings { on_restored, sections }
+                        GeneralSettings {
+                            on_restored,
+                            sections,
+                            on_open_marketplace: move |_| marketplace_open.set(true),
+                        }
                     }
                 }
+            }
+        }
+        if marketplace_open() {
+            MarketplaceModal {
+                on_close: move |_| marketplace_open.set(false),
+                on_installed: on_restored,
             }
         }
     }
@@ -73,6 +85,7 @@ pub fn SettingsModal(
 fn GeneralSettings(
     #[props(default)] on_restored: Option<EventHandler<()>>,
     #[props(default)] sections: Vec<Section>,
+    #[props(default)] on_open_marketplace: Option<EventHandler<()>>,
 ) -> Element {
     rsx! {
         section { class: "stg-group",
@@ -104,6 +117,18 @@ fn GeneralSettings(
             h3 { class: "stg-group-h", "Connectors" }
             div { class: "stg-card stg-card-loose",
                 SlackCard {}
+                div { class: "stg-row",
+                    p { class: "stg-hint", "Install starter bots from the marketplace." }
+                    button {
+                        class: "stg-btn",
+                        onclick: move |_| {
+                            if let Some(cb) = on_open_marketplace {
+                                cb.call(());
+                            }
+                        },
+                        "Open marketplace"
+                    }
+                }
             }
         }
     }

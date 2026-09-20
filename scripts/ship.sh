@@ -89,6 +89,11 @@ scp -q "$BINARY" "$MERIDIAN_HOST:$INCOMING/bullpen"
 echo "Transferring client files..."
 scp -rq "$CLIENT_DIR" "$MERIDIAN_HOST:$INCOMING/client"
 
+if [[ -d templates ]]; then
+  echo "Transferring starter templates..."
+  scp -rq templates "$MERIDIAN_HOST:$INCOMING/templates"
+fi
+
 echo "Transferring deploy files (F8)..."
 scp -q "deploy/install.sh" "$MERIDIAN_HOST:$INCOMING/install.sh"
 scp -q "deploy/bullpen-rs.service" "$MERIDIAN_HOST:$INCOMING/bullpen-rs.service"

@@ -3,6 +3,7 @@
 
 pub mod approvals;
 mod auth;
+pub mod catalogue;
 pub mod changes;
 pub mod desk;
 pub mod egress;
@@ -12,6 +13,7 @@ pub mod goals;
 pub mod hooks;
 pub mod import_open;
 pub mod judge;
+pub mod marketplace;
 pub mod observations;
 pub mod permissions;
 pub mod prompt;

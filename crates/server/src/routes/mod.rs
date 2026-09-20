@@ -16,6 +16,7 @@ mod events;
 mod goals;
 mod hooks;
 mod import;
+mod marketplace;
 mod memory;
 mod messages;
 mod permissions;
@@ -60,6 +61,7 @@ pub fn router() -> Router<AppState> {
         .merge(goals::router())
         .merge(hooks::router())
         .merge(import::router())
+        .merge(marketplace::router())
         .merge(permissions::router())
         .merge(questions::router())
         .merge(rooms::router())
