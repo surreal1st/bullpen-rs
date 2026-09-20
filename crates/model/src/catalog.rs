@@ -32,6 +32,25 @@ pub struct CatalogModel {
     pub provider_count: Option<u32>,
     /// True when at least one provider caches the prompt prefix.
     pub supports_caching: Option<bool>,
+    /// SEC5-10: safe to send `tool_choice: required` (measured models in
+    /// PROJECT.md §9b — not the same as listing `tool_choice` in
+    /// `supported_parameters`, which qwen still 400s on).
+    #[serde(default)]
+    pub supports_tool_choice_required: bool,
+}
+
+/// SEC5-10: whether this model id may receive `tool_choice: required`.
+pub fn supports_tool_choice_required(model_id: &str, lists_tool_choice_param: bool) -> bool {
+    if model_id.contains("qwen3.8-flash") {
+        return false;
+    }
+    if model_id.contains("gpt-oss-120b") {
+        return false;
+    }
+    if model_id.contains("gemini-3.8-flash") {
+        return true;
+    }
+    lists_tool_choice_param && !model_id.contains("qwen3.8-flash")
 }
 
 /// The result of checking whether a model is safe to pin to.
@@ -291,6 +310,8 @@ fn map_raw_model(m: RawModel) -> CatalogModel {
         .architecture
         .and_then(|a| a.input_modalities)
         .unwrap_or_default();
+    let lists_tool_choice = params.iter().any(|p| p == "tool_choice");
+    let tool_choice_required = supports_tool_choice_required(&m.id, lists_tool_choice);
     CatalogModel {
         id: m.id,
         name: m.name,
@@ -302,6 +323,7 @@ fn map_raw_model(m: RawModel) -> CatalogModel {
         supports_reasoning: params.iter().any(|p| p == "reasoning"),
         provider_count: None,
         supports_caching: None,
+        supports_tool_choice_required: tool_choice_required,
     }
 }
 
@@ -484,6 +506,7 @@ mod openrouter_catalog_tests {
         assert_eq!(bare.out_per_m, 0.0);
         assert_eq!(bare.context_length, 0);
         assert!(!bare.supports_tools);
+        assert!(!sonnet.supports_tool_choice_required);
         assert!(!bare.supports_images);
     }
 

@@ -113,12 +113,24 @@ pub struct Reasoning {
     pub effort: String, // "low" | "medium" | "high"
 }
 
+/// SEC5-10 / PROJECT.md §9b: when to send OpenRouter `tool_choice`. Only
+/// `Required` is wired today; omit the field entirely for the default (auto).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolChoice {
+    Required,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ModelRequest {
     pub model: String,
     pub messages: Vec<ModelMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<ToolSpec>>,
+    /// Caller opt-in (run loop sets this when the catalog says the model
+    /// supports `required`). Omitted on the wire when `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<ToolChoice>,
     /// M3: OpenRouter's reasoning weight. The caller decides whether to set
     /// this at all - it checks the catalogue for `supportsReasoning` before
     /// ever building one of these - so this boundary does exactly one thing
@@ -413,7 +425,10 @@ impl ModelPort for OpenRouterPort {
                     }
                 };
 
-                let body = build_body(&request, model);
+                let mut send_request = request.clone();
+                let mut retried_without_tool_choice = false;
+                loop {
+                let body = build_body(&send_request, model);
                 let request_builder = client
                     .post(&endpoint)
                     .bearer_auth(&key)
@@ -435,6 +450,15 @@ impl ModelPort for OpenRouterPort {
 
                 tracing::debug!(model = %model, status = res.status().as_u16(), attempt = i + 1, "model response");
 
+                if res.status().as_u16() == 400
+                    && send_request.tool_choice.is_some()
+                    && !retried_without_tool_choice
+                {
+                    send_request.tool_choice = None;
+                    retried_without_tool_choice = true;
+                    continue;
+                }
+
                 if res.status().as_u16() == 429 {
                     let retry_after = res
                         .headers()
@@ -447,7 +471,6 @@ impl ModelPort for OpenRouterPort {
                     if !is_last {
                         let wait = busy_wait_ms(429, &text, retry_after.as_deref());
                         tokio::time::sleep(Duration::from_millis(wait)).await;
-                        continue;
                     }
                     break;
                 }
@@ -478,6 +501,10 @@ impl ModelPort for OpenRouterPort {
                     yield event;
                 }
                 return;
+                }
+                if i + 1 == attempts_len {
+                    break;
+                }
             }
 
             let tried: Vec<&str> = {
@@ -506,7 +533,7 @@ impl ModelPort for OpenRouterPort {
     }
 }
 
-pub(crate) fn build_body(request: &ModelRequest, model: &str) -> serde_json::Value {
+pub fn build_body(request: &ModelRequest, model: &str) -> serde_json::Value {
     let mut body = serde_json::json!({
         "model": model,
         "messages": request.messages,
@@ -529,6 +556,9 @@ pub(crate) fn build_body(request: &ModelRequest, model: &str) -> serde_json::Val
             })
             .collect();
         body["tools"] = serde_json::Value::Array(wire_tools);
+        if request.tool_choice == Some(ToolChoice::Required) {
+            body["tool_choice"] = serde_json::json!("required");
+        }
     }
     if let Some(r) = &request.reasoning {
         body["reasoning"] = serde_json::json!({ "effort": r.effort });

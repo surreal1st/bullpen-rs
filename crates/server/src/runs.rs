@@ -19,7 +19,7 @@ use model::ladder::{Trigger, model_for_run, model_for_turn};
 use model::messages_carry_image;
 use model::{
     Catalog, ContentPart, EventStream, FunctionCall, ImageUrl, MessageContent, MessageToolCall,
-    ModelEvent, ModelMessage, ModelPort, ModelRequest, ModelUsage, ToolCall, ToolSpec,
+    ModelEvent, ModelMessage, ModelPort, ModelRequest, ModelUsage, ToolCall, ToolChoice, ToolSpec,
 };
 use rusqlite::OptionalExtension;
 use store::Db;
@@ -715,6 +715,21 @@ impl RunManager {
 
     pub fn desktop_state_registry(&self) -> Arc<DesktopStateRegistry> {
         Arc::clone(&self.desktop_states)
+    }
+
+    /// SEC5-10: run loop opt-in to `tool_choice: required`, gated by catalog.
+    async fn tool_choice_for_model(&self, model: &str, offering_tools: bool) -> Option<ToolChoice> {
+        if !offering_tools {
+            return None;
+        }
+        match self.catalog.get(model).await {
+            Ok(Some(entry)) if entry.supports_tool_choice_required => Some(ToolChoice::Required),
+            Ok(_) => None,
+            Err(err) => {
+                tracing::warn!("model catalog lookup failed while deciding tool_choice: {err}");
+                None
+            }
+        }
     }
 
     async fn offered_specs_for_model(&self, toolbox: &ToolBox, model: &str) -> Vec<ToolSpec> {
@@ -1827,6 +1842,9 @@ were doing unless he changed it."
                 }
             }
 
+            let tool_choice = self
+                .tool_choice_for_model(&effective_requested_model, !offered_specs.is_empty())
+                .await;
             let request = ModelRequest {
                 model: effective_requested_model.clone(),
                 messages: request_messages,
@@ -1835,6 +1853,7 @@ were doing unless he changed it."
                 } else {
                     Some(offered_specs.clone())
                 },
+                tool_choice,
                 ..Default::default()
             };
 
