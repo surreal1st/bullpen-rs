@@ -37,21 +37,21 @@ wins and ports exactly, tests and all.
 
 ---
 
-## 2. Current state (measured 2026-09-19)
+## 2. Current state (measured 2026-09-20)
 
 | | |
 |---|---|
-| HEAD | `5ede17a` on `main`, tree clean |
+| HEAD | `b49bdfe` on `main`, tree clean |
 | Live at | `https://meridian.tail74afb5.ts.net:8452` |
-| Gate | **1,268 tests**, exit 0 |
-| Code | **90,703 lines of Rust** across 5 crates, 220 commits since 2026-09-14 |
+| Gate | **1,293 tests**, exit 0 |
+| Code | **112,422 lines of Rust** across 5 crates, 258 commits since 2026-09-14 |
 | Deployed | meridian, `bullpen-rs.service` on :4380, binary hash-verified on both ends |
-| Tools | 23 registered |
-| API | 63 routes |
-| Schema | 22 migrations, byte-compatible with the TS product's `bullpen.db` |
+| Tools | 25 registered |
+| API | 80 routes |
+| Schema | 23 migrations, byte-compatible with the TS product's `bullpen.db` |
 
-Crate sizes: `server` 56,467 · `client` 21,817 · `store` 8,236 ·
-`model` 3,207 · `shared` 976.
+Crate sizes: `server` 71,985 · `client` 25,469 · `store` 9,558 ·
+`model` 4,434 · `shared` 976.
 
 **It runs on a copy of the live database, beside the live TS product, and Josh
 uses it.** It has not replaced anything yet.
@@ -86,7 +86,7 @@ reqwest streaming to OpenRouter with a hand-rolled SSE parser, Docker for
 sandboxes and per-bot VMs, edition 2024.
 
 **The test seam is `build_app(state) -> Router`.** Every integration test
-drives the real HTTP API through it, never internals. 54 test files under
+drives the real HTTP API through it, never internals. 65 test files under
 `crates/server/tests/`.
 
 **Database.** The same SQLite file and schema as the TS product, so a cutover
@@ -138,13 +138,19 @@ cookies is exactly the failure this design exists to prevent.
 | The whole screen, via `xdotool` | `desk_act` | any window at all — a terminal, a file manager, a native dialog |
 | The machine, via a shell | `desk_shell` | the container's filesystem and network |
 
-**`desk_act` is half-blind, on purpose, and its spec text says so.** Its
-keyboard actions (`key`, `type`, `wait`) work today — proven on a real VM: a
-bot pressed `ctrl+l`, typed `example.com`, and the page navigated
-(`shots/s8c-03-desk-act-typed-example-com.png`). Its **mouse** actions
-(`click`, `move`, `drag`, `scroll`) take pixel coordinates that **nothing can
-currently read**, because no bot can see its own screen. Section 9 is the spec
-for fixing that.
+**`desk_act` was half-blind; it is not any more, and section 9a has the
+accepted result.** Keyboard actions (`key`, `type`, `wait`) work — proven on a
+real VM (`shots/s8c-03-desk-act-typed-example-com.png`). **Mouse** actions
+(`click`, `move`, `drag`, `scroll`) now take coordinates a bot derives from its
+own `snap_desk`, and `desk_act` REFUSES a mouse action carrying no
+`observation_id`.
+
+🔴 **What is unsolved is AIMING, not plumbing.** The mouse physically acts
+(proven 2026-09-19 by a pointer move and a window restack), but no model in
+the roster could reliably hit a target — `gemini-3.8-flash` missed a button by
+123px in y — and **both models then asserted a success they had not
+achieved.** A bot's own account of what it did is never evidence. See
+`.scratch/bullpen-rs/reviews/S8d-native-gui-acceptance-RESULT.md`.
 
 **Security properties that hold this together.** If you touch this area, these
 are the ones to not break:
@@ -421,8 +427,10 @@ caller that wants it, and a fallback path for the models that 400.
 
 | | |
 |---|---|
-| Repo | `d:\rainmade\projects\bullpen-rs` |
+| Repo | `d:\rainmade\projects\bullpen-rs` · GitHub `surreal1st/bullpen-rs` (PRIVATE) |
 | Gate worktree | `d:\rainmade\projects\bullpen-rs-gate` (never run git here) |
+| Handoff (in repo) | `docs/CLAUDE-HANDOFF-4.md` — the full handoff, start here |
+| Cursor (in repo) | `docs/CURRENT-CURSOR.md` — a COPY of `HANDOFF.md`'s first block |
 | Live cursor | `.scratch/bullpen-rs/HANDOFF.md` — read the top block first |
 | Plan | `.scratch/bullpen-rs/PLAN.md` — slices, rationale |
 | Parity checklist | `.scratch/bullpen-rs/INVENTORY.md` |
