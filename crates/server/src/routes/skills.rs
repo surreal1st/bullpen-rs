@@ -2,9 +2,7 @@
 //! enable/disable). Port of `app.ts:3918-3965`, same JSON shapes and status
 //! codes.
 //!
-//! 🔴 `DELETE /api/skills/:name` exists here for parity with the TS route
-//! and is tested, but this slice does not wire any delete control into the
-//! client and never calls it against live - see the ticket's own note.
+//! `DELETE /api/skills/:name` is wired from Settings → Skills (SEC5-03).
 
 use axum::extract::{Path, State};
 use axum::routing::get;

@@ -1031,6 +1031,7 @@ fn SkillsSection() -> Element {
     let mut save_error = use_signal(|| None::<String>);
     let mut saving = use_signal(|| false);
     let mut saved_name_note = use_signal(|| None::<String>);
+    let mut confirm_delete = use_signal(|| None::<String>);
 
     use_effect(move || {
         spawn(async move {
@@ -1300,6 +1301,16 @@ fn SkillsSection() -> Element {
                                                 },
                                                 "Edit"
                                             }
+                                            button {
+                                                r#type: "button",
+                                                class: "stg-btn danger",
+                                                disabled: editor_mode.is_some(),
+                                                onclick: {
+                                                    let skill_name = skill.name.clone();
+                                                    move |_| confirm_delete.set(Some(skill_name.clone()))
+                                                },
+                                                "Delete"
+                                            }
                                         }
                                         pre { class: "mono skill-body",
                                             if body.read().is_empty() { "Loading…" } else { "{body}" }
@@ -1308,6 +1319,107 @@ fn SkillsSection() -> Element {
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+        if let Some(delete_name) = confirm_delete.read().clone() {
+            DeleteSkillConfirmModal {
+                skill_name: delete_name,
+                on_close: move |_| confirm_delete.set(None),
+                on_deleted: move |_| {
+                    let removed = confirm_delete.read().clone().unwrap_or_default();
+                    let list = skills.read().clone();
+                    confirm_delete.set(None);
+                    open.set(None);
+                    body.set(String::new());
+                    if let Some(list) = list {
+                        skills.set(Some(skills_list_after_delete(&list, &removed)));
+                    }
+                },
+            }
+        }
+    }
+}
+
+/// SEC5-03: confirm before removing a skill from the library.
+#[component]
+fn DeleteSkillConfirmModal(
+    skill_name: String,
+    on_close: EventHandler<()>,
+    on_deleted: EventHandler<()>,
+) -> Element {
+    let mut busy = use_signal(|| false);
+    let mut error = use_signal(|| None::<String>);
+    let confirm_name = skill_name.clone();
+
+    let confirm = move |_| {
+        if *busy.read() {
+            return;
+        }
+        busy.set(true);
+        error.set(None);
+        let name = confirm_name.clone();
+        spawn(async move {
+            match api::delete_skill(&name).await {
+                Ok(()) => {
+                    busy.set(false);
+                    on_deleted.call(());
+                }
+                Err(err) => {
+                    busy.set(false);
+                    error.set(Some(err));
+                }
+            }
+        });
+    };
+
+    let is_busy = *busy.read();
+    let label = skill_name.clone();
+
+    rsx! {
+        div {
+            class: "modal-scrim",
+            role: "presentation",
+            onclick: move |_| on_close.call(()),
+            div {
+                class: "modal archive-confirm-modal",
+                onclick: move |evt| evt.stop_propagation(),
+                role: "dialog",
+                "aria-modal": "true",
+                "aria-label": "Delete {label}",
+                div { class: "modal-head",
+                    h2 { "Delete {label}?" }
+                    button {
+                        class: "modal-x",
+                        "aria-label": "Close",
+                        onclick: move |_| on_close.call(()),
+                        "×"
+                    }
+                }
+                div { class: "modal-body",
+                    p { class: "set-note",
+                        "Removes the skill from the library and turns it off on every bot that had it enabled."
+                    }
+                    if let Some(err) = error.read().clone() {
+                        div { class: "refusal",
+                            b { "Could not delete." }
+                            p { "{err}" }
+                        }
+                    }
+                }
+                div { class: "rules-foot",
+                    button {
+                        class: "stg-btn",
+                        disabled: is_busy,
+                        onclick: move |_| on_close.call(()),
+                        "Cancel"
+                    }
+                    button {
+                        class: "stg-btn danger",
+                        disabled: is_busy,
+                        onclick: confirm,
+                        if is_busy { "Deleting…" } else { "Delete skill" }
                     }
                 }
             }
@@ -1337,6 +1449,14 @@ fn skill_summary_from_skill(skill: &Skill) -> SkillSummary {
 
 /// Insert or replace one library row from a successful save; sort by name so
 /// the list stays stable regardless of upsert vs create.
+fn skills_list_after_delete(before: &[SkillSummary], deleted_name: &str) -> Vec<SkillSummary> {
+    before
+        .iter()
+        .filter(|row| row.name != deleted_name)
+        .cloned()
+        .collect()
+}
+
 fn skills_list_after_save(before: &[SkillSummary], saved: &Skill) -> Vec<SkillSummary> {
     let summary = skill_summary_from_skill(saved);
     let mut out = before.to_vec();
@@ -1428,6 +1548,14 @@ mod skill_save_tests {
         let after = skills_save_outcome(&before, Err("nope".to_string()));
 
         assert_eq!(after, None);
+    }
+
+    #[test]
+    fn delete_removes_the_row_from_the_local_list() {
+        let before = vec![sample_summary("alpha", "a"), sample_summary("beta", "b")];
+        let after = skills_list_after_delete(&before, "alpha");
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].name, "beta");
     }
 }
 

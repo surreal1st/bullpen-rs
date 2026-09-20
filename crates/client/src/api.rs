@@ -1518,6 +1518,26 @@ pub async fn put_skill(
         .map_err(|e| e.to_string())
 }
 
+/// `DELETE /api/skills/:name` - removes the skill and its `bot_skills` rows.
+/// The Settings confirm lives in `settings.rs`; this is what its Delete button
+/// calls.
+pub async fn delete_skill(name: &str) -> Result<(), String> {
+    let encoded = crate::transport::encode_uri_component(name);
+    let url = format!("/api/skills/{encoded}");
+    let resp = Request::delete(&url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if resp.ok() {
+        return Ok(());
+    }
+    let status = resp.status();
+    match resp.json::<ModelError>().await {
+        Ok(err) => Err(err.error),
+        Err(_) => Err(format!("{url} -> {status}")),
+    }
+}
+
 /// `GET /api/bots/:id/skills` - the bot's enabled skill NAMES, backing
 /// `edit_bot.rs`'s checkbox list. 404 ("no such bot") folds into the plain
 /// status string, same posture as `fetch_permissions` above.
