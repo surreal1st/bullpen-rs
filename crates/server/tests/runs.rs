@@ -554,10 +554,10 @@ async fn stop_between_steps_fails_the_run_with_stopped_and_writes_no_message() {
 // T1: one step, `Done` and no deltas at all - the plainest empty
 // completion. Terminal `RunEvent::Error` carrying the exact contract
 // message, no `RunEvent::Done`, `runs.status='failed'`, `runs.error` set to
-// that same message, `runs.text` empty, and no assistant message written
-// (settle's F6 guard skips the message exactly because `text` is empty).
+// that same message, `runs.text` empty, and an assistant message with
+// `error` set (SEC5-04: reload must show the failure trace).
 #[tokio::test]
-async fn empty_completion_fails_the_run_with_no_answer_and_writes_no_message() {
+async fn empty_completion_fails_the_run_with_no_answer_and_persists_error_trace() {
     let db = open_db();
     seed_bot(&db, "arthur", "Arthur");
     let conversation_id = own_conversation(&db, "arthur");
@@ -605,15 +605,20 @@ async fn empty_completion_fails_the_run_with_no_answer_and_writes_no_message() {
         let db = db.lock().unwrap();
         store::list_messages(&db, &conversation_id).unwrap()
     };
-    assert!(
-        messages.iter().all(|m| m.role != "assistant"),
-        "expected no assistant message for an empty completion, got {messages:?}"
+    let assistant = messages
+        .iter()
+        .find(|m| m.role == "assistant")
+        .expect("expected an assistant trace row for an empty completion failure");
+    assert!(assistant.content.is_empty());
+    assert_eq!(
+        assistant.error.as_deref(),
+        Some("The model provider completed without an answer.")
     );
 }
 
 // T2: whitespace-only deltas (`"  "` then `"\n "`) then `Done` - trimmed,
 // this is still nothing, so it must classify exactly like T1: the same
-// error, `failed`, empty `runs.text`, no assistant message. Guards M2
+// error, `failed`, empty `runs.text`, assistant row with `error`. Guards M2
 // (weakening `trim().is_empty()` to `is_empty()` would let this slip
 // through as an answer).
 #[tokio::test]
@@ -673,9 +678,14 @@ async fn whitespace_only_completion_fails_the_run_the_same_as_empty() {
         let db = db.lock().unwrap();
         store::list_messages(&db, &conversation_id).unwrap()
     };
-    assert!(
-        messages.iter().all(|m| m.role != "assistant"),
-        "expected no assistant message for a whitespace-only completion, got {messages:?}"
+    let assistant = messages
+        .iter()
+        .find(|m| m.role == "assistant")
+        .expect("expected an assistant trace row for a whitespace-only failure");
+    assert!(assistant.content.is_empty());
+    assert_eq!(
+        assistant.error.as_deref(),
+        Some("The model provider completed without an answer.")
     );
 }
 

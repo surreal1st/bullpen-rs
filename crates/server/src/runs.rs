@@ -2749,17 +2749,15 @@ were doing unless he changed it."
             return;
         }
 
-        // F6: a run that failed with no text at all - stopped before its
-        // first model call, stopped between steps before one produced any,
-        // or an instant upstream error on the very first call - writes NO
-        // assistant message, mirroring TS's `fail()` (`runs.ts:965-968`,
-        // `:1741-1752`), which updates only the run row and never touches
-        // the conversation. Without this, `POST .../stop` right after
-        // starting a run left an empty assistant bubble sitting in the
-        // thread forever - and so did a room member whose leg failed
-        // before writing a word (`rooms.rs`'s
-        // `an_instant_error_owner_run_still_chains_to_member_two`).
-        let saved_id: Option<String> = if status == "failed" && state.text.is_empty() {
+        // F6 / SEC5-04: a user stop with no text writes NO assistant message
+        // (Josh aborting before anything landed should not leave an empty
+        // bubble). Any other failure - including provider errors with zero
+        // text - persists an assistant row with `error` set so reload matches
+        // the live stream's `.upstream-error` trace.
+        let saved_id: Option<String> = if status == "failed"
+            && state.text.is_empty()
+            && failure.as_deref() == Some("Stopped.")
+        {
             None
         } else {
             let db = self.db();
