@@ -181,6 +181,27 @@ fn is_private_address(ip: &str) -> bool {
     }
 }
 
+/// MCP connectors and OAuth discovery use the same private-address rule as
+/// the web tool, but without a bot egress allow-list — any public MCP host
+/// is reachable once authorized.
+pub async fn refuse_if_resolves_private(host: &str, resolver: &dyn Resolver) -> Result<(), String> {
+    if is_private_address(host) {
+        return Err(format!("{host} is inside this network. Refused."));
+    }
+
+    let addresses = resolver
+        .resolve(host)
+        .await
+        .map_err(|e| format!("could not resolve {host}: {e}"))?;
+
+    if let Some(priv_addr) = addresses.iter().find(|a| is_private_address(a)) {
+        return Err(format!(
+            "{host} resolves to {priv_addr}, which is inside this network. Refused."
+        ));
+    }
+    Ok(())
+}
+
 /// The whole decision for one CONNECT request.
 /// 🔴 Name check AND address check, because neither covers the other. The name
 /// check stops a bot reaching an arbitrary site; the address check stops an

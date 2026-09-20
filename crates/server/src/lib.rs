@@ -15,6 +15,7 @@ pub mod hooks;
 pub mod import_open;
 pub mod judge;
 pub mod marketplace;
+pub mod mcp;
 pub mod observations;
 pub mod permissions;
 pub mod prompt;
@@ -127,6 +128,10 @@ pub struct AppState {
     pub vm_enabled: bool,
     pub desktop_states: Arc<observations::DesktopStateRegistry>,
     pub observations: Arc<observations::ObservationRegistry>,
+    /// S7-02: last-seen MCP tool lists per connector id ( refreshed on create/tools ).
+    connector_catalogue: Arc<Mutex<HashMap<String, Vec<mcp::ConnectorTool>>>>,
+    mcp_transport: Arc<dyn mcp::McpTransport>,
+    mcp_resolver: Arc<dyn egress::Resolver>,
 }
 
 impl AppState {
@@ -430,6 +435,9 @@ impl AppState {
             vm_enabled,
             desktop_states,
             observations,
+            connector_catalogue: Arc::new(Mutex::new(HashMap::new())),
+            mcp_transport: Arc::new(mcp::ReqwestMcpTransport::new()),
+            mcp_resolver: Arc::new(desk::RealResolver),
         };
 
         // S5b-04b: chains `settle_goal_run` onto `on_run_done` ADDITIVELY,
@@ -577,6 +585,65 @@ impl AppState {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(run_id, reply);
+    }
+
+    /// S7-02: lists tools from the MCP server and caches them on success.
+    pub async fn refresh_connector_tools(&self, connector_id: &str) -> mcp::ListToolsOutcome {
+        let full = {
+            let db = self.db();
+            match store::get_connector(&db, connector_id) {
+                Ok(Some(row)) => row,
+                Ok(None) => {
+                    return mcp::ListToolsOutcome {
+                        ok: false,
+                        tools: vec![],
+                        error: Some("no such connector".to_string()),
+                        needs_auth: false,
+                        challenge: None,
+                    };
+                }
+                Err(err) => {
+                    return mcp::ListToolsOutcome {
+                        ok: false,
+                        tools: vec![],
+                        error: Some(err.to_string()),
+                        needs_auth: false,
+                        challenge: None,
+                    };
+                }
+            }
+        };
+
+        let outcome = mcp::list_connector_tools(
+            &full,
+            mcp::McpCallOptions {
+                transport: self.mcp_transport.as_ref(),
+                resolver: self.mcp_resolver.as_ref(),
+                bearer: None,
+            },
+        )
+        .await;
+
+        if outcome.ok {
+            self.connector_catalogue
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(connector_id.to_string(), outcome.tools.clone());
+        }
+
+        outcome
+    }
+
+    /// S7-02: test seam — inject fake MCP transport/resolver (see `mcp.test.ts`).
+    pub fn with_mcp(
+        db: Db,
+        transport: Arc<dyn mcp::McpTransport>,
+        resolver: Arc<dyn egress::Resolver>,
+    ) -> Self {
+        let mut state = Self::new(db);
+        state.mcp_transport = transport;
+        state.mcp_resolver = resolver;
+        state
     }
 }
 

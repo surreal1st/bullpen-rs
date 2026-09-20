@@ -2,6 +2,7 @@
 //! `projects/bullpen-night/src/server/app.ts:2384-2445`.
 
 use axum::extract::{Path, State};
+use axum::response::IntoResponse;
 use axum::routing::{delete, get, put};
 use axum::{Json, Router};
 use serde_json::json;
@@ -12,6 +13,7 @@ use store::{connectors, get_bot};
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/connectors", get(list).post(create))
+        .route("/api/connectors/{id}/tools", get(connector_tools))
         .route("/api/connectors/{id}", delete(remove))
         .route("/api/bots/{id}/connectors", get(bot_connectors))
         .route(
@@ -29,31 +31,61 @@ async fn list(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value
 async fn create(
     State(state): State<AppState>,
     body: axum::body::Bytes,
-) -> ApiResult<(axum::http::StatusCode, Json<serde_json::Value>)> {
-    let db = state.db();
-    let value: serde_json::Value = serde_json::from_slice(&body).unwrap_or_else(|_| json!({}));
-    let name = value.get("name").and_then(|v| v.as_str()).unwrap_or("");
-    let url = value.get("url").and_then(|v| v.as_str()).unwrap_or("");
-    let auth_header = value
-        .get("authHeader")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty());
+) -> ApiResult<impl IntoResponse> {
+    let (connector, connector_id) = {
+        let db = state.db();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap_or_else(|_| json!({}));
+        let name = value.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let url = value.get("url").and_then(|v| v.as_str()).unwrap_or("");
+        let auth_header = value
+            .get("authHeader")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
 
-    let result = connectors::add_connector(&db, name, url, auth_header)?;
-    if !result.ok {
-        return Err(AppError::bad_request(
-            result
-                .error
-                .unwrap_or_else(|| "could not add connector".to_string()),
-        ));
-    }
+        let result = connectors::add_connector(&db, name, url, auth_header)?;
+        if !result.ok {
+            return Err(AppError::bad_request(
+                result
+                    .error
+                    .unwrap_or_else(|| "could not add connector".to_string()),
+            ));
+        }
+        let connector = result.connector.clone();
+        let connector_id = connector.as_ref().map(|c| c.id.clone()).unwrap_or_default();
+        (connector, connector_id)
+    };
+    let reached = state.refresh_connector_tools(&connector_id).await;
     Ok((
         axum::http::StatusCode::CREATED,
         Json(json!({
-            "connector": result.connector,
-            "reachable": false,
+            "connector": connector,
+            "reachable": reached.ok,
+            "error": reached.error,
         })),
     ))
+}
+
+async fn connector_tools(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<axum::response::Response> {
+    let listed = state.refresh_connector_tools(&id).await;
+    if listed.error.as_deref() == Some("no such connector") {
+        return Err(AppError::not_found("no such connector"));
+    }
+    if listed.ok {
+        Ok((
+            axum::http::StatusCode::OK,
+            Json(json!({ "tools": listed.tools })),
+        )
+            .into_response())
+    } else {
+        Ok((
+            axum::http::StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": listed.error, "tools": [] })),
+        )
+            .into_response())
+    }
 }
 
 async fn remove(
