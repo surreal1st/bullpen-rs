@@ -16,6 +16,7 @@ pub mod import_open;
 pub mod judge;
 pub mod marketplace;
 pub mod mcp;
+pub mod oauth;
 pub mod observations;
 pub mod permissions;
 pub mod prompt;
@@ -132,6 +133,7 @@ pub struct AppState {
     connector_catalogue: Arc<Mutex<HashMap<String, Vec<mcp::ConnectorTool>>>>,
     mcp_transport: Arc<dyn mcp::McpTransport>,
     mcp_resolver: Arc<dyn egress::Resolver>,
+    oauth_http: Arc<dyn oauth::OAuthHttp>,
 }
 
 impl AppState {
@@ -438,6 +440,7 @@ impl AppState {
             connector_catalogue: Arc::new(Mutex::new(HashMap::new())),
             mcp_transport: Arc::new(mcp::ReqwestMcpTransport::new()),
             mcp_resolver: Arc::new(desk::RealResolver),
+            oauth_http: Arc::new(oauth::ReqwestOAuthHttp::new()),
         };
 
         // S5b-04b: chains `settle_goal_run` onto `on_run_done` ADDITIVELY,
@@ -587,6 +590,29 @@ impl AppState {
             .insert(run_id, reply);
     }
 
+    /// S7-03: usable access token without holding the db lock across await.
+    pub async fn bearer_for_connector(&self, connector_id: &str) -> Option<String> {
+        let auth = {
+            let db = self.db();
+            store::get_auth(&db, connector_id).ok().flatten()
+        }?;
+        let access = auth.access_token.as_deref()?;
+        if !oauth::token_expired(
+            auth.expires_at.as_deref(),
+            chrono::Utc::now().timestamp_millis(),
+        ) {
+            return Some(access.to_string());
+        }
+        let renewed = oauth::refresh_tokens(&auth, self.oauth_http.as_ref())
+            .await
+            .ok()?;
+        {
+            let db = self.db();
+            store::put_tokens(&db, connector_id, &renewed).ok()?;
+        }
+        Some(renewed.access_token)
+    }
+
     /// S7-02: lists tools from the MCP server and caches them on success.
     pub async fn refresh_connector_tools(&self, connector_id: &str) -> mcp::ListToolsOutcome {
         let full = {
@@ -614,12 +640,14 @@ impl AppState {
             }
         };
 
+        let bearer = self.bearer_for_connector(connector_id).await;
+
         let outcome = mcp::list_connector_tools(
             &full,
             mcp::McpCallOptions {
                 transport: self.mcp_transport.as_ref(),
                 resolver: self.mcp_resolver.as_ref(),
-                bearer: None,
+                bearer: bearer.as_deref(),
             },
         )
         .await;
@@ -643,6 +671,17 @@ impl AppState {
         let mut state = Self::new(db);
         state.mcp_transport = transport;
         state.mcp_resolver = resolver;
+        state
+    }
+
+    pub fn with_mcp_and_oauth(
+        db: Db,
+        transport: Arc<dyn mcp::McpTransport>,
+        resolver: Arc<dyn egress::Resolver>,
+        oauth_http: Arc<dyn oauth::OAuthHttp>,
+    ) -> Self {
+        let mut state = Self::with_mcp(db, transport, resolver);
+        state.oauth_http = oauth_http;
         state
     }
 }

@@ -11,6 +11,7 @@ pub mod goals;
 pub mod memory;
 pub mod messages;
 mod migrations;
+pub mod oauth;
 pub mod questions;
 pub mod rooms;
 pub mod roster;
@@ -50,6 +51,10 @@ pub use memory::{
     set_shared_core, sweep_expired,
 };
 pub use messages::{NewMessage, Usage, append_message, delete_message, list_messages};
+pub use oauth::{
+    AuthStatus, ClaimedFlow, ConnectorAuth, OAuthTokens, PutConnectorAuth, auth_status, claim_flow,
+    forget_auth, get_auth, put_auth, put_tokens, start_flow,
+};
 pub use questions::{OpenQuestion, answer_question, insert_question, list_all_open, list_open};
 pub use rooms::{create_room, get_room, list_rooms, mark_room_seen, mark_room_unread, update_room};
 pub use roster::{first_line, list_roster};
