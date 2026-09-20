@@ -41,6 +41,7 @@ mod desk_act;
 pub mod desk_shell;
 pub(crate) mod escalate;
 mod goal_tools;
+mod hire_bot;
 mod local_read;
 mod message_bot;
 mod note;
@@ -329,6 +330,7 @@ fn all_specs() -> Vec<ToolSpec> {
         // S10-01: a READ of instructions Josh already enabled for this bot -
         // see `use_skill`'s own module doc for why it grants nothing.
         use_skill::spec(),
+        hire_bot::spec(),
     ]
 }
 
@@ -470,6 +472,7 @@ pub fn build(params: BuildParams) -> ToolBox {
                     "update_goal" => (goal_tools::run_update_goal(&db, &bot_id, &args), None),
                     "reflect" => (goal_tools::run_reflect(&db, &bot_id, &args), None),
                     "use_skill" => (use_skill::run(&db, &bot_id, &args), None),
+                    "hire_bot" => (hire_bot::run(&db, &bot_id, &args), None),
                     // S8a-02: the `Cdp` is resolved HERE, at call time, by
                     // `desk::cdp_for_bot` - the calling bot's OWN machine
                     // (`vm::desk_for_in` -> `vm::vm_desk`) when per-bot VMs
