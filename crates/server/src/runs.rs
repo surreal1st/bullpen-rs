@@ -284,6 +284,14 @@ enum Outcome {
 /// not trip clippy's `type_complexity`.
 type OnRunDone = Box<dyn Fn(&str, &str, &str) + Send + Sync>;
 
+/// S7-04: MCP catalogue + transport wired from `AppState` into runs.
+pub struct ConnectorHooks {
+    pub catalogue: Arc<Mutex<HashMap<String, Vec<crate::mcp::ConnectorTool>>>>,
+    pub transport: Arc<dyn crate::mcp::McpTransport>,
+    pub resolver: Arc<dyn crate::egress::Resolver>,
+    pub oauth_http: Arc<dyn crate::oauth::OAuthHttp>,
+}
+
 /// The run manager: builds and drives runs, and answers "who is working".
 pub struct RunManager {
     db: Arc<Mutex<Db>>,
@@ -341,6 +349,8 @@ pub struct RunManager {
     db_path: Mutex<String>,
     /// S10-09: data directory for proposed/approved tool sources.
     data_dir: Mutex<String>,
+    /// S7-04: when set, enabled connectors contribute namespaced tools to runs.
+    connector_hooks: Mutex<Option<Arc<ConnectorHooks>>>,
 }
 
 /// S13b-F/S13b-03: tools whose result the CLIENT computes rather than the
@@ -674,7 +684,24 @@ impl RunManager {
             backlog_ttl,
             db_path: Mutex::new(":memory:".to_string()),
             data_dir: Mutex::new("./data".to_string()),
+            connector_hooks: Mutex::new(None),
         }
+    }
+
+    /// S7-04: thread connector catalogue and MCP/OAuth seams into toolboxes.
+    pub fn set_connector_hooks(&self, hooks: Arc<ConnectorHooks>) {
+        // Built before any run starts; tests call this once after construction.
+        *self
+            .connector_hooks
+            .lock()
+            .expect("connector_hooks mutex poisoned") = Some(hooks);
+    }
+
+    fn connector_hooks(&self) -> Option<Arc<ConnectorHooks>> {
+        self.connector_hooks
+            .lock()
+            .expect("connector_hooks mutex poisoned")
+            .clone()
     }
 
     /// S10-09: W5 needs the on-disk db path and data dir (same files the
@@ -1433,6 +1460,7 @@ impl RunManager {
             desktop_states: Arc::clone(&self.desktop_states),
             db_path: Arc::new(self.db_path()),
             data_dir: Arc::new(self.data_dir()),
+            connector_hooks: self.connector_hooks(),
         })
     }
 
@@ -2107,10 +2135,15 @@ were doing unless he changed it."
                             permissions::decide_call(base, &call.name, &call.arguments, tainted)
                         }
                         None => {
-                            if toolbox.specs.iter().any(|spec| spec.name == call.name) {
-                                Decision::Ask
-                            } else {
+                            if !toolbox.specs.iter().any(|spec| spec.name == call.name) {
                                 Decision::Deny
+                            } else if crate::mcp::split_tool_name(&call.name).is_some() {
+                                // S7-04: namespaced connector tools — same trust
+                                // as TS `list_resources`/`fetch_url` (Josh enabled
+                                // the connector; no per-tool grid row exists).
+                                Decision::Allow
+                            } else {
+                                Decision::Ask
                             }
                         }
                     }

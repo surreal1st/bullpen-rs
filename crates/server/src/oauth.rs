@@ -7,6 +7,8 @@ use base64::Engine;
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::sync::{Arc, Mutex, PoisonError};
+
 use store::{Db, OAuthTokens};
 use uuid::Uuid;
 
@@ -476,6 +478,35 @@ pub async fn refresh_tokens(
 
 pub async fn bearer_for(db: &Db, connector_id: &str, http: &dyn OAuthHttp) -> Option<String> {
     let auth = store::get_auth(db, connector_id).ok().flatten()?;
+    access_token_for_auth(&auth, connector_id, http, |tokens| {
+        store::put_tokens(db, connector_id, tokens).ok()
+    })
+    .await
+}
+
+/// S7-04: same as `bearer_for` without holding `MutexGuard` across await.
+pub async fn bearer_for_shared(
+    db: &Arc<Mutex<Db>>,
+    connector_id: &str,
+    http: &dyn OAuthHttp,
+) -> Option<String> {
+    let auth = {
+        let db = db.lock().unwrap_or_else(PoisonError::into_inner);
+        store::get_auth(&db, connector_id).ok().flatten()
+    }?;
+    access_token_for_auth(&auth, connector_id, http, |tokens| {
+        let db = db.lock().unwrap_or_else(PoisonError::into_inner);
+        store::put_tokens(&db, connector_id, tokens).ok()
+    })
+    .await
+}
+
+async fn access_token_for_auth(
+    auth: &store::ConnectorAuth,
+    _connector_id: &str,
+    http: &dyn OAuthHttp,
+    store_tokens: impl FnOnce(&OAuthTokens) -> Option<()>,
+) -> Option<String> {
     let access = auth.access_token.as_deref()?;
     if !token_expired(
         auth.expires_at.as_deref(),
@@ -483,8 +514,8 @@ pub async fn bearer_for(db: &Db, connector_id: &str, http: &dyn OAuthHttp) -> Op
     ) {
         return Some(access.to_string());
     }
-    let renewed = refresh_tokens(&auth, http).await.ok()?;
-    store::put_tokens(db, connector_id, &renewed).ok()?;
+    let renewed = refresh_tokens(auth, http).await.ok()?;
+    store_tokens(&renewed)?;
     Some(renewed.access_token)
 }
 

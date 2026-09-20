@@ -65,6 +65,7 @@ use async_trait::async_trait;
 
 use model::ladder::Trigger;
 use model::{ModelPort, ModelUsage, ToolSpec};
+use serde_json::Value;
 use store::Db;
 
 use crate::desk::Cdp;
@@ -273,6 +274,8 @@ pub struct BuildParams {
     pub db_path: Arc<String>,
     /// S10-09: data directory for proposed/approved tool sources on disk.
     pub data_dir: Arc<String>,
+    /// S7-04: MCP connector tools for enabled integrations (optional in tests).
+    pub connector_hooks: Option<Arc<crate::runs::ConnectorHooks>>,
 }
 
 /// F1: the full spec list this crate's toolbox can offer, before either
@@ -280,6 +283,38 @@ pub struct BuildParams {
 /// source both `build` and `known_tool_names` read from, so a tool added
 /// here becomes valid (and offerable) everywhere at once instead of
 /// requiring a second list kept in sync by hand.
+fn connector_specs_for_bot(
+    db: &Arc<Mutex<Db>>,
+    bot_id: &str,
+    hooks: Option<&Arc<crate::runs::ConnectorHooks>>,
+) -> Vec<ToolSpec> {
+    let Some(hooks) = hooks else {
+        return vec![];
+    };
+    let enabled = {
+        let db = lock_db(db);
+        store::connectors_for_bot(&db, bot_id).unwrap_or_default()
+    };
+    let catalogue = hooks
+        .catalogue
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    enabled
+        .into_iter()
+        .flat_map(|connector| {
+            catalogue
+                .get(&connector.id)
+                .map(|tools| {
+                    tools
+                        .iter()
+                        .map(|tool| crate::mcp::to_tool_spec(&connector, tool))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
 fn all_specs() -> Vec<ToolSpec> {
     vec![
         say::spec(),
@@ -387,8 +422,11 @@ pub fn build(params: BuildParams) -> ToolBox {
     let desktop_states = params.desktop_states;
     let db_path = Arc::clone(&params.db_path);
     let data_dir = Arc::clone(&params.data_dir);
+    let connector_hooks = params.connector_hooks.clone();
     let toolbox_bot_id = bot_id.clone();
     let bot_made_specs = crate::bot_tools::approved_tool_specs(&db, db_path.as_str());
+    let connector_specs: Vec<ToolSpec> =
+        connector_specs_for_bot(&db, &bot_id, connector_hooks.as_ref());
     // F3: `always_on_set()` rides through any `only` narrowing whatever it
     // says (TS `app.ts:5783`) - a routine's phrasing turn narrowed to `[]`
     // must still be able to say something or ask Josh a question, not lose
@@ -403,6 +441,7 @@ pub fn build(params: BuildParams) -> ToolBox {
     let specs: Vec<ToolSpec> = all_specs()
         .into_iter()
         .chain(bot_made_specs)
+        .chain(connector_specs)
         .filter(|spec| perms.get(spec.name.as_str()).copied() != Some(Decision::Deny))
         .filter(|spec| match &only {
             None => true,
@@ -435,6 +474,7 @@ pub fn build(params: BuildParams) -> ToolBox {
             let desktop_states = Arc::clone(&desktop_states);
             let db_path = Arc::clone(&db_path);
             let data_dir = Arc::clone(&data_dir);
+            let connector_hooks = connector_hooks.clone();
             let execution_context = handler_execution_context.clone();
             Box::pin(async move {
                 if crate::bot_tools::is_bot_made_tool(&db, &name) {
@@ -456,6 +496,44 @@ pub fn build(params: BuildParams) -> ToolBox {
                     let text =
                         propose_tool::run(&db, db_path.as_str(), data_dir.as_str(), &bot_id, &args)
                             .await;
+                    return ToolOutcome::new(text, None);
+                }
+                if let Some((connector_slug, tool_name)) = crate::mcp::split_tool_name(&name) {
+                    let Some(hooks) = connector_hooks else {
+                        return ToolOutcome::new(format!("Unknown tool: {name}"), None);
+                    };
+                    let enabled = {
+                        let db = lock_db(&db);
+                        store::connectors_for_bot(&db, &bot_id).unwrap_or_default()
+                    };
+                    let Some(connector) = enabled
+                        .into_iter()
+                        .find(|c| crate::mcp::slug_name(&c.name) == connector_slug)
+                    else {
+                        return ToolOutcome::new(
+                            "That connector is not switched on for you.".to_string(),
+                            None,
+                        );
+                    };
+                    let args_value: Value =
+                        serde_json::from_str(&args).unwrap_or_else(|_| serde_json::json!({}));
+                    let bearer = crate::oauth::bearer_for_shared(
+                        &db,
+                        &connector.id,
+                        hooks.oauth_http.as_ref(),
+                    )
+                    .await;
+                    let text = crate::mcp::call_connector_tool(
+                        &connector,
+                        &tool_name,
+                        args_value,
+                        crate::mcp::McpCallOptions {
+                            transport: hooks.transport.as_ref(),
+                            resolver: hooks.resolver.as_ref(),
+                            bearer: bearer.as_deref(),
+                        },
+                    )
+                    .await;
                     return ToolOutcome::new(text, None);
                 }
                 let legacy = match name.as_str() {

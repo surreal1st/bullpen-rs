@@ -6,6 +6,7 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
+use model::ToolSpec;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -185,6 +186,96 @@ pub async fn list_connector_tools(
         needs_auth: false,
         challenge: None,
     }
+}
+
+/// Namespaced model-facing tool name: `{slug}__{tool}`.
+pub fn tool_name_for(connector: &ConnectorFull, tool_name: &str) -> String {
+    format!("{}__{tool_name}", slug_name(&connector.name))
+}
+
+pub fn split_tool_name(full: &str) -> Option<(String, String)> {
+    let at = full.find("__")?;
+    Some((full[..at].to_string(), full[at + 2..].to_string()))
+}
+
+pub fn slug_name(name: &str) -> String {
+    let mut slug = String::new();
+    let mut prev_sep = false;
+    for c in name.to_lowercase().chars() {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c);
+            prev_sep = false;
+        } else if !prev_sep && !slug.is_empty() {
+            slug.push('_');
+            prev_sep = true;
+        }
+    }
+    let trimmed = slug.trim_matches('_');
+    if trimmed.is_empty() {
+        "connector".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+pub fn to_tool_spec(connector: &ConnectorFull, tool: &ConnectorTool) -> ToolSpec {
+    let description = format!("[{}] {}", connector.name, tool.description);
+    ToolSpec {
+        name: tool_name_for(connector, &tool.name),
+        description: description.chars().take(900).collect(),
+        parameters: tool.input_schema.clone(),
+    }
+}
+
+pub async fn call_connector_tool(
+    connector: &ConnectorFull,
+    tool_name: &str,
+    args: Value,
+    options: McpCallOptions<'_>,
+) -> String {
+    let called = rpc(
+        connector,
+        "tools/call",
+        json!({ "name": tool_name, "arguments": args }),
+        options,
+    )
+    .await;
+    if called.needs_auth {
+        return format!(
+            "That connector is not authorized yet. Tell Josh to open Connectors and press Connect on {}. Do not retry.",
+            connector.name
+        );
+    }
+    if !called.ok {
+        return format!(
+            "The connector failed: {}",
+            called.error.unwrap_or_else(|| "unknown error".to_string())
+        );
+    }
+    let content = called
+        .result
+        .as_ref()
+        .and_then(|r| r.get("content"))
+        .and_then(|c| c.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let text: String = content
+        .iter()
+        .filter_map(|c| {
+            if c.get("type").and_then(|t| t.as_str()) == Some("text") {
+                c.get("text").and_then(|t| t.as_str())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string();
+    if text.is_empty() {
+        return "The connector returned no readable text.".to_string();
+    }
+    text.chars().take(32_000).collect()
 }
 
 async fn rpc(
@@ -466,6 +557,19 @@ mod tests {
             assert_eq!(outcome.tools.len(), 1);
             assert_eq!(outcome.tools[0].name, "search");
         }
+    }
+
+    #[test]
+    fn slug_and_tool_names_match_ts() {
+        let connector = connector("https://fake-mcp.test/mcp");
+        let mut named = connector.clone();
+        named.name = "Example Tools".to_string();
+        assert_eq!(slug_name("Example Tools"), "example_tools");
+        assert_eq!(tool_name_for(&named, "search"), "example_tools__search");
+        assert_eq!(
+            split_tool_name("example_tools__search"),
+            Some(("example_tools".to_string(), "search".to_string()))
+        );
     }
 
     #[tokio::test]

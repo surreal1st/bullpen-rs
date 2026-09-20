@@ -553,7 +553,18 @@ impl AppState {
                 });
             });
 
+        state.sync_connector_hooks();
         state
+    }
+
+    fn sync_connector_hooks(&self) {
+        self.runs
+            .set_connector_hooks(Arc::new(runs::ConnectorHooks {
+                catalogue: Arc::clone(&self.connector_catalogue),
+                transport: Arc::clone(&self.mcp_transport),
+                resolver: Arc::clone(&self.mcp_resolver),
+                oauth_http: Arc::clone(&self.oauth_http),
+            }));
     }
 
     /// B2: the one guard every route takes the db lock through. A poisoned
@@ -592,25 +603,7 @@ impl AppState {
 
     /// S7-03: usable access token without holding the db lock across await.
     pub async fn bearer_for_connector(&self, connector_id: &str) -> Option<String> {
-        let auth = {
-            let db = self.db();
-            store::get_auth(&db, connector_id).ok().flatten()
-        }?;
-        let access = auth.access_token.as_deref()?;
-        if !oauth::token_expired(
-            auth.expires_at.as_deref(),
-            chrono::Utc::now().timestamp_millis(),
-        ) {
-            return Some(access.to_string());
-        }
-        let renewed = oauth::refresh_tokens(&auth, self.oauth_http.as_ref())
-            .await
-            .ok()?;
-        {
-            let db = self.db();
-            store::put_tokens(&db, connector_id, &renewed).ok()?;
-        }
-        Some(renewed.access_token)
+        oauth::bearer_for_shared(&self.db, connector_id, self.oauth_http.as_ref()).await
     }
 
     /// S7-02: lists tools from the MCP server and caches them on success.
@@ -671,6 +664,7 @@ impl AppState {
         let mut state = Self::new(db);
         state.mcp_transport = transport;
         state.mcp_resolver = resolver;
+        state.sync_connector_hooks();
         state
     }
 
@@ -682,6 +676,7 @@ impl AppState {
     ) -> Self {
         let mut state = Self::with_mcp(db, transport, resolver);
         state.oauth_http = oauth_http;
+        state.sync_connector_hooks();
         state
     }
 }
