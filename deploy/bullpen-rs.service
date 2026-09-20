@@ -15,6 +15,12 @@ Environment=BULLPEN_PORT=4380
 Environment=BULLPEN_HOST=0.0.0.0
 Environment=BULLPEN_DATA_DIR=/home/bullpen/bullpen-rs
 Environment=BULLPEN_CLIENT_ROOT=/home/bullpen/bullpen-rs/client
+# S10-09/10: `propose_tool` shells out to W5 (`w5/run.mjs`) against bullpen-night's
+# `bot-tools.ts`. Without this, the server uses a compile-time path from the build
+# machine (workstation WSL), which does not exist on meridian. Checkout lives under
+# `/home/bullpen/` so `ProtectHome=read-only` + `ReadWritePaths=/home/bullpen` still
+# cover it; `ship.sh` does not ship the TS tree (only binary, client, templates, w5/).
+Environment=BULLPEN_NIGHT_ROOT=/home/bullpen/bullpen-night
 # The sandbox daemon is bullpen's OWN rootless Docker, never the host one.
 Environment=XDG_RUNTIME_DIR=/run/user/1004
 Environment=DOCKER_HOST=unix:///run/user/1004/docker.sock
