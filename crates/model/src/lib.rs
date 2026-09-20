@@ -24,6 +24,6 @@ pub use port::{
     CHEAP_DEFAULT_MODEL, CHEAP_FALLBACK_MODELS, ContentPart, EventStream, FunctionCall, ImageUrl,
     MAX_OUTPUT_TOKENS, MessageContent, MessageToolCall, ModelEvent, ModelMessage, ModelPort,
     ModelRequest, ModelUsage, OpenRouterPort, Reasoning, ToolCall, ToolSpec, VISION_DEFAULT_MODEL,
-    busy_wait_ms, parse_sse_stream, utility_messages,
+    busy_wait_ms, messages_carry_image, parse_sse_stream, utility_messages,
 };
 pub use secrets::{KeySource, redact};

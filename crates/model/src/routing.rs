@@ -379,9 +379,9 @@ fn is_routable(trigger: Trigger, messages: &[crate::port::ModelMessage], room: b
     messages.last().map(|m| m.role == "user").unwrap_or(false)
 }
 
-/// The model floor that this run uses (re-exported from ladder).
-pub use crate::ladder::model_for_run;
 pub use crate::ladder::tier_of;
+/// The model floor that this run uses (re-exported from ladder).
+pub use crate::ladder::{model_for_run, model_for_turn};
 
 /// Route one chat turn or return None if routing doesn't apply.
 pub async fn maybe_route(

@@ -208,6 +208,36 @@ fn catalog(images: bool, tools: bool) -> Arc<dyn model::Catalog> {
     Arc::new(model::FixtureCatalog::from_json(&json.to_string()).unwrap())
 }
 
+fn catalog_cheap_and_tier1_vision() -> Arc<dyn model::Catalog> {
+    let json = serde_json::json!([
+        {
+            "id": model::CHEAP_DEFAULT_MODEL,
+            "name": model::CHEAP_DEFAULT_MODEL,
+            "inPerM": 0.4,
+            "outPerM": 0.4,
+            "contextLength": 32000,
+            "supportsTools": true,
+            "supportsImages": true,
+            "supportsReasoning": false,
+            "providerCount": 2,
+            "supportsCaching": false
+        },
+        {
+            "id": "google/gemini-3.8-flash",
+            "name": "google/gemini-3.8-flash",
+            "inPerM": 0.75,
+            "outPerM": 3.75,
+            "contextLength": 1000000,
+            "supportsTools": true,
+            "supportsImages": true,
+            "supportsReasoning": false,
+            "providerCount": 2,
+            "supportsCaching": false
+        }
+    ]);
+    Arc::new(model::FixtureCatalog::from_json(&json.to_string()).unwrap())
+}
+
 fn setup(
     port: Arc<dyn ModelPort>,
     model_catalog: Arc<dyn model::Catalog>,
@@ -769,4 +799,42 @@ async fn capture_on_final_step_settles_without_retaining_an_undelivered_frame() 
         .unwrap();
     assert_eq!(counters.capture_attempts, 1);
     assert_eq!(counters.image_dispatches, 0);
+}
+
+#[tokio::test]
+async fn unattended_screen_observation_turn_upgrades_off_flash_lite() {
+    let scripts = vec![
+        vec![snap_call("snap", "{}")],
+        vec![ModelEvent::Done {
+            model: "google/gemini-3.8-flash".into(),
+            usage: None,
+            finish_reason: Some("stop".into()),
+        }],
+    ];
+    let port = Arc::new(ScriptPort::new(scripts));
+    let (db, manager, capture, conversation) =
+        setup(port.clone(), catalog_cheap_and_tier1_vision());
+    let run_id = manager.start(StartOptions {
+        bot_id: "arthur".into(),
+        conversation_id: conversation,
+        model: model::CHEAP_DEFAULT_MODEL.into(),
+        messages: vec![ModelMessage::user("check the desk on a timer")],
+        trigger: Trigger::Routine,
+        room: false,
+    });
+    let _events = drain(&manager, &run_id).await;
+    assert_eq!(capture.0.load(Ordering::SeqCst), 1);
+    let requests = port.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].model, model::CHEAP_DEFAULT_MODEL);
+    assert_eq!(requests[1].model, "google/gemini-3.8-flash");
+    let stored_model: String = db
+        .lock()
+        .unwrap()
+        .conn()
+        .query_row("SELECT model FROM runs WHERE id = ?1", [&run_id], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(stored_model, "google/gemini-3.8-flash");
 }

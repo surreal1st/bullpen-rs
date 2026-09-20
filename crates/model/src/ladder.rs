@@ -1,7 +1,7 @@
 //! The escalation ladder: routing model selection by trigger type and escalation
 //! tier. Port of `src/server/escalation.ts`.
 
-use crate::CHEAP_DEFAULT_MODEL;
+use crate::port::{CHEAP_DEFAULT_MODEL, VISION_DEFAULT_MODEL};
 use serde::{Deserialize, Serialize};
 use store::Db;
 
@@ -197,6 +197,33 @@ pub fn model_for_run(db: &Db, trigger: Trigger, requested: &str, room: bool) -> 
         return safe_fallback(db);
     }
     requested.to_string()
+}
+
+/// The model for one provider call inside a run, after the cheap floor and
+/// screen-observation rules are both applied.
+///
+/// Josh's unattended-spend floor may leave a timer on flash-lite, but that
+/// model fails once a second screenshot is in context. When an unattended run
+/// is about to send images, lift off the cheap vision floor to the configured
+/// tier-1 vision model; Josh-initiated chat (not a room round) keeps whatever
+/// he chose.
+pub fn model_for_turn(
+    db: &Db,
+    trigger: Trigger,
+    room: bool,
+    effective_model: &str,
+    carries_image: bool,
+) -> String {
+    if !carries_image {
+        return effective_model.to_string();
+    }
+    if trigger == Trigger::Chat && !room {
+        return effective_model.to_string();
+    }
+    if effective_model != CHEAP_DEFAULT_MODEL && effective_model != VISION_DEFAULT_MODEL {
+        return effective_model.to_string();
+    }
+    tier1_model(db, EscalationKind::Vision)
 }
 
 /// What a timer run drops to, with a floor that cannot be configured away.

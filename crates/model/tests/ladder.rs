@@ -1,8 +1,10 @@
 use model::CHEAP_DEFAULT_MODEL;
 use model::ladder::{
-    EscalationKind, Trigger, looks_premium, may_escalate, mid_model, model_for_run, premium_model,
-    safe_fallback, set_default_model, set_mid_model, set_premium_model, tier_of, tier1_model,
+    EscalationKind, Trigger, looks_premium, may_escalate, mid_model, model_for_run, model_for_turn,
+    premium_model, safe_fallback, set_default_model, set_mid_model, set_premium_model, tier_of,
+    tier1_model,
 };
+use model::{ContentPart, ImageUrl, MessageContent, ModelMessage};
 use store::Db;
 
 fn open_db() -> Db {
@@ -124,4 +126,70 @@ fn model_for_run_routine_with_gemini_flash_lite_returns_unchanged() {
     let db = open_db();
     let result = model_for_run(&db, Trigger::Routine, "google/gemini-2.5-flash-lite", false);
     assert_eq!(result, "google/gemini-2.5-flash-lite");
+}
+
+#[test]
+fn model_for_turn_leaves_chat_on_flash_lite_even_with_an_image() {
+    let db = open_db();
+    let result = model_for_turn(&db, Trigger::Chat, false, CHEAP_DEFAULT_MODEL, true);
+    assert_eq!(result, CHEAP_DEFAULT_MODEL);
+}
+
+#[test]
+fn model_for_turn_lifts_a_room_round_with_an_image_off_flash_lite() {
+    let db = open_db();
+    let vision = tier1_model(&db, EscalationKind::Vision);
+    let result = model_for_turn(&db, Trigger::Chat, true, CHEAP_DEFAULT_MODEL, true);
+    assert_eq!(result, vision);
+}
+
+#[test]
+fn model_for_turn_leaves_unattended_runs_without_images_on_flash_lite() {
+    let db = open_db();
+    let result = model_for_turn(&db, Trigger::Routine, false, CHEAP_DEFAULT_MODEL, false);
+    assert_eq!(result, CHEAP_DEFAULT_MODEL);
+}
+
+#[test]
+fn model_for_turn_lifts_unattended_image_turns_off_flash_lite() {
+    let db = open_db();
+    let vision = tier1_model(&db, EscalationKind::Vision);
+    for trigger in [Trigger::Routine, Trigger::Webhook, Trigger::Goal] {
+        let result = model_for_turn(&db, trigger, false, CHEAP_DEFAULT_MODEL, true);
+        assert_eq!(result, vision, "trigger {:?}", trigger);
+    }
+}
+
+#[test]
+fn model_for_turn_leaves_a_stronger_unattended_pin_alone() {
+    let db = open_db();
+    let pin = "anthropic/claude-opus-5";
+    let result = model_for_turn(&db, Trigger::Routine, false, pin, true);
+    assert_eq!(result, pin);
+}
+
+#[test]
+fn messages_carry_image_is_what_model_for_turn_keys_off() {
+    let db = open_db();
+    let with_image = vec![ModelMessage {
+        role: "user".to_string(),
+        content: MessageContent::Parts(vec![
+            ContentPart::Text {
+                text: "screen".into(),
+            },
+            ContentPart::ImageUrl {
+                image_url: ImageUrl {
+                    url: "data:image/png;base64,abc".into(),
+                },
+            },
+        ]),
+        tool_calls: None,
+        tool_call_id: None,
+    }];
+    assert!(model::messages_carry_image(&with_image));
+    let vision = tier1_model(&db, EscalationKind::Vision);
+    assert_eq!(
+        model_for_turn(&db, Trigger::Routine, false, CHEAP_DEFAULT_MODEL, true),
+        vision
+    );
 }

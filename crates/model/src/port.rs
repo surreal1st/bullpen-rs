@@ -247,15 +247,20 @@ pub fn busy_wait_ms(status: u16, body: &str, retry_after_header: Option<&str>) -
     ms.min(BUSY_WAIT_CAP_MS)
 }
 
-/// An image turn cannot move to a text-only model; it waits out the 429
-/// instead.
-fn carries_image(request: &ModelRequest) -> bool {
-    request.messages.iter().any(|m| match &m.content {
+/// Whether any message in the list carries an image part.
+pub fn messages_carry_image(messages: &[ModelMessage]) -> bool {
+    messages.iter().any(|m| match &m.content {
         MessageContent::Parts(parts) => parts
             .iter()
             .any(|p| matches!(p, ContentPart::ImageUrl { .. })),
         MessageContent::Text(_) => false,
     })
+}
+
+/// An image turn cannot move to a text-only model; it waits out the 429
+/// instead.
+fn carries_image(request: &ModelRequest) -> bool {
+    messages_carry_image(&request.messages)
 }
 
 fn fallback_for(request: &ModelRequest) -> Option<&'static str> {

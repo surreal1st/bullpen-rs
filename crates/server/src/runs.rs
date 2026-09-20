@@ -15,7 +15,8 @@ use std::time::Duration;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures::StreamExt;
-use model::ladder::{Trigger, model_for_run};
+use model::ladder::{Trigger, model_for_run, model_for_turn};
+use model::messages_carry_image;
 use model::{
     Catalog, ContentPart, EventStream, FunctionCall, ImageUrl, MessageContent, MessageToolCall,
     ModelEvent, ModelMessage, ModelPort, ModelRequest, ModelUsage, ToolCall, ToolSpec,
@@ -1592,6 +1593,7 @@ impl RunManager {
                 &run_id,
                 &bot_id,
                 trigger,
+                room,
                 model,
                 messages,
                 &toolbox,
@@ -1619,6 +1621,7 @@ impl RunManager {
         run_id: &str,
         bot_id: &str,
         trigger: Trigger,
+        room: bool,
         mut effective_requested_model: String,
         mut messages: Vec<ModelMessage>,
         toolbox: &ToolBox,
@@ -1760,6 +1763,67 @@ were doing unless he changed it."
                     );
                     messages.push(ModelMessage::user(refusal));
                     request_messages = messages.clone();
+                }
+            }
+
+            let turn_model = {
+                let db = self.db();
+                model_for_turn(
+                    &db,
+                    trigger,
+                    room,
+                    &effective_requested_model,
+                    messages_carry_image(&request_messages),
+                )
+            };
+            if turn_model != effective_requested_model {
+                let persisted = {
+                    let db = self.db();
+                    db.conn().execute(
+                        "UPDATE runs SET model = ?1, updated_at = ?2 WHERE id = ?3",
+                        rusqlite::params![&turn_model, now_iso(), run_id],
+                    )
+                };
+                match persisted {
+                    Ok(1) => {
+                        effective_requested_model = turn_model;
+                    }
+                    Ok(rows) => {
+                        tracing::error!(
+                            "run {run_id}: failed to persist vision floor model (updated {rows} rows)"
+                        );
+                        return Outcome::Failed {
+                            state: RunState {
+                                messages,
+                                text,
+                                effective_requested_model,
+                                responding_model,
+                                usage,
+                                steps,
+                            },
+                            failure: "Could not persist the selected model for the next step."
+                                .to_string(),
+                            status: None,
+                        };
+                    }
+                    Err(err) => {
+                        tracing::error!(
+                            "run {run_id}: failed to persist vision floor model: {err}"
+                        );
+                        return Outcome::Failed {
+                            state: RunState {
+                                messages,
+                                text,
+                                effective_requested_model,
+                                responding_model,
+                                usage,
+                                steps,
+                            },
+                            failure: "Could not persist the selected model for the next step."
+                                .to_string(),
+                            status: None,
+                        };
+                    }
                 }
             }
 
@@ -3258,6 +3322,7 @@ is looking at."
                     &run_id,
                     &bot_id,
                     trigger,
+                    false,
                     model,
                     messages,
                     &toolbox,
