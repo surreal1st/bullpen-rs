@@ -620,11 +620,12 @@ pub fn create_bot(db: &Db, draft: BotDraft) -> rusqlite::Result<Bot> {
     Ok(get_bot(db, &id)?.expect("just-inserted bot row must exist"))
 }
 
-/// DUP-01: duplicates a bot - port of `store.ts:446-508`'s `duplicateBot`,
-/// narrowed to this schema: **`bot_skills` does not exist here** (verified -
-/// `grep bot_skills crates/` returns nothing; skills are S10 and unbuilt),
-/// so that half of the TS is skipped entirely rather than stubbed or given
-/// a table of its own.
+/// DUP-01: duplicates a bot - port of `store.ts:446-508`'s `duplicateBot`.
+///
+/// **Enabled skills** (migration 23 `bot_skills`): every opt-in toggle on
+/// the source is copied onto the copy. Skill **definitions** live in the
+/// global `skills` library and are not duplicated — only which skills the
+/// copy has switched on.
 ///
 /// **Carried onto the copy**, each a deliberate decision:
 /// - `purpose`, `instructions`, `model` - the bot itself; the TS carries
@@ -699,6 +700,19 @@ pub fn duplicate_bot(db: &Db, id: &str) -> rusqlite::Result<Option<Bot>> {
         db.conn().execute(
             "UPDATE bots SET has_routine = 1 WHERE id = ?1",
             params![copy.id],
+        )?;
+    }
+
+    let mut stmt = db
+        .conn()
+        .prepare("SELECT skill_id FROM bot_skills WHERE bot_id = ?1")?;
+    let skill_ids: Vec<String> = stmt
+        .query_map(params![id], |row| row.get(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    for skill_id in skill_ids {
+        db.conn().execute(
+            "INSERT OR IGNORE INTO bot_skills (bot_id, skill_id) VALUES (?1, ?2)",
+            params![copy.id, skill_id],
         )?;
     }
 

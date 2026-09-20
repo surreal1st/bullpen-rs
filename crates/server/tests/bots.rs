@@ -1963,6 +1963,64 @@ async fn duplicate_starts_with_empty_memory() {
     );
 }
 
+/// S10-05: enabled skill toggles on the source must appear on the copy;
+/// skills left off in the library must not be enabled by duplication alone.
+#[tokio::test]
+async fn duplicate_carries_enabled_skills_not_the_whole_library() {
+    let db = open_db();
+    seed_bot(&db, "source-bot", "Source Bot");
+    let now = chrono::Utc::now();
+    let enabled = store::skills::save_skill(
+        &db,
+        store::skills::SkillInput {
+            name: "dup-carry".to_string(),
+            description: "d".to_string(),
+            body: "b".to_string(),
+            source: None,
+        },
+        now,
+    )
+    .expect("save_skill query")
+    .expect("save enabled skill");
+    store::skills::save_skill(
+        &db,
+        store::skills::SkillInput {
+            name: "dup-skip".to_string(),
+            description: "d".to_string(),
+            body: "b".to_string(),
+            source: None,
+        },
+        now,
+    )
+    .expect("save_skill query")
+    .expect("save library skill");
+    store::skills::set_bot_skill(&db, "source-bot", &enabled.name, true)
+        .expect("set_bot_skill query");
+
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let (status, response) =
+        post_route(&app, "/api/bots/source-bot/duplicate", &session, json!({})).await;
+    assert_eq!(status, 201, "{response:?}");
+    let copy_id = response["bot"]["id"].as_str().unwrap().to_string();
+
+    let (_status, copy_skills) =
+        get_route(&app, &format!("/api/bots/{copy_id}/skills"), &session).await;
+    assert_eq!(
+        copy_skills["skills"],
+        json!(["dup-carry"]),
+        "copy must have the same enabled skills as the source"
+    );
+
+    let (_status, source_skills) = get_route(&app, "/api/bots/source-bot/skills", &session).await;
+    assert_eq!(
+        source_skills["skills"],
+        json!(["dup-carry"]),
+        "source must keep its own enabled skills"
+    );
+}
+
 /* ----------------------------------------------------------------- EDIT-01 */
 
 /// Bite: all three identity fields change together in one PATCH, and the
