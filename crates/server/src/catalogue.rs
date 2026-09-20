@@ -4,7 +4,7 @@
 
 use crate::import_open::parse_open_bot;
 use crate::marketplace::Offering;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -41,6 +41,58 @@ pub struct MarketplaceCard {
     /// server-side when resolving `POST /api/marketplace/install`.
     #[serde(skip)]
     pub instructions: Option<String>,
+    /// MCP endpoint for built-in connectors — server-side install resolution.
+    #[serde(skip)]
+    pub connector_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawBuiltInPlugin {
+    kind: String,
+    name: String,
+    purpose: String,
+    url: String,
+    category: String,
+    integrations: Vec<String>,
+    #[serde(rename = "sourceName")]
+    source_name: String,
+    #[serde(default)]
+    open_access: Option<bool>,
+    #[serde(default)]
+    does: Option<Vec<String>>,
+}
+
+static BUILT_IN_PLUGINS: OnceLock<Vec<MarketplaceCard>> = OnceLock::new();
+
+/// Built-in plugin shelf — port of `BUILT_IN_PLUGINS` in bullpen-night
+/// `catalogue.ts` (data in `data/built_in_plugins.json`).
+pub fn built_in_plugin_cards() -> Vec<MarketplaceCard> {
+    BUILT_IN_PLUGINS
+        .get_or_init(|| {
+            let raw: Vec<RawBuiltInPlugin> =
+                serde_json::from_str(include_str!("../data/built_in_plugins.json"))
+                    .expect("built_in_plugins.json must parse");
+            raw.into_iter()
+                .map(|p| MarketplaceCard {
+                    kind: p.kind,
+                    name: p.name,
+                    purpose: p.purpose,
+                    category: Some(p.category),
+                    integrations: p.integrations,
+                    source_name: p.source_name,
+                    detail_url: None,
+                    unavailable: None,
+                    open_access: p.open_access,
+                    does: p.does,
+                    installed: false,
+                    is_template: None,
+                    template_id: None,
+                    instructions: None,
+                    connector_url: Some(p.url),
+                })
+                .collect()
+        })
+        .clone()
 }
 
 pub fn templates_dir() -> PathBuf {
@@ -149,6 +201,7 @@ pub fn read_directory(payload: &serde_json::Value, source_name: &str) -> Vec<Mar
             } else {
                 Some(prompt)
             },
+            connector_url: None,
         });
     }
     cards
@@ -172,6 +225,7 @@ fn read_template_file(path: &Path, template_id: &str) -> Option<MarketplaceCard>
         is_template: Some(true),
         template_id: Some(template_id.to_string()),
         instructions: Some(parsed.instructions),
+        connector_url: None,
     })
 }
 
@@ -226,6 +280,7 @@ pub fn user_template_cards(db: &Db) -> rusqlite::Result<Vec<MarketplaceCard>> {
             is_template: Some(true),
             template_id: Some(id),
             instructions: None,
+            connector_url: None,
         });
     }
     Ok(cards)
@@ -242,11 +297,18 @@ pub fn card_to_offering(card: &MarketplaceCard) -> Option<Offering> {
         return None;
     }
     match card.kind.as_str() {
-        "connector" => Some(Offering::Connector {
-            name: card.name.clone(),
-            purpose: card.purpose.clone(),
-            url: card.detail_url.clone().unwrap_or_default(),
-        }),
+        "connector" => {
+            let url = card
+                .connector_url
+                .clone()
+                .or_else(|| card.detail_url.clone())
+                .unwrap_or_default();
+            Some(Offering::Connector {
+                name: card.name.clone(),
+                purpose: card.purpose.clone(),
+                url,
+            })
+        }
         "bot" => {
             let instructions = card.instructions.clone().or_else(|| {
                 card.template_id.as_ref().and_then(|id| {
@@ -334,6 +396,24 @@ fn stale_or_error(message: &str) -> (bool, Vec<MarketplaceCard>, Option<String>)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn built_in_plugins_carry_gmail_endpoint() {
+        let gmail = built_in_plugin_cards()
+            .into_iter()
+            .find(|c| c.name == "Gmail")
+            .expect("Gmail card");
+        assert_eq!(gmail.kind, "connector");
+        assert_eq!(
+            gmail.connector_url.as_deref(),
+            Some("https://gmailmcp.googleapis.com/mcp/v1")
+        );
+        assert!(
+            built_in_plugin_cards()
+                .iter()
+                .all(|c| c.kind == "connector")
+        );
+    }
 
     #[test]
     fn read_directory_drops_blank_names() {

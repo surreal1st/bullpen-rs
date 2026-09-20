@@ -1,4 +1,4 @@
-//! S10-06: marketplace templates list + bot install routes.
+//! S10-06/07: marketplace templates, plugins shelf, bots list + install routes.
 
 mod common;
 
@@ -85,6 +85,44 @@ async fn post_json(
         status,
         serde_json::from_slice(&bytes).unwrap_or(Value::Null),
     )
+}
+
+#[tokio::test]
+async fn plugins_list_includes_gmail() {
+    no_network_directory();
+    let db = open_db();
+    let session = seed_session(&db);
+    let app = build_app(AppState::new(db));
+    let (status, body) = get_json(&app, "/api/marketplace/plugins", &session).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["ok"], true);
+    let cards = body["cards"].as_array().unwrap();
+    assert!(cards.len() >= 40);
+    let gmail = cards
+        .iter()
+        .find(|c| c["name"].as_str() == Some("Gmail"))
+        .expect("Gmail");
+    assert_eq!(gmail["category"], "Google");
+    assert_eq!(gmail["installed"], false);
+}
+
+#[tokio::test]
+async fn plugin_detail_returns_card_metadata() {
+    no_network_directory();
+    let db = open_db();
+    let session = seed_session(&db);
+    let app = build_app(AppState::new(db));
+    let (status, body) = get_json(&app, "/api/marketplace/plugins/Gmail/detail", &session).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["name"], "Gmail");
+    assert!(
+        body["url"]
+            .as_str()
+            .unwrap()
+            .contains("gmailmcp.googleapis.com")
+    );
+    assert_eq!(body["openAccess"], false);
+    assert!(body["does"].as_array().unwrap().len() > 2);
 }
 
 #[tokio::test]

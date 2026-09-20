@@ -2015,3 +2015,201 @@ button.effort-glyph:disabled {
   font-weight: 600;
   color: var(--ok);
 }
+
+/* ----------------------------------------------------------- marketplace */
+
+.mkt-modal .mkt-head {
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.mkt-modal .mkt-head h2 {
+  flex: none;
+}
+
+.mkt-body {
+  overflow-y: auto;
+  max-height: calc(min(38rem, 100vh - 2rem) - 3.5rem);
+}
+
+.modal-tabs {
+  margin-left: auto;
+  display: flex;
+  gap: 0.3rem;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0.15rem;
+}
+
+.modal-tabs button {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 0.25rem 0.85rem;
+  font: inherit;
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+
+.modal-tabs button.is-on {
+  background: var(--raised);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.modal-search {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  color: var(--ink);
+  border-radius: 10px;
+  padding: 0.5rem 0.75rem;
+  font: inherit;
+  font-size: 0.9rem;
+}
+
+.chips {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.chip-filter {
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 0.22rem 0.7rem;
+  font: inherit;
+  font-size: 0.79rem;
+  cursor: pointer;
+}
+
+.chip-filter.is-on {
+  background: var(--raised);
+  border-color: var(--line-strong);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr));
+  gap: 0.6rem;
+}
+
+.card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  padding: 0.7rem 0.8rem;
+  list-style: none;
+}
+
+.card-top {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+}
+
+.card-what {
+  flex: 1;
+  min-width: 0;
+}
+
+.card-what b {
+  display: block;
+  font-size: 0.88rem;
+  font-weight: 640;
+}
+
+.card-what span {
+  display: block;
+  color: var(--muted);
+  font-size: 0.79rem;
+  line-height: 1.45;
+  margin-top: 0.1rem;
+}
+
+.card-add,
+.card-out {
+  flex: none;
+  border: 1px solid var(--line-strong);
+  background: var(--raised);
+  color: var(--ink);
+  border-radius: 8px;
+  padding: 0.26rem 0.75rem;
+  font: inherit;
+  font-size: 0.79rem;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.card-add:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.card-added {
+  flex: none;
+  color: var(--ok);
+  font-size: 0.79rem;
+  font-weight: 600;
+}
+
+.card-tags {
+  display: flex;
+  gap: 0.3rem;
+  flex-wrap: wrap;
+  margin-top: 0.5rem;
+}
+
+.card-tags span {
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 0.02rem 0.35rem;
+  color: var(--faint);
+  font-size: 0.68rem;
+}
+
+.card-tags .tag-open {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 35%, var(--line));
+}
+
+.modal-note {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  border: 1px solid color-mix(in srgb, var(--ok) 35%, var(--line));
+  background: color-mix(in srgb, var(--ok) 8%, transparent);
+  border-radius: 10px;
+  padding: 0.5rem 0.7rem;
+  font-size: 0.84rem;
+}
+
+.modal-note span {
+  flex: 1;
+}
+
+.modal-foot {
+  margin: 0.5rem 0 0;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.caution {
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, var(--line));
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+  border-radius: 10px;
+  padding: 0.55rem 0.7rem;
+  font-size: 0.84rem;
+}
+
+.caution b {
+  display: block;
+  margin-bottom: 0.25rem;
+}

@@ -1,0 +1,737 @@
+[
+  {
+    "kind": "connector",
+    "name": "Gmail",
+    "purpose": "Search, read, draft and send mail.",
+    "url": "https://gmailmcp.googleapis.com/mcp/v1",
+    "category": "Google",
+    "integrations": [
+      "Gmail"
+    ],
+    "sourceName": "Google",
+    "does": [
+      "Search and read mail, including whole threads",
+      "Draft, send, reply and forward",
+      "Create and manage labels, and relabel messages",
+      "Trash, archive and mark spam"
+    ]
+  },
+  {
+    "kind": "connector",
+    "name": "Google Calendar",
+    "purpose": "Read your calendar and schedule events.",
+    "url": "https://calendarmcp.googleapis.com/mcp/v1",
+    "category": "Google",
+    "integrations": [
+      "Google Calendar"
+    ],
+    "sourceName": "Google",
+    "does": [
+      "List calendars and read events across a date range",
+      "Create, update, move and delete events",
+      "Search events, and read attendee responses",
+      "Accept or decline invitations, and suggest free times"
+    ]
+  },
+  {
+    "kind": "connector",
+    "name": "Google Drive",
+    "purpose": "Search, read and create files.",
+    "url": "https://drivemcp.googleapis.com/mcp/v1",
+    "category": "Google",
+    "integrations": [
+      "Google Drive"
+    ],
+    "sourceName": "Google",
+    "does": [
+      "Search files and folders by name, type or content",
+      "Read a file's contents, including exported Google formats",
+      "Create, update, copy and trash files",
+      "Read and change sharing and permissions"
+    ]
+  },
+  {
+    "kind": "connector",
+    "name": "Google Docs",
+    "purpose": "Read and write documents.",
+    "url": "https://docsmcp.googleapis.com/mcp/v1",
+    "category": "Google",
+    "integrations": [
+      "Google Docs"
+    ],
+    "sourceName": "Google",
+    "does": [
+      "Read a document's full text and structure",
+      "Create new documents",
+      "Insert, replace and delete text",
+      "Apply basic formatting and styles"
+    ]
+  },
+  {
+    "kind": "connector",
+    "name": "Google Sheets",
+    "purpose": "Read and write spreadsheets.",
+    "url": "https://sheetsmcp.googleapis.com/mcp/v1",
+    "category": "Google",
+    "integrations": [
+      "Google Sheets"
+    ],
+    "sourceName": "Google",
+    "does": [
+      "Read a range, a whole tab, or a whole spreadsheet",
+      "Write, append and clear cell ranges",
+      "Create spreadsheets, and add or rename tabs",
+      "Read formulas and cell formatting"
+    ]
+  },
+  {
+    "kind": "connector",
+    "name": "Google Slides",
+    "purpose": "Read and build presentations.",
+    "url": "https://slidesmcp.googleapis.com/mcp/v1",
+    "category": "Google",
+    "integrations": [
+      "Google Slides"
+    ],
+    "sourceName": "Google",
+    "does": [
+      "Read a deck's slides, text and speaker notes",
+      "Create presentations from scratch",
+      "Add, duplicate, reorder and delete slides",
+      "Insert and replace text and images"
+    ]
+  },
+  {
+    "kind": "connector",
+    "name": "Google Chat",
+    "purpose": "Read and send Chat messages.",
+    "url": "https://chatmcp.googleapis.com/mcp/v1",
+    "category": "Google",
+    "integrations": [
+      "Google Chat"
+    ],
+    "sourceName": "Google",
+    "does": [
+      "List spaces and direct messages",
+      "Read message history in a space or thread",
+      "Send messages and reply in thread",
+      "Read space membership"
+    ]
+  },
+  {
+    "kind": "connector",
+    "name": "GitHub",
+    "purpose": "Read repositories, issues and pull requests.",
+    "url": "https://api.githubcopilot.com/mcp/",
+    "category": "Developer",
+    "integrations": [
+      "GitHub"
+    ],
+    "sourceName": "GitHub",
+    "does": [
+      "Search code, issues, pull requests and repositories",
+      "Read file contents, branches, commits and diffs",
+      "Create, comment on, label and close issues",
+      "Open pull requests, read reviews and leave review comments",
+      "Read GitHub Actions runs, jobs and failure logs"
+    ]
+  },
+  {
+    "kind": "connector",
+    "name": "Sentry",
+    "purpose": "Look up errors and issues in your projects.",
+    "url": "https://mcp.sentry.dev/mcp",
+    "category": "Developer",
+    "integrations": [
+      "Sentry"
+    ],
+    "sourceName": "Sentry",
+    "does": [
+      "List projects and their open issues",
+      "Read an error's stack trace, breadcrumbs and full event detail",
+      "Search issues by tag, release, environment or user impact",
+      "See which release introduced a regression, and how often it fires"
+    ]
+  },
+  {
+    "kind": "connector",
+    "name": "Vercel",
+    "purpose": "Inspect projects, deployments and logs.",
+    "url": "https://mcp.vercel.com",
+    "category": "Developer",
+    "integrations": [
+      "Vercel"
+    ],
+    "sourceName": "Vercel",
+    "does": [
+      "List projects, deployments and their status",
+      "Read build logs and runtime logs for a deployment",
+      "Inspect environment variables and project settings",
+      "Find which deployment is live, and roll back or redeploy"
+    ]
+  },
+  {
+    "kind": "connector",
+    "name": "Netlify",
+    "purpose": "Manage sites, builds and deploys.",
+    "url": "https://netlify-mcp.netlify.app/mcp",
+    "category": "Developer",
+    "integrations": [
+      "Netlify"
+    ],
+    "sourceName": "Netlify",
+    "does": [
+      "List sites, deploys and their status",
+      "Read build logs and failure output",
+      "Manage environment variables",
+      "Read form submissions and deploy previews"
+    ]
+  },
+  {
+    "kind": "connector",
+    "name": "Supabase",
+    "purpose": "Query your database and manage projects.",
+    "url": "https://mcp.supabase.com/mcp",
+    "category": "Developer",
+    "integrations": [
+      "Supabase"
+    ],
+    "sourceName": "Supabase",
+    "does": [
+      "Run SQL against your Postgres database",
+      "Inspect schema, tables, columns and relationships",
+      "List projects and branches, and read their config",
+      "Read logs, and manage edge functions and storage buckets"
+    ]
+  },
+  {
+    "kind": "connector",
+    "name": "Neon",
+    "purpose": "Run SQL and manage Postgres branches.",
+    "url": "https://mcp.neon.tech/mcp",
+    "category": "Developer",
+    "integrations": [
+      "Neon",
+      "Postgres"
+    ],
+    "sourceName": "Neon",
+    "does": [
+      "Run SQL against a Postgres database",
+      "Create, reset and delete branches for safe experiments",
+      "Inspect schema and table structure",
+      "List projects and endpoints, and read usage"
+    ]
+  },
+  {
+    "kind": "connector",
+    "name": "Prisma",
+    "purpose": "Manage Prisma Postgres databases and schemas.",
+    "url": "https://mcp.prisma.io/mcp",
+    "category": "Developer",
+    "integrations": [
+      "Prisma"
+    ],
+    "sourceName": "Prisma",
+    "does": [
+      "Create and manage Prisma Postgres databases",
+      "Inspect and evolve a schema, and run migrations",
+      "Execute queries against a managed database",
+      "Read connection details for an environment"
+    ]
+  },
+  {
+    "kind": "connector",
+    "name": "Grafana",
+    "purpose": "Query dashboards, metrics and alerts.",
+    "url": "https://mcp.grafana.com/mcp",
+    "category": "Developer",
+    "integrations": [
+      "Grafana"
+    ],
+    "sourceName": "Grafana",
+    "does": [
+      "Search dashboards and read the panels on them",
+      "Query Prometheus, Loki and other datasources directly",
+      "List alert rules and see which are firing",
+      "Read incident and on-call state"
+    ]
+  },
+  {
+    "kind": "connector",
+    "name": "Semgrep",
+    "purpose": "Scan code for security and correctness bugs.",
+    "url": "https://mcp.semgrep.ai/mcp",
+    "category": "Developer",
+    "integrations": [
+      "Semgrep"
+    ],
+    "sourceName": "Semgrep",
+    "does": [
+      "Scan a codebase or a single diff for security and correctness bugs",
+      "Explain a finding and why the rule fired",
+      "List available rules and rulesets",
+      "Check a change against a policy before it merges"
+    ]
+  },
+  {
+    "kind": "connector",
+    "name": "Cloudflare Observability",
+    "purpose": "Read Workers logs, errors and analytics.",
+    "url": "https://observability.mcp.cloudflare.com/mcp",
+    "category": "Developer",
+    "integrations": [
+      "Cloudflare"
+    ],
+    "sourceName": "Cloudflare",
+    "does": [
+      "Query Workers logs and traces over a time range",
+      "Read request analytics, error rates and latency",
+      "Investigate a specific error back to the request that caused it"
+    ]
+  },
+  {
+    "kind": "connector",
+    "name": "Cloudflare Bindings",
+    "purpose": "Manage Workers, KV, R2 and D1.",
+    "url": "https://bindings.mcp.cloudflare.com/mcp",
+    "category": "Developer",
+    "integrations": [
+      "Cloudflare"
+    ],
+    "sourceName": "Cloudflare",
+    "does": [
+      "Create and manage Workers, and read their config",
+      "Read and write KV namespace values",
+      "Manage R2 buckets and objects",
+      "Query D1 databases and manage queues"
+    ]
+  },
+  {
+    "kind": "connector",
+    "name": "Cloudflare Browser",
+    "purpose": "Render a page and read what it returned.",
+    "url": "https://browser.mcp.cloudflare.com/mcp",
+    "category": "Developer",
+    "integrations": [
+      "Cloudflare"
+    ],
+    "sourceName": "Cloudflare",
+    "does": [
+      "Render a page in a real browser and return its HTML or text",
+      "Get a page as clean markdown for a bot to read",
+      "Take a screenshot or PDF of a URL",
+      "Scrape structured data from a rendered page"
+    ]
+  },
+  {
+    "kind": "connector",
+    "name": "Cloudflare Radar",
+    "purpose": "Internet traffic, outages and URL scans.",
+    "url": "https://radar.mcp.cloudflare.com/mcp",
+    "category": "Developer",
+    "integrations": [
+      "Cloudflare"
+    ],
+    "sourceName": "Cloudflare",
+    "does": [
+      "Look up internet traffic trends by country, network or protocol",
+      "Check for outages and BGP or DNS anomalies",
+      "Scan a URL and report what it does and whether it looks malicious",
+      "Read AS, IP and domain intelligence"
+    ]
+  },
+  {
+    "kind": "connector",
+    "name": "Atlassian",
+    "purpose": "Jira, Confluence, Jira Service Management and Bitbucket.",
+    "url": "https://mcp.atlassian.com/v1/mcp/authv2",
+    "category": "Project",
+    "integrations": [
+      "Jira",
+      "Confluence",
+      "Bitbucket"
+    ],
+    "sourceName": "Atlassian",
+    "does": [
+      "Search, read and create Jira issues across projects",
+      "Update fields, transition status, assign and comment",
+      "Read and write Confluence pages and spaces",
+      "Work Jira Service Management requests and queues",
+      "Browse Bitbucket repositories and pull requests"
+    ]
+  },
+  {
+    "kind": "connector",
+    "name": "Slack",
+    "purpose": "Read and send messages in your workspace.",
+    "url": "https://mcp.slack.com/mcp",
+    "category": "Project",
+    "integrations": [
+      "Slack"
+    ],
+    "sourceName": "Slack",
+    "does": [
+      "Search messages across channels you can see",
+      "Read channel and thread history",
+      "Post messages, reply in thread and add reactions",
+      "List channels, users and who is in what"
+    ]
+  },
+  {
+    "kind": "connector",
+    "name": "Notion",
+    "purpose": "Search, read and write pages and databases.",
+    "url": "https://mcp.notion.com/mcp",
+    "category": "Project",
+    "integrations": [
+      "Notion"
+    ],
+    "sourceName": "Notion",
+    "does": [
+      "Search pages and databases",
+      "Read a page's full content, including nested blocks",
+      "Create pages and append content to them",
+      "Query a database with filters and sorts, and update records"
+    ]
+  },
+  {
+    "kind": "connector",
+    "name": "Linear",
+    "purpose": "Read and file issues, projects and cycles.",
+    "url": "https://mcp.linear.app/mcp",
+    "category": "Project",
+    "integrations": [
+      "Linear"
+    ],
+    "sourceName": "Linear",
+    "does": [
+      "Search and read issues, with their state and history",
+      "Create issues, and update title, description, labels and estimates",
+      "Move issues between states, cycles and projects",
+      "Read teams, projects and roadmaps, and comment on issues"
+    ]
+  },
+  {
+    "kind": "connector",
+    "name": "Asana",
+    "purpose": "Read and update tasks and projects.",
+    "url": "https://mcp.asana.com/sse",
+    "category": "Project",
+    "integrations": [
+      "Asana"
+    ],
+    "sourceName": "Asana",
+    "does": [
+      "Search and list tasks, projects and portfolios",
+      "Create tasks and subtasks",
+      "Set assignee, due date, section and custom fields",
+      "Comment on tasks and read their history"
+    ]
+  },
+  {
+    "kind": "connector",
+    "name": "monday.com",
+    "purpose": "Read and update boards and items.",
+    "url": "https://mcp.monday.com/sse",
+    "category": "Project",
+    "integrations": [
+      "monday.com"
+    ],
+    "sourceName": "monday.com",
+    "does": [
+      "Read boards, groups and items",
+      "Create items and update any column value",
+      "Move items between groups and boards",
+      "Read and post updates on an item"
+    ]
+  },
+  {
+    "kind": "connector",
+    "name": "Fireflies",
+    "purpose": "Search meeting transcripts and summaries.",
+    "url": "https://api.fireflies.ai/mcp",
+    "category": "Project",
+    "integrations": [
+      "Fireflies"
+    ],
+    "sourceName": "Fireflies",
+    "does": [
+      "Search across your meeting transcripts",
+      "Read a full transcript, with speakers and timestamps",
+      "Pull the summary, action items and highlights from a meeting",
+      "List recent meetings and who attended"
+    ]
+  },
+  {
+    "kind": "connector",
+    "name": "Figma",
+    "purpose": "Read designs, components and dev-mode specs.",
+    "url": "https://mcp.figma.com/mcp",
+    "category": "Design",
+    "integrations": [
+      "Figma"
+    ],
+    "sourceName": "Figma",
+    "does": [
+      "Read a file's pages, frames, layers and components",
+      "Get design specs: sizes, spacing, colours and variables",
+      "Export images of any frame or component",
+      "Read comments left on a design"
+    ]
+  },
+  {
+    "kind": "connector",
+    "name": "Canva",
+    "purpose": "Find, create and export designs.",
+    "url": "https://mcp.canva.com/mcp",
+    "category": "Design",
+    "integrations": [
+      "Canva"
+    ],
+    "sourceName": "Canva",
+    "does": [
+      "Search your designs and folders",
+      "Create a design from a template",
+      "Export a design to PNG, PDF or other formats",
+      "Read and use brand kit assets"
+    ]
+  },
+  {
+    "kind": "connector",
+    "name": "Webflow",
+    "purpose": "Read and edit site content and CMS items.",
+    "url": "https://mcp.webflow.com/sse",
+    "category": "Design",
+    "integrations": [
+      "Webflow"
+    ],
+    "sourceName": "Webflow",
+    "does": [
+      "Read and update CMS collections and their items",
+      "Publish a site or specific pages",
+      "Read page content, SEO settings and metadata",
+      "Read form submissions"
+    ]
+  },
+  {
+    "kind": "connector",
+    "name": "Wix",
+    "purpose": "Manage site content, products and bookings.",
+    "url": "https://mcp.wix.com/sse",
+    "category": "Design",
+    "integrations": [
+      "Wix"
+    ],
+    "sourceName": "Wix",
+    "does": [
+      "Read and edit site pages and content",
+      "Manage store products, orders and inventory",
+      "Read and create bookings and appointments",
+      "Search contacts and CRM records"
+    ]
+  },
+  {
+    "kind": "connector",
+    "name": "Stripe",
+    "purpose": "Look up customers, payments and invoices.",
+    "url": "https://mcp.stripe.com",
+    "category": "Business",
+    "integrations": [
+      "Stripe"
+    ],
+    "sourceName": "Stripe",
+    "does": [
+      "Look up customers, subscriptions and their billing history",
+      "Read payments, invoices, refunds and disputes",
+      "Create invoices and payment links",
+      "Read balance, payouts and upcoming charges"
+    ]
+  },
+  {
+    "kind": "connector",
+    "name": "PayPal",
+    "purpose": "Invoices, orders, payments and disputes.",
+    "url": "https://mcp.paypal.com/mcp",
+    "category": "Business",
+    "integrations": [
+      "PayPal"
+    ],
+    "sourceName": "PayPal",
+    "does": [
+      "Create, send and track invoices",
+      "Look up orders, payments and refunds",
+      "Read transaction history and balances",
+      "Read and respond to disputes"
+    ]
+  },
+  {
+    "kind": "connector",
+    "name": "Square",
+    "purpose": "Catalog, orders, payments and customers.",
+    "url": "https://mcp.squareup.com/sse",
+    "category": "Business",
+    "integrations": [
+      "Square"
+    ],
+    "sourceName": "Square",
+    "does": [
+      "Read and edit the product catalog",
+      "Look up orders, payments and refunds",
+      "Manage customers and their profiles",
+      "Check inventory counts and read sales reports"
+    ]
+  },
+  {
+    "kind": "connector",
+    "name": "HubSpot",
+    "purpose": "Read and update CRM contacts, deals and companies.",
+    "url": "https://mcp.hubspot.com/anthropic",
+    "category": "Business",
+    "integrations": [
+      "HubSpot"
+    ],
+    "sourceName": "HubSpot",
+    "does": [
+      "Search contacts, companies, deals and tickets",
+      "Create and update CRM records and their properties",
+      "Move deals through pipeline stages",
+      "Read and log engagements: emails, calls and notes"
+    ]
+  },
+  {
+    "kind": "connector",
+    "name": "Box",
+    "purpose": "Search, read and manage files.",
+    "url": "https://mcp.box.com/",
+    "category": "Storage",
+    "integrations": [
+      "Box"
+    ],
+    "sourceName": "Box",
+    "does": [
+      "Search files and folders",
+      "Read a file's contents",
+      "Upload, update, copy and move files",
+      "Manage shared links, collaborators and metadata"
+    ]
+  },
+  {
+    "kind": "connector",
+    "name": "Dropbox",
+    "purpose": "Search, read and share files.",
+    "url": "https://mcp.dropbox.com/mcp",
+    "category": "Storage",
+    "integrations": [
+      "Dropbox"
+    ],
+    "sourceName": "Dropbox",
+    "does": [
+      "Search files and folders",
+      "Read a file's contents",
+      "Upload, move and delete files",
+      "Create and manage shared links"
+    ]
+  },
+  {
+    "kind": "connector",
+    "name": "Airtable",
+    "purpose": "Read and write bases, tables and records.",
+    "url": "https://mcp.airtable.com/mcp",
+    "category": "Storage",
+    "integrations": [
+      "Airtable"
+    ],
+    "sourceName": "Airtable",
+    "does": [
+      "List bases, tables and their field schema",
+      "Read records, with filters and sorts",
+      "Create and update records",
+      "Read views and linked-record relationships"
+    ]
+  },
+  {
+    "kind": "connector",
+    "name": "Context7",
+    "purpose": "Up-to-date documentation for libraries and frameworks.",
+    "url": "https://mcp.context7.com/mcp",
+    "category": "Reference",
+    "integrations": [
+      "Context7"
+    ],
+    "sourceName": "Context7",
+    "openAccess": true,
+    "does": [
+      "Look up current documentation for a library or framework by name",
+      "Pull version-specific API reference straight into a bot's context",
+      "Get working code examples rather than a model's stale memory"
+    ]
+  },
+  {
+    "kind": "connector",
+    "name": "DeepWiki",
+    "purpose": "Ask questions about any public GitHub repository.",
+    "url": "https://mcp.deepwiki.com/mcp",
+    "category": "Reference",
+    "integrations": [
+      "DeepWiki",
+      "GitHub"
+    ],
+    "sourceName": "DeepWiki",
+    "openAccess": true,
+    "does": [
+      "Ask plain questions about any public GitHub repository",
+      "Get an explanation of a project's architecture and modules",
+      "Find where something is implemented and how the pieces connect"
+    ]
+  },
+  {
+    "kind": "connector",
+    "name": "Hugging Face",
+    "purpose": "Search models, datasets, papers and Spaces.",
+    "url": "https://huggingface.co/mcp",
+    "category": "Reference",
+    "integrations": [
+      "Hugging Face"
+    ],
+    "sourceName": "Hugging",
+    "openAccess": true,
+    "does": [
+      "Search models, datasets, Spaces and papers",
+      "Read model cards, licences and dataset descriptions",
+      "Compare models by task, size, downloads and trend"
+    ]
+  },
+  {
+    "kind": "connector",
+    "name": "Cloudflare Docs",
+    "purpose": "Search Cloudflare's own documentation.",
+    "url": "https://docs.mcp.cloudflare.com/mcp",
+    "category": "Reference",
+    "integrations": [
+      "Cloudflare"
+    ],
+    "sourceName": "Cloudflare",
+    "openAccess": true,
+    "does": [
+      "Search Cloudflare's documentation and get the relevant passages",
+      "Look up Workers, DNS, R2, D1, Pages and Zero Trust reference",
+      "Get current syntax and limits rather than a model's recollection"
+    ]
+  },
+  {
+    "kind": "connector",
+    "name": "Globalping",
+    "purpose": "Run ping, traceroute and DNS from around the world.",
+    "url": "https://mcp.globalping.dev/sse",
+    "category": "Reference",
+    "integrations": [
+      "Globalping"
+    ],
+    "sourceName": "Globalping",
+    "does": [
+      "Run ping, traceroute, DNS and HTTP checks from probes worldwide",
+      "Compare results by country, continent or network",
+      "Tell a regional outage apart from a problem at your end"
+    ]
+  }
+]

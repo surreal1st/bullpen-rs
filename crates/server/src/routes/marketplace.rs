@@ -1,8 +1,8 @@
 //! Marketplace HTTP routes — port of `app.ts` marketplace section (templates +
-//! install first; plugins shelf fills in S10-07).
+//! install, plugins shelf, bot directory).
 
 use axum::body::Bytes;
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -13,24 +13,49 @@ use std::collections::HashSet;
 
 use crate::AppState;
 use crate::catalogue::{
-    BOT_DIRECTORY_URL, MarketplaceCard, card_to_offering, fetch_bot_cards, template_cards,
-    templates_dir,
+    BOT_DIRECTORY_URL, MarketplaceCard, built_in_plugin_cards, card_to_offering, fetch_bot_cards,
+    template_cards, templates_dir,
 };
 use crate::marketplace::{describe_install, install_bot, install_open_markdown};
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/marketplace/plugins", get(list_plugins))
+        .route("/api/marketplace/plugins/{name}/detail", get(plugin_detail))
         .route("/api/marketplace/bots", get(list_bots))
         .route("/api/marketplace/templates", get(list_templates))
         .route("/api/marketplace/install", post(install_card))
 }
 
 async fn list_plugins() -> impl IntoResponse {
+    let cards = built_in_plugin_cards();
     Json(json!({
         "ok": true,
-        "cards": [],
+        "cards": cards,
     }))
+}
+
+async fn plugin_detail(Path(name): Path<String>) -> impl IntoResponse {
+    let Some(card) = built_in_plugin_cards()
+        .into_iter()
+        .find(|c| c.kind == "connector" && c.name == name)
+    else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "no such plugin" })),
+        )
+            .into_response();
+    };
+    let mut body = json!({
+        "name": card.name,
+        "url": card.connector_url,
+        "openAccess": card.open_access.unwrap_or(false),
+        "needsAuth": card.open_access != Some(true),
+    });
+    if let Some(does) = &card.does {
+        body["does"] = json!(does);
+    }
+    Json(body).into_response()
 }
 
 async fn list_bots(State(state): State<AppState>) -> impl IntoResponse {
