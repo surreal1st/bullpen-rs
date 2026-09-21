@@ -24,6 +24,7 @@ pub mod oauth;
 pub mod observations;
 pub mod permissions;
 pub mod prompt;
+pub mod push;
 pub mod repo;
 mod rooms;
 mod routes;
@@ -426,6 +427,7 @@ impl AppState {
             tracing::error!("failed to ensure bots.repo column exists: {err}");
         }
         let db = Arc::new(Mutex::new(db));
+        let push_db = Arc::clone(&db);
         let desktop_states = Arc::new(observations::DesktopStateRegistry::new());
         let observations = Arc::new(observations::ObservationRegistry::new());
         // S6L-02: threaded through so a `with_sandbox` test double (or a
@@ -493,6 +495,10 @@ impl AppState {
         // as TS's `onRunDone`; `settle_goal_run` itself no-ops for a run
         // whose `goal_id` is null, so an ordinary chat/routine/room run
         // costs one no-op lookup here.
+        state.runs.set_badger(move |alert| {
+            push::spawn_badge_update(Arc::clone(&push_db), alert);
+        });
+
         let goal_state = state.clone();
         state
             .runs

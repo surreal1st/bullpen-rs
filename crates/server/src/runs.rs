@@ -283,6 +283,7 @@ pub(crate) enum Outcome {
 /// Fired once a run settles. Aliased so the `RunManager` field below does
 /// not trip clippy's `type_complexity`.
 type OnRunDone = Box<dyn Fn(&str, &str, &str) + Send + Sync>;
+type Badger = Box<dyn Fn(Option<crate::push::PushAlert>) + Send + Sync>;
 
 /// S7-04: MCP catalogue + transport wired from `AppState` into runs.
 pub struct ConnectorHooks {
@@ -339,6 +340,9 @@ pub struct RunManager {
     /// Fired once a run settles, answered or failed alike. `None` until a
     /// caller wires one in - S1-06 sets this to chain a room round.
     on_run_done: Mutex<Option<OnRunDone>>,
+    /// S11-06: pushes the attention count to registered phones. Wired in
+    /// `AppState::build` when APNs is configured; a no-op until then.
+    badger: Mutex<Option<Badger>>,
     /// What `message_bot` calls when it posts into a room. `None` until
     /// S1-06 sets it.
     start_room_turn: RoomHook,
@@ -701,6 +705,7 @@ impl RunManager {
             stopping: Mutex::new(HashSet::new()),
             interjections: Mutex::new(HashMap::new()),
             on_run_done: Mutex::new(None),
+            badger: Mutex::new(None),
             start_room_turn: Arc::new(Mutex::new(None)),
             backlog_ttl,
             db_path: Mutex::new(":memory:".to_string()),
@@ -747,6 +752,21 @@ impl RunManager {
     /// and a failed run, never for a run still going.
     pub fn set_on_run_done(&self, f: impl Fn(&str, &str, &str) + Send + Sync + 'static) {
         *self.on_run_done.lock().expect("on_run_done mutex poisoned") = Some(Box::new(f));
+    }
+
+    /// S11-06: replaced in `AppState::build` to refresh the iOS badge.
+    pub fn set_badger(&self, f: impl Fn(Option<crate::push::PushAlert>) + Send + Sync + 'static) {
+        *self.badger.lock().expect("badger mutex poisoned") = Some(Box::new(f));
+    }
+
+    pub fn nudge_badge(&self, alert: Option<crate::push::PushAlert>) {
+        if let Some(f) = self.badger.lock().expect("badger mutex poisoned").as_ref() {
+            f(alert);
+        }
+    }
+
+    fn update_badge(&self, alert: Option<crate::push::PushAlert>) {
+        self.nudge_badge(alert);
     }
 
     pub fn catalog(&self) -> Arc<dyn Catalog> {
@@ -2984,6 +3004,23 @@ were doing unless he changed it."
                 },
             );
         } else if let Some(saved_id) = saved_id {
+            if !state.text.is_empty() {
+                let bot_name: Option<String> = {
+                    let db = self.db();
+                    db.conn()
+                        .query_row(
+                            "SELECT name FROM bots WHERE id = ?1",
+                            rusqlite::params![bot_id],
+                            |row| row.get(0),
+                        )
+                        .optional()
+                        .unwrap_or_default()
+                };
+                self.update_badge(Some(crate::push::PushAlert {
+                    title: bot_name.unwrap_or_else(|| bot_id.to_string()),
+                    body: store::first_line(&state.text),
+                }));
+            }
             self.emit(
                 run_id,
                 RunEvent::Done {
@@ -3147,10 +3184,26 @@ is looking at."
             run_id,
             RunEvent::ApprovalNeeded {
                 approval_id,
-                name: pending.name,
-                args: pending.arguments,
+                name: pending.name.clone(),
+                args: pending.arguments.clone(),
             },
         );
+
+        let bot_name: Option<String> = {
+            let db = self.db();
+            db.conn()
+                .query_row(
+                    "SELECT name FROM bots WHERE id = ?1",
+                    rusqlite::params![bot_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .unwrap_or_default()
+        };
+        self.update_badge(Some(crate::push::PushAlert {
+            title: bot_name.unwrap_or_else(|| bot_id.to_string()),
+            body: format!("wants to run {}", pending.name),
+        }));
     }
 
     /// S2-03/S13b-F: Josh's decision on a waiting run's one pending tool
@@ -3195,6 +3248,7 @@ is looking at."
         // Silently: this is Josh answering something he just asked himself
         // to decide, not news that needs a second alert.
         self.changes.touch(ChangeKind::Approvals);
+        self.update_badge(None);
 
         #[allow(clippy::type_complexity)]
         type RunRow = (

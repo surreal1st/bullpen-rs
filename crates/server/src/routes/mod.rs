@@ -22,6 +22,7 @@ mod marketplace;
 mod memory;
 mod messages;
 mod permissions;
+mod push;
 mod questions;
 mod repo;
 mod rooms;
@@ -56,6 +57,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/auth/status", get(auth_status))
         .route("/api/auth/check", get(auth_check))
         .route("/api/roster", get(roster))
+        .route("/api/attention", get(attention))
         .route("/api/bots/{id}/seen", post(mark_bot_seen))
         .route("/api/bots/{id}/unseen", post(mark_bot_unseen))
         .merge(approvals::router())
@@ -71,6 +73,7 @@ pub fn router() -> Router<AppState> {
         .merge(import::router())
         .merge(marketplace::router())
         .merge(permissions::router())
+        .merge(push::router())
         .merge(repo::router())
         .merge(questions::router())
         .merge(rooms::router())
@@ -205,6 +208,16 @@ struct RosterResponse {
     bots: Vec<shared::RosterEntry>,
 }
 
+async fn attention(
+    State(state): State<AppState>,
+    Extension(scope): Extension<crate::scope::Scope>,
+) -> ApiResult<impl IntoResponse> {
+    let db = state.db();
+    let filter = scope.list_filter();
+    let counts = store::attention::attention_count(&db, Some(&filter))?;
+    Ok(Json(counts))
+}
+
 async fn roster(
     State(state): State<AppState>,
     Extension(scope): Extension<crate::scope::Scope>,
@@ -257,6 +270,7 @@ async fn mark_bot_seen(
         "UPDATE bots SET last_seen_at = ?1 WHERE id = ?2",
         rusqlite::params![now_iso(), id],
     )?;
+    state.runs.nudge_badge(None);
     let filter = scope.list_filter();
     let bots = store::list_roster(&db, Some(&filter))?;
     Ok(Json(json!({ "bots": bots })).into_response())

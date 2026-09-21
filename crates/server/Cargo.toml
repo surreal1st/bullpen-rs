@@ -26,6 +26,7 @@ rusqlite = { workspace = true }
 # `CreditsPort` trait object needs `async-trait` for the same reason
 # `model::Catalog` does.
 reqwest = { workspace = true }
+jsonwebtoken = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
@@ -71,6 +72,7 @@ tempfile = "3"
 # is observed before the production request body has fully entered the socket.
 socket2 = "0.6.5"
 rcgen = { version = "0.14.10", default-features = false, features = ["ring"] }
+pem = "3"
 rustls = { workspace = true }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 # S1-05: `model::fake::FakePort` for the run-manager tests. `fake` is behind

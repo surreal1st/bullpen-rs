@@ -1,6 +1,7 @@
 //! SQLite schema and queries. Same file format as the TS Bullpen's `bullpen.db`:
 //! migrations 1..16 are equivalent, every self-creating table/column is here.
 
+pub mod attention;
 pub mod auth;
 pub mod auto_review;
 pub mod bot_tools;
@@ -14,6 +15,7 @@ pub mod memory;
 pub mod messages;
 mod migrations;
 pub mod oauth;
+pub mod push;
 pub mod questions;
 pub mod rooms;
 pub mod roster;
@@ -221,6 +223,7 @@ impl Db {
         jobs::ensure_job_tables(&db)?;
         users::ensure_user_tables(&db)?;
         share::ensure_share_tokens_table(&db)?;
+        push::ensure_push_table(&db)?;
 
         Ok(db)
     }
