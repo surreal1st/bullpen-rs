@@ -311,6 +311,14 @@ pub fn finish_job(
     Ok(())
 }
 
+pub fn mark_job_notified(db: &Db, job_id: &str) -> rusqlite::Result<()> {
+    db.conn().execute(
+        "UPDATE jobs SET notified = 1 WHERE id = ?1",
+        params![job_id],
+    )?;
+    Ok(())
+}
+
 pub fn append_job_output(db: &Db, job_id: &str, chunk: &str) -> rusqlite::Result<()> {
     let current: Option<String> = db
         .conn()

@@ -13,6 +13,7 @@ mod export_scrub;
 pub mod goals;
 pub mod hooks;
 pub mod import_open;
+pub mod job_runner;
 pub mod judge;
 pub mod marketplace;
 pub mod mcp;

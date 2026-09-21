@@ -82,6 +82,47 @@ impl Default for SandboxConfig {
     }
 }
 
+const JOB_CONTAINER_PREFIX: &str = "bullpen-job-";
+
+/// The container name for a background job. Port of TS `containerFor`.
+pub fn container_for_job(job_id: &str) -> String {
+    format!("{JOB_CONTAINER_PREFIX}{}", sanitize_for_docker(job_id))
+}
+
+/// Where a background command's output lands inside the bot's volume.
+pub fn job_log_path(job_id: &str) -> String {
+    format!("/work/.jobs/{}.log", sanitize_for_docker(job_id))
+}
+
+/// Reads `docker inspect -f "{{.State.Running}} {{.State.ExitCode}}"`.
+pub fn parse_probe(stdout: &str) -> ProbeResult {
+    let text = stdout.trim();
+    let mut parts = text.split_whitespace();
+    let running_text = parts.next();
+    let code_text = parts.next();
+    let running = running_text == Some("true");
+    let parsed_code = code_text.and_then(|c| c.parse::<i32>().ok());
+    ProbeResult {
+        running,
+        exit_code: if running { None } else { parsed_code },
+        detail: text.to_string(),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpawnResult {
+    pub ok: bool,
+    pub handle: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProbeResult {
+    pub running: bool,
+    pub exit_code: Option<i32>,
+    pub detail: String,
+}
+
 /// Returns the volume name for a bot's work directory.
 fn volume_for(bot_id: &str) -> String {
     format!("bullpen-work-{}", sanitize_for_docker(bot_id))
@@ -556,6 +597,159 @@ impl DockerSandbox {
         Self { config, runner }
     }
 
+    /// Whether this sandbox can start detached background commands.
+    pub fn supports_background(&self) -> bool {
+        true
+    }
+
+    /// Runs a shell command with an explicit timeout (used to read job logs).
+    pub async fn exec_with_timeout(
+        &self,
+        bot_id: &str,
+        command: &str,
+        timeout_ms: u64,
+    ) -> ExecResult {
+        let volume = volume_for(bot_id);
+        let name = container_name(bot_id);
+        let mut args = vec!["docker".to_string(), "run".to_string(), "--rm".to_string()];
+        args.extend(isolation_args(&self.config, &name));
+        args.extend(vec![
+            "--mount".to_string(),
+            format!("type=volume,source={},target=/work", volume),
+            "-w".to_string(),
+            "/work".to_string(),
+            "--label".to_string(),
+            format!("bullpen.bot={}", bot_id),
+            self.config.image.clone(),
+            "sh".to_string(),
+            "-c".to_string(),
+            command.to_string(),
+        ]);
+        let timeout = Duration::from_millis(timeout_ms.saturating_add(5_000));
+        match self
+            .runner
+            .run(args, vec![], timeout, self.config.max_output_bytes)
+            .await
+        {
+            Ok((stdout, stderr, exit_code)) => capped(
+                stdout,
+                stderr,
+                exit_code,
+                false,
+                self.config.max_output_bytes,
+            ),
+            Err(RunError::Timeout) => {
+                self.force_remove(&name).await;
+                capped(
+                    String::new(),
+                    String::new(),
+                    124,
+                    true,
+                    self.config.max_output_bytes,
+                )
+            }
+            Err(RunError::Other(err)) => {
+                capped(String::new(), err, 1, false, self.config.max_output_bytes)
+            }
+        }
+    }
+
+    /// Starts a command detached; output goes to a file in the bot's volume.
+    pub async fn spawn(&self, bot_id: &str, job_id: &str, command: &str) -> SpawnResult {
+        let volume = volume_for(bot_id);
+        let handle = container_for_job(job_id);
+        let log = job_log_path(job_id);
+        let mut args = vec!["docker".to_string(), "run".to_string(), "-d".to_string()];
+        args.extend(isolation_args(&self.config, &handle));
+        args.extend(vec![
+            "--mount".to_string(),
+            format!("type=volume,source={},target=/work", volume),
+            "-w".to_string(),
+            "/work".to_string(),
+            "--label".to_string(),
+            format!("bullpen.bot={bot_id}"),
+            "--label".to_string(),
+            format!("bullpen.job={job_id}"),
+            self.config.image.clone(),
+            "sh".to_string(),
+            "-c".to_string(),
+            format!("mkdir -p /work/.jobs && {{ {command} ; }} >{log} 2>&1"),
+        ]);
+        match self
+            .runner
+            .run(
+                args,
+                vec![],
+                Duration::from_secs(30),
+                self.config.max_output_bytes,
+            )
+            .await
+        {
+            Ok((stdout, _stderr, 0)) => SpawnResult {
+                ok: true,
+                handle,
+                detail: stdout.trim().to_string(),
+            },
+            Ok((_, stderr, _)) => SpawnResult {
+                ok: false,
+                handle,
+                detail: stderr.lines().next().unwrap_or("failed").to_string(),
+            },
+            Err(RunError::Timeout) => SpawnResult {
+                ok: false,
+                handle,
+                detail: "timed out starting".to_string(),
+            },
+            Err(RunError::Other(err)) => SpawnResult {
+                ok: false,
+                handle,
+                detail: err,
+            },
+        }
+    }
+
+    pub async fn probe(&self, handle: &str) -> ProbeResult {
+        let args = vec![
+            "docker".to_string(),
+            "inspect".to_string(),
+            "-f".to_string(),
+            "{{.State.Running}} {{.State.ExitCode}}".to_string(),
+            handle.to_string(),
+        ];
+        match self
+            .runner
+            .run(
+                args,
+                vec![],
+                Duration::from_secs(15),
+                self.config.max_output_bytes,
+            )
+            .await
+        {
+            Ok((stdout, _, 0)) => parse_probe(&stdout),
+            Ok((_, stderr, _)) => ProbeResult {
+                running: false,
+                exit_code: None,
+                detail: stderr.lines().next().unwrap_or("gone").to_string(),
+            },
+            Err(RunError::Other(err)) => ProbeResult {
+                running: false,
+                exit_code: None,
+                detail: err,
+            },
+            Err(RunError::Timeout) => ProbeResult {
+                running: false,
+                exit_code: None,
+                detail: "inspect timed out".to_string(),
+            },
+        }
+    }
+
+    pub async fn kill(&self, handle: &str) -> bool {
+        self.force_remove(handle).await;
+        true
+    }
+
     /// F6: best-effort cleanup after our own timeout fires. The docker CLI
     /// process is already reclaimed (`kill_on_drop`), but `--rm` only runs
     /// when the CLI exits cleanly, so the CONTAINER it started is still up
@@ -581,62 +775,8 @@ impl DockerSandbox {
 #[async_trait::async_trait]
 impl Sandbox for DockerSandbox {
     async fn exec(&self, bot_id: &str, command: &str) -> ExecResult {
-        let volume = volume_for(bot_id);
-        let name = container_name(bot_id);
-        let mut args = vec!["docker".to_string(), "run".to_string(), "--rm".to_string()];
-
-        args.extend(isolation_args(&self.config, &name));
-
-        // Volume and working directory
-        args.extend(vec![
-            "--mount".to_string(),
-            format!("type=volume,source={},target=/work", volume),
-            "-w".to_string(),
-            "/work".to_string(),
-            "--label".to_string(),
-            format!("bullpen.bot={}", bot_id),
-        ]);
-
-        // Image and command
-        args.extend(vec![
-            self.config.image.clone(),
-            "sh".to_string(),
-            "-c".to_string(),
-            command.to_string(),
-        ]);
-
-        let timeout = Duration::from_millis(self.config.timeout_ms + 5_000);
-
-        match self
-            .runner
-            .run(args, vec![], timeout, self.config.max_output_bytes)
+        self.exec_with_timeout(bot_id, command, self.config.timeout_ms)
             .await
-        {
-            Ok((stdout, stderr, exit_code)) => capped(
-                stdout,
-                stderr,
-                exit_code,
-                false,
-                self.config.max_output_bytes,
-            ),
-            // F7: timed_out comes ONLY from our own timer via `RunError`
-            // now - never from grepping stderr for the word "timeout",
-            // which both misreported ordinary failures (curl, pytest, npm)
-            // and let a bot forge its own verdict with `echo timeout >&2`.
-            Err(RunError::Timeout) => {
-                self.force_remove(&name).await;
-                capped(
-                    String::new(),
-                    String::new(),
-                    124,
-                    true,
-                    self.config.max_output_bytes,
-                )
-            }
-            Err(RunError::Other(err)) => {
-                capped(String::new(), err, 1, false, self.config.max_output_bytes)
-            }
-        }
     }
 
     async fn read_file(&self, bot_id: &str, path: &str) -> Result<String, String> {

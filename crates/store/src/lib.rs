@@ -47,7 +47,8 @@ pub use conversations::{
 };
 pub use jobs::{
     Job, JobKind, JobStatus, MAX_JOB_OUTPUT, MAX_RUNNING_JOBS, append_job_output, create_job,
-    describe_job, ensure_job_tables, finish_job, get_job, list_jobs, reap_orphaned_jobs,
+    describe_job, ensure_job_tables, finish_job, get_job, list_jobs, mark_job_notified,
+    reap_orphaned_jobs,
 };
 pub use memory::{
     LogEntry, Project, RECALL_TOKEN_BUDGET, Recall, Scope, add_project_member, count_scoped,
