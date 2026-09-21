@@ -2213,3 +2213,195 @@ button.effort-glyph:disabled {
   display: block;
   margin-bottom: 0.25rem;
 }
+
+/* ------------------------------------------------------------- S7-07 */
+/* Connectors settings card — from `bullpen-night/src/client/shell.css`
+   `.conn*` / `.conn-new` (3366-3558), tokens aligned with this file. */
+
+.conn {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  padding: 0.7rem 0.8rem;
+  margin-bottom: 0.6rem;
+}
+
+.conn-top {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.conn-top b {
+  font-size: 0.92rem;
+  font-weight: 640;
+}
+
+.conn-state {
+  margin-left: auto;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--faint);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0.05rem 0.45rem;
+}
+
+.conn-state.is-on {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 40%, transparent);
+}
+
+.conn-url {
+  margin: 0.2rem 0 0;
+  color: var(--faint);
+  font-size: 0.74rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conn-acts {
+  display: flex;
+  gap: 0.4rem;
+  margin-top: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.conn-acts button {
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink);
+  border-radius: 8px;
+  padding: 0.26rem 0.7rem;
+  font: inherit;
+  font-size: 0.79rem;
+  cursor: pointer;
+}
+
+.conn-acts button.primary {
+  background: var(--seam);
+  border-color: var(--seam);
+  color: #17100c;
+  font-weight: 620;
+}
+
+.conn-acts button.danger {
+  color: #f0a58e;
+}
+
+.conn-acts button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.conn-tools {
+  margin-top: 0.6rem;
+  border-top: 1px solid var(--line);
+  padding-top: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  max-height: 14rem;
+  overflow-y: auto;
+}
+
+.conn-tool {
+  display: flex;
+  gap: 0.6rem;
+  align-items: baseline;
+  font-size: 0.78rem;
+}
+
+.conn-tool code {
+  color: #8fd0ff;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  flex: none;
+}
+
+.conn-tool span {
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conn-manual {
+  margin-top: 0.6rem;
+  border: 1px dashed #2b3543;
+  border-radius: var(--radius-sm);
+  padding: 0.6rem 0.7rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.conn-manual p {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.conn-manual b {
+  color: var(--ink);
+}
+
+.conn-redirect {
+  display: block;
+  background: var(--bg);
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  padding: 0.35rem 0.5rem;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 0.76rem;
+  color: #8fd0ff;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+.conn-manual input,
+.conn-new input {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  color: var(--ink);
+  border-radius: 8px;
+  padding: 0.4rem 0.6rem;
+  font: inherit;
+  font-size: 0.84rem;
+}
+
+.conn-manual button,
+.conn-new button {
+  align-self: flex-start;
+  border: 1px solid var(--seam);
+  background: var(--seam);
+  color: #17100c;
+  border-radius: 8px;
+  padding: 0.32rem 0.85rem;
+  font: inherit;
+  font-weight: 620;
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+
+.conn-manual button:disabled,
+.conn-new button:disabled {
+  opacity: 0.5;
+  cursor: default;
+  background: var(--panel);
+  border-color: var(--line);
+  color: var(--muted);
+}
+
+.conn-new {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  border: 1px dashed #2b3543;
+  border-radius: var(--radius);
+  padding: 0.7rem;
+  margin-top: 0.4rem;
+}

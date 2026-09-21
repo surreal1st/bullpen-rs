@@ -25,8 +25,10 @@
 //! already open, so there is nothing new to select.
 
 use crate::api;
+use crate::transport::Request;
 use crate::types::{Bot, SkillSummary};
 use dioxus::prelude::*;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 #[component]
@@ -120,6 +122,7 @@ pub fn EditBotModal(bot: Bot, on_close: EventHandler<()>, on_saved: EventHandler
                         }
                     }
                     SkillsField { bot_id: bot.id.clone() }
+                    BotConnectorsField { bot_id: bot.id.clone() }
                     if let Some(msg) = error.read().clone() {
                         p { class: "notice-inline", "{msg}" }
                     }
@@ -274,6 +277,141 @@ fn SkillsField(bot_id: String) -> Element {
 /// "the server says this bot now has zero skills" and "the request
 /// failed" are different facts, so the empty case must still be `Some`,
 /// never collapse into the same `None` a failure returns.
+/* ------------------------------------------------------------- S7-07 */
+
+#[derive(Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BotConnectorItem {
+    id: String,
+    name: String,
+    url: String,
+    enabled: bool,
+}
+
+#[derive(Deserialize)]
+struct BotConnectorsBody {
+    connectors: Vec<BotConnectorItem>,
+}
+
+#[derive(Serialize)]
+struct BotConnectorToggle {
+    enabled: bool,
+}
+
+async fn fetch_bot_connectors(bot_id: &str) -> Result<Vec<BotConnectorItem>, String> {
+    let url = format!("/api/bots/{bot_id}/connectors");
+    let resp = Request::get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("{url} -> {}", resp.status()));
+    }
+    resp.json::<BotConnectorsBody>()
+        .await
+        .map(|b| b.connectors)
+        .map_err(|e| e.to_string())
+}
+
+async fn set_bot_connector(bot_id: &str, connector_id: &str, enabled: bool) -> Result<(), String> {
+    let url = format!("/api/bots/{bot_id}/connectors/{connector_id}");
+    let resp = Request::put(&url)
+        .json(&BotConnectorToggle { enabled })
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if resp.ok() {
+        Ok(())
+    } else {
+        Err(format!("{url} -> {}", resp.status()))
+    }
+}
+
+/// S7-07: which connectors this bot may use — port of `BotConnectors.tsx`.
+#[component]
+fn BotConnectorsField(bot_id: String) -> Element {
+    let mut all = use_signal(|| None::<Vec<BotConnectorItem>>);
+    let mut busy = use_signal(|| None::<String>);
+    let mut toggle_error = use_signal(|| None::<String>);
+
+    use_effect({
+        let bot_id = bot_id.clone();
+        move || {
+            let bot_id = bot_id.clone();
+            spawn(async move {
+                match fetch_bot_connectors(&bot_id).await {
+                    Ok(list) => all.set(Some(list)),
+                    Err(_) => all.set(Some(Vec::new())),
+                }
+            });
+        }
+    });
+
+    let toggle = {
+        let bot_id = bot_id.clone();
+        move |connector_id: String, next: bool| {
+            let bot_id = bot_id.clone();
+            busy.set(Some(connector_id.clone()));
+            toggle_error.set(None);
+            spawn(async move {
+                if set_bot_connector(&bot_id, &connector_id, next)
+                    .await
+                    .is_ok()
+                {
+                    if let Ok(list) = fetch_bot_connectors(&bot_id).await {
+                        all.set(Some(list));
+                    }
+                } else {
+                    toggle_error.set(Some("Could not update that connector.".to_string()));
+                }
+                busy.set(None);
+            });
+        }
+    };
+
+    let list = all.read().clone();
+    let busy_id = busy.read().clone();
+
+    rsx! {
+        div { class: "field",
+            span { "Connectors" }
+            small { "When enabled, this bot can call that connector's MCP tools during a run." }
+
+            if let Some(err) = toggle_error.read().clone() {
+                p { class: "notice-inline", "{err}" }
+            }
+
+            if list.is_none() {
+                p { class: "muted", "Loading connectors…" }
+            }
+
+            if let Some(list) = list {
+                if list.is_empty() {
+                    p { class: "muted", "No connectors added yet. Add one under Settings \u{2192} Connectors." }
+                } else {
+                    div { class: "botskill-list",
+                        for connector in list.iter() {
+                            label { key: "{connector.id}", class: "botskill",
+                                input {
+                                    r#type: "checkbox",
+                                    checked: connector.enabled,
+                                    disabled: busy_id.as_deref() == Some(connector.id.as_str()),
+                                    onchange: {
+                                        let mut toggle = toggle.clone();
+                                        let id = connector.id.clone();
+                                        let next = !connector.enabled;
+                                        move |_| toggle(id.clone(), next)
+                                    },
+                                }
+                                span { class: "botskill-name", "{connector.name}" }
+                                span { class: "botskill-when", "{connector.url}" }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn skill_set_after_response(response: Result<Vec<String>, String>) -> Option<HashSet<String>> {
     match response {
         Ok(names) => Some(names.into_iter().collect()),

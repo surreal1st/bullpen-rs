@@ -8,6 +8,7 @@
 //! have no bullpen-rs equivalent yet).
 
 use crate::api;
+use crate::connectors_card::ConnectorsCard;
 use crate::marketplace::MarketplaceModal;
 use crate::message_time::format_time;
 use crate::model_chip::short_model;
@@ -116,9 +117,10 @@ fn GeneralSettings(
         section { class: "stg-group",
             h3 { class: "stg-group-h", "Connectors" }
             div { class: "stg-card stg-card-loose",
+                ConnectorsCard {}
                 SlackCard {}
                 div { class: "stg-row",
-                    p { class: "stg-hint", "Install starter bots from the marketplace." }
+                    p { class: "stg-hint", "Install starter bots and connector packs from the marketplace." }
                     button {
                         class: "stg-btn",
                         onclick: move |_| {

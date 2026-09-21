@@ -5,6 +5,7 @@ mod approvals;
 mod avatar;
 mod bubble;
 mod composer;
+mod connectors_card;
 // S13a-02: only compiled with `--features desktop` (mutually exclusive with
 // the default `web` feature in practice - see that module's doc).
 #[cfg(feature = "desktop")]
