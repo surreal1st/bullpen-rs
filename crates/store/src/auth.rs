@@ -161,6 +161,11 @@ pub fn set_password(db: &Db, password: &str) -> rusqlite::Result<()> {
 /// been running into silence for `ABSENCE_DAYS`.
 pub const LAST_LOGIN_KEY: &str = "auth.last_login_at";
 
+/// Last real sign-in time (`create_session` with `stamp_last_login`), or none.
+pub fn last_login_at(db: &Db) -> rusqlite::Result<Option<String>> {
+    db.settings_get(LAST_LOGIN_KEY)
+}
+
 /// Options for `create_session`. Mirrors TS `createSession`'s second argument.
 #[derive(Debug, Clone, Default)]
 pub struct CreateSessionOpts {

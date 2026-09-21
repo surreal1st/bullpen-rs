@@ -4,6 +4,7 @@
 pub mod attention;
 pub mod auth;
 pub mod auto_review;
+pub mod away;
 pub mod bot_tools;
 pub mod bots;
 pub mod connectors;
@@ -224,6 +225,7 @@ impl Db {
         users::ensure_user_tables(&db)?;
         share::ensure_share_tokens_table(&db)?;
         push::ensure_push_table(&db)?;
+        away::ensure_away_tables(&db)?;
 
         Ok(db)
     }

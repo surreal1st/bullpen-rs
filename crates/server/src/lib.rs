@@ -3,6 +3,7 @@
 
 pub mod approvals;
 mod auth;
+pub mod away;
 pub mod catalogue;
 pub mod changes;
 pub mod delegate;

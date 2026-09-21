@@ -765,6 +765,10 @@ impl RunManager {
         }
     }
 
+    pub fn model_port(&self) -> Arc<dyn ModelPort> {
+        Arc::clone(&self.port)
+    }
+
     fn update_badge(&self, alert: Option<crate::push::PushAlert>) {
         self.nudge_badge(alert);
     }
