@@ -54,17 +54,18 @@ pub async fn run(
         return ToolOutcome::new(DEPTH_REFUSAL, None);
     }
     let parsed: Args = serde_json::from_str(args).unwrap_or_default();
-    let kind = parsed.kind.trim();
-    if helpers::helper_spec(kind).is_none() {
+    let model_kind = parsed.kind.trim();
+    if helpers::helper_spec(model_kind).is_none() {
         let names = valid_kind_names().join(", ");
         return ToolOutcome::new(format!("A helper's kind must be one of: {names}."), None);
     }
+    let kind = crate::jev::gate_helper_kind(parsed.brief.trim(), model_kind).await;
     let result = helpers::run_helper(
         manager,
         caller_bot_id,
         trigger,
         room,
-        kind,
+        &kind,
         parsed.brief.trim(),
         delegation_depth,
     )

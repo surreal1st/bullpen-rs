@@ -294,10 +294,10 @@ async fn run_grep(
     let result = sandbox.exec(bot_id, &command).await;
     let out = result.stdout.trim();
     if out.is_empty() {
-        "No matches.".to_string()
-    } else {
-        fence_tool_output(out)
+        return "No matches.".to_string();
     }
+    let reranked = crate::jev::rerank_grep_output(pattern, out).await;
+    fence_tool_output(reranked.trim())
 }
 
 async fn run_run(sandbox: &dyn Sandbox, bot_id: &str, input: &serde_json::Value) -> String {

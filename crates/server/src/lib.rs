@@ -15,6 +15,7 @@ pub mod goals;
 pub mod helpers;
 pub mod hooks;
 pub mod import_open;
+pub mod jev;
 pub mod job_runner;
 pub mod judge;
 pub mod marketplace;
