@@ -6,9 +6,9 @@
 //! `hashPassword`/`verifyPassword`/`setPassword`) and
 //! `create_session`/`destroy_session` (port of `auth.ts:121-147,162-164`).
 //!
-//! No `user_id` column exists on `sessions` here (S1 has no multi-user scope
-//! yet - see `crates/server/src/routes/messages.rs`'s `find_bot` doc), so
-//! `create_session` carries none, unlike the TS version accounts grew onto it.
+//! S11-01: `sessions.user_id` is self-created by `users::ensure_user_tables`.
+//! NULL means the owner everywhere (`users::adopt_owner` backfills on first
+//! open). Member sessions set an explicit id in S11-03 invite claim.
 
 use crate::Db;
 use chrono::{DateTime, Duration, Utc};
@@ -157,26 +157,54 @@ pub fn set_password(db: &Db, password: &str) -> rusqlite::Result<()> {
 /// been running into silence for `ABSENCE_DAYS`.
 pub const LAST_LOGIN_KEY: &str = "auth.last_login_at";
 
-/// Mints a new session token and writes its row. Mirrors the TS
-/// `createSession` (minus the `userId`/`stampLastLogin` half - no scope
-/// concept exists yet, see the module doc).
-///
-/// S5-03: also stamps `LAST_LOGIN_KEY`, unconditionally - the TS version
-/// skips this when `session.stampLastLogin === false`, which only a MEMBER
-/// sign-in (S5b - no such scope exists here yet, per the module doc above)
-/// ever passes. Until that scope exists, every session created here IS
-/// Josh signing in, so every one of them should stamp it, same as the TS
-/// default path.
+/// Options for `create_session`. Mirrors TS `createSession`'s second argument.
+#[derive(Debug, Clone, Default)]
+pub struct CreateSessionOpts {
+    pub user_id: Option<String>,
+    /// When false, do not stamp `LAST_LOGIN_KEY` (member invite claim in S11-03).
+    pub stamp_last_login: bool,
+}
+
+impl CreateSessionOpts {
+    pub fn owner_sign_in(user_id: String) -> Self {
+        Self {
+            user_id: Some(user_id),
+            stamp_last_login: true,
+        }
+    }
+}
+
+/// Mints a new session token and writes its row. Mirrors the TS `createSession`.
 pub fn create_session(db: &Db) -> rusqlite::Result<String> {
+    create_session_with(db, CreateSessionOpts::default())
+}
+
+pub fn create_session_with(db: &Db, opts: CreateSessionOpts) -> rusqlite::Result<String> {
     let token = hex_encode(&random_bytes(32));
     let now = Utc::now();
     let expires = now + Duration::days(SESSION_DAYS);
     db.conn().execute(
-        "INSERT INTO sessions (token, created_at, expires_at) VALUES (?1, ?2, ?3)",
-        params![token, now.to_rfc3339(), expires.to_rfc3339()],
+        "INSERT INTO sessions (token, created_at, expires_at, user_id) VALUES (?1, ?2, ?3, ?4)",
+        params![token, now.to_rfc3339(), expires.to_rfc3339(), opts.user_id],
     )?;
-    db.settings_set(LAST_LOGIN_KEY, &now.to_rfc3339())?;
+    if opts.stamp_last_login {
+        db.settings_set(LAST_LOGIN_KEY, &now.to_rfc3339())?;
+    }
     Ok(token)
+}
+
+/// The user id stored on a session row, if any. Does not validate expiry.
+pub fn session_user_id(db: &Db, token: &str) -> rusqlite::Result<Option<String>> {
+    if token.is_empty() {
+        return Ok(None);
+    }
+    db.conn()
+        .query_row(
+            "SELECT user_id FROM sessions WHERE token = ?1",
+            params![token],
+            |row| row.get(0),
+        )
+        .optional()
 }
 
 /// Ends one session (logout). A no-op if `token` names no row. Mirrors the

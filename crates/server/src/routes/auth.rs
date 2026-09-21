@@ -74,7 +74,8 @@ async fn login(
     state.login_throttle.clear();
     let token = {
         let db = state.db();
-        store::create_session(&db)?
+        let owner_id = store::adopt_owner(&db)?.unwrap_or_else(|| store::OWNER_ID.to_string());
+        store::create_session_with(&db, store::CreateSessionOpts::owner_sign_in(owner_id))?
     };
 
     // Resume routines that were paused for absence when Josh signs in.

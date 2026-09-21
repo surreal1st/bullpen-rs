@@ -19,11 +19,12 @@ pub mod roster;
 pub mod routines;
 pub mod skills;
 pub mod slack;
+pub mod users;
 pub mod vms;
 
 pub use auth::{
-    PasswordRecord, create_session, destroy_session, is_configured, password_record, session_valid,
-    set_password, verify_password,
+    CreateSessionOpts, PasswordRecord, create_session, create_session_with, destroy_session,
+    is_configured, password_record, session_user_id, session_valid, set_password, verify_password,
 };
 pub use bot_tools::{
     BotMadeToolRow, LiveToolRow, ToolExampleResult, ToolProposal, ensure_bot_tool_tables,
@@ -69,6 +70,9 @@ pub use routines::{
     clear_routine_hook, create_routine, delete_routine, due_routines, list_routines,
     mint_routine_hook, record_routine_run, resume_routine, routine_by_id, routine_row_by_id,
     routine_runs, set_routine_active, update_routine,
+};
+pub use users::{
+    INVITE_DAYS, OWNER_ID, User, UserRole, adopt_owner, ensure_user_tables, get_user, owner_id,
 };
 
 use rusqlite::{Connection, OptionalExtension, params};
@@ -210,6 +214,7 @@ impl Db {
         vms::ensure_vm_tables(&db)?;
         bot_tools::ensure_bot_tool_tables(&db)?;
         jobs::ensure_job_tables(&db)?;
+        users::ensure_user_tables(&db)?;
 
         Ok(db)
     }
