@@ -133,11 +133,10 @@ fn provider_token_reuses_within_ttl() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn send_to_all_without_key_returns_not_configured() {
-    {
-        let _lock = APNS_ENV_LOCK.lock().unwrap();
-        clear_apns_env();
-    }
+    let _lock = APNS_ENV_LOCK.lock().unwrap();
+    clear_apns_env();
     let db = Arc::new(Mutex::new(Db::open(":memory:").expect("open")));
     push::register_device(&db.lock().unwrap(), TOKEN_A, PushEnvironment::Sandbox);
     let transport = Recorder {
@@ -155,14 +154,13 @@ async fn send_to_all_without_key_returns_not_configured() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn send_to_all_routes_sandbox_and_production_hosts() {
     let pem = ec_pem();
     let (_dir, path) = write_apns_key(&pem);
-    {
-        let _lock = APNS_ENV_LOCK.lock().unwrap();
-        clear_apns_env();
-        set_apns_env(&path);
-    }
+    let _lock = APNS_ENV_LOCK.lock().unwrap();
+    clear_apns_env();
+    set_apns_env(&path);
 
     let db = Arc::new(Mutex::new(Db::open(":memory:").expect("open")));
     push::register_device(&db.lock().unwrap(), TOKEN_A, PushEnvironment::Sandbox);
@@ -179,21 +177,17 @@ async fn send_to_all_routes_sandbox_and_production_hosts() {
     let host_b = calls.iter().find(|c| c.token == TOKEN_B).expect("b");
     assert!(host_a.host.contains("sandbox"));
     assert!(!host_b.host.contains("sandbox"));
-    {
-        let _lock = APNS_ENV_LOCK.lock().unwrap();
-        clear_apns_env();
-    }
+    clear_apns_env();
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn send_to_all_uses_alert_push_type_without_alert() {
     let pem = ec_pem();
     let (_dir, path) = write_apns_key(&pem);
-    {
-        let _lock = APNS_ENV_LOCK.lock().unwrap();
-        clear_apns_env();
-        set_apns_env(&path);
-    }
+    let _lock = APNS_ENV_LOCK.lock().unwrap();
+    clear_apns_env();
+    set_apns_env(&path);
 
     let db = Arc::new(Mutex::new(Db::open(":memory:").expect("open")));
     push::register_device(&db.lock().unwrap(), TOKEN_A, PushEnvironment::Sandbox);
@@ -211,21 +205,17 @@ async fn send_to_all_uses_alert_push_type_without_alert() {
         .find(|(k, _)| k == "apns-push-type")
         .map(|(_, v)| v.as_str());
     assert_eq!(push_type, Some("alert"));
-    {
-        let _lock = APNS_ENV_LOCK.lock().unwrap();
-        clear_apns_env();
-    }
+    clear_apns_env();
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn send_to_all_prunes_dead_devices() {
     let pem = ec_pem();
     let (_dir, path) = write_apns_key(&pem);
-    {
-        let _lock = APNS_ENV_LOCK.lock().unwrap();
-        clear_apns_env();
-        set_apns_env(&path);
-    }
+    let _lock = APNS_ENV_LOCK.lock().unwrap();
+    clear_apns_env();
+    set_apns_env(&path);
 
     let db = Arc::new(Mutex::new(Db::open(":memory:").expect("open")));
     push::register_device(&db.lock().unwrap(), TOKEN_A, PushEnvironment::Sandbox);
@@ -249,10 +239,7 @@ async fn send_to_all_prunes_dead_devices() {
         .map(|d| d.token)
         .collect();
     assert_eq!(tokens, vec![TOKEN_B.to_string()]);
-    {
-        let _lock = APNS_ENV_LOCK.lock().unwrap();
-        clear_apns_env();
-    }
+    clear_apns_env();
 }
 
 #[test]
