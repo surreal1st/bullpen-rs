@@ -52,6 +52,7 @@ mod propose_tool;
 mod read_file;
 mod remember;
 mod remember_shared;
+mod repo_tools;
 mod say;
 mod search_memory;
 mod shell;
@@ -437,7 +438,11 @@ fn all_specs() -> Vec<ToolSpec> {
 /// which costs nothing extra as owned strings - noted here as a deviation
 /// from the ticket's literal `Vec<&'static str>` signature.
 pub fn known_tool_names() -> Vec<String> {
-    all_specs().into_iter().map(|spec| spec.name).collect()
+    all_specs()
+        .into_iter()
+        .map(|spec| spec.name)
+        .chain(repo_tools::repo_tool_names())
+        .collect()
 }
 
 /// Builds the S1 toolbox for one bot's run. F2: `trigger`/`room` are the
@@ -479,6 +484,18 @@ pub fn build(params: BuildParams) -> ToolBox {
     let bot_made_specs = crate::bot_tools::approved_tool_specs(&db, db_path.as_str());
     let connector_specs: Vec<ToolSpec> =
         connector_specs_for_bot(&db, &bot_id, connector_hooks.as_ref());
+    let repo_specs: Vec<ToolSpec> = {
+        let db = lock_db(&db);
+        if crate::repo::get_bot_repo(&db, &bot_id)
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            repo_tools::all_repo_specs()
+        } else {
+            vec![]
+        }
+    };
     // F3: `always_on_set()` rides through any `only` narrowing whatever it
     // says (TS `app.ts:5783`) - a routine's phrasing turn narrowed to `[]`
     // must still be able to say something or ask Josh a question, not lose
@@ -494,6 +511,7 @@ pub fn build(params: BuildParams) -> ToolBox {
         .into_iter()
         .chain(bot_made_specs)
         .chain(connector_specs)
+        .chain(repo_specs)
         .filter(|spec| perms.get(spec.name.as_str()).copied() != Some(Decision::Deny))
         .filter(|spec| match (&only, exact_only) {
             (None, _) => true,
@@ -567,6 +585,10 @@ pub fn build(params: BuildParams) -> ToolBox {
                         connector_resources::run_read_resource(&db, &bot_id, &args, hooks.as_ref())
                             .await
                     };
+                    return ToolOutcome::new(text, None);
+                }
+                if name.starts_with("repo_") {
+                    let text = repo_tools::run(&db, sandbox.as_ref(), &bot_id, &name, &args).await;
                     return ToolOutcome::new(text, None);
                 }
                 if let Some((connector_slug, tool_name)) = crate::mcp::split_tool_name(&name) {

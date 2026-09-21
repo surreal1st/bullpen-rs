@@ -60,10 +60,11 @@ pub async fn run(sandbox: &dyn Sandbox, bot_id: &str, args: &str) -> String {
     }
 
     let result = sandbox.exec(bot_id, command).await;
-    format_result(&result)
+    format_exec_result(&result)
 }
 
-fn format_result(result: &ExecResult) -> String {
+/// Shared by `shell` and `repo_run` — same stdout/stderr/exit formatting as TS.
+pub(crate) fn format_exec_result(result: &ExecResult) -> String {
     if result.unavailable {
         // Verbatim S2 text, unfenced - this is not data the sandbox
         // produced, it is this tool refusing to have run at all.

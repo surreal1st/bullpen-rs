@@ -23,6 +23,7 @@ mod memory;
 mod messages;
 mod permissions;
 mod questions;
+mod repo;
 mod rooms;
 mod routines;
 mod runs;
@@ -68,6 +69,7 @@ pub fn router() -> Router<AppState> {
         .merge(import::router())
         .merge(marketplace::router())
         .merge(permissions::router())
+        .merge(repo::router())
         .merge(questions::router())
         .merge(rooms::router())
         .merge(routines::router())

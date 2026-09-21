@@ -15,6 +15,12 @@ pub trait Sandbox: Send + Sync {
     /// Runs a shell command in the bot's own sandbox. Never throws for a failed command.
     async fn exec(&self, bot_id: &str, command: &str) -> ExecResult;
 
+    /// Like [`exec`](Self::exec) with an explicit timeout. Default delegates to `exec`.
+    async fn exec_timeout(&self, bot_id: &str, command: &str, timeout_ms: u64) -> ExecResult {
+        let _ = timeout_ms;
+        self.exec(bot_id, command).await
+    }
+
     /// Reads a file from the bot's `/work` directory.
     async fn read_file(&self, bot_id: &str, path: &str) -> Result<String, String>;
 }
@@ -803,6 +809,10 @@ impl Sandbox for DockerSandbox {
     async fn exec(&self, bot_id: &str, command: &str) -> ExecResult {
         self.exec_with_timeout(bot_id, command, self.config.timeout_ms)
             .await
+    }
+
+    async fn exec_timeout(&self, bot_id: &str, command: &str, timeout_ms: u64) -> ExecResult {
+        self.exec_with_timeout(bot_id, command, timeout_ms).await
     }
 
     async fn read_file(&self, bot_id: &str, path: &str) -> Result<String, String> {

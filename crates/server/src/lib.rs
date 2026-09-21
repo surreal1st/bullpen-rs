@@ -23,6 +23,7 @@ pub mod oauth;
 pub mod observations;
 pub mod permissions;
 pub mod prompt;
+pub mod repo;
 mod rooms;
 mod routes;
 pub mod routine_paths;
@@ -417,6 +418,9 @@ impl AppState {
         }
         if let Err(err) = workers::ensure_bot_worker_column(&db) {
             tracing::error!("failed to ensure bots.worker column exists: {err}");
+        }
+        if let Err(err) = repo::ensure_bot_repo_column(&db) {
+            tracing::error!("failed to ensure bots.repo column exists: {err}");
         }
         let db = Arc::new(Mutex::new(db));
         let desktop_states = Arc::new(observations::DesktopStateRegistry::new());
