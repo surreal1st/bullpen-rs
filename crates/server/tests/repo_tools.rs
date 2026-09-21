@@ -276,8 +276,8 @@ async fn repo_specs_offered_only_when_bot_has_repo() {
     for name in ["repo_read", "repo_grep", "repo_run", "repo_branch"] {
         assert!(with.contains(name), "missing {name}");
     }
-    assert!(!with.contains("repo_edit"));
-    assert!(!with.contains("repo_pr"));
+    assert!(with.contains("repo_edit"));
+    assert!(with.contains("repo_pr"));
 }
 
 #[tokio::test]

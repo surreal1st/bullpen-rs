@@ -376,6 +376,395 @@ pub async fn repo_branch(sandbox: &dyn Sandbox, bot_id: &str, name: &str) -> Rep
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoEdit {
+    pub find: String,
+    pub replace: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoEditResult {
+    pub ok: bool,
+    pub detail: String,
+}
+
+fn count_occurrences(haystack: &str, needle: &str) -> usize {
+    if needle.is_empty() {
+        return 0;
+    }
+    haystack.match_indices(needle).count()
+}
+
+async fn write_repo_file(
+    sandbox: &dyn Sandbox,
+    bot_id: &str,
+    path: &str,
+    content: &str,
+) -> crate::sandbox::ExecResult {
+    let Some(target) = repo_path(path) else {
+        return crate::sandbox::ExecResult {
+            stdout: String::new(),
+            stderr: format!("\"{path}\" is outside the repo. Refused."),
+            exit_code: 1,
+            timed_out: false,
+            truncated: false,
+            unavailable: false,
+        };
+    };
+    let b64 = BASE64.encode(content.as_bytes());
+    let cmd = format!(
+        "printf '%s' {} | base64 -d > {}",
+        sh_quote(&b64),
+        sh_quote(&target)
+    );
+    sandbox.exec(bot_id, &cmd).await
+}
+
+pub async fn apply_repo_edits(
+    sandbox: &dyn Sandbox,
+    bot_id: &str,
+    path: &str,
+    edits: &[RepoEdit],
+) -> RepoEditResult {
+    if edits.is_empty() {
+        return RepoEditResult {
+            ok: false,
+            detail: "No edits were given.".to_string(),
+        };
+    }
+
+    let read = read_repo_file(sandbox, bot_id, path).await;
+    if !read.ok {
+        return RepoEditResult {
+            ok: false,
+            detail: format!("Could not read {path}: {}", read.detail),
+        };
+    }
+
+    let mut content = read.content;
+    for (i, edit) in edits.iter().enumerate() {
+        let occurrences = count_occurrences(&content, &edit.find);
+        if occurrences == 0 {
+            return RepoEditResult {
+                ok: false,
+                detail: format!(
+                    "Edit {}: that text was not found in {path}. Nothing was changed.",
+                    i + 1
+                ),
+            };
+        }
+        if occurrences > 1 {
+            return RepoEditResult {
+                ok: false,
+                detail: format!(
+                    "Edit {}: that text appears {occurrences} times in {path} - ambiguous. \
+Make it unique with more surrounding context. Nothing was changed.",
+                    i + 1
+                ),
+            };
+        }
+        content = content.replace(&edit.find, &edit.replace);
+    }
+
+    let written = write_repo_file(sandbox, bot_id, path, &content).await;
+    if written.exit_code != 0 {
+        let msg = if !written.stderr.is_empty() {
+            written.stderr
+        } else {
+            written.stdout
+        };
+        return RepoEditResult {
+            ok: false,
+            detail: format!("Read ok, but the write failed: {msg}"),
+        };
+    }
+    RepoEditResult {
+        ok: true,
+        detail: format!(
+            "{} edit{} applied to {path}.",
+            edits.len(),
+            if edits.len() == 1 { "" } else { "s" }
+        ),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GithubRepo {
+    pub owner: String,
+    pub repo: String,
+}
+
+pub fn parse_github_repo(url: &str) -> Option<GithubRepo> {
+    let cleaned = url.trim().trim_end_matches(".git");
+    if let Some(cap) = regex::Regex::new(r"^https?://[^/]+/([^/]+)/([^/]+)/?$")
+        .ok()?
+        .captures(cleaned)
+    {
+        return Some(GithubRepo {
+            owner: cap.get(1)?.as_str().to_string(),
+            repo: cap.get(2)?.as_str().to_string(),
+        });
+    }
+    if let Some(cap) = regex::Regex::new(r"^[\w.-]+@[\w.-]+:([^/]+)/([^/]+)$")
+        .ok()?
+        .captures(cleaned)
+    {
+        return Some(GithubRepo {
+            owner: cap.get(1)?.as_str().to_string(),
+            repo: cap.get(2)?.as_str().to_string(),
+        });
+    }
+    None
+}
+
+const ACTION_KEYWORDS: &[(&str, &[&[&str]])] = &[
+    (
+        "create",
+        &[&["create", "pull"], &["create", "pull", "request"]],
+    ),
+    ("update", &[&["update", "pull"], &["edit", "pull"]]),
+    ("comment", &[&["comment"]]),
+    ("labels", &[&["label"]]),
+    ("ci_status", &[&["status"], &["check"], &["workflow"]]),
+];
+
+pub fn pick_github_tool<'a>(
+    tools: &'a [crate::mcp::ConnectorTool],
+    action: &str,
+) -> Option<&'a crate::mcp::ConnectorTool> {
+    let groups = ACTION_KEYWORDS
+        .iter()
+        .find(|(a, _)| *a == action)
+        .map(|(_, g)| *g)?;
+    for words in groups {
+        if let Some(hit) = tools.iter().find(|t| {
+            let name = t.name.to_lowercase();
+            words.iter().all(|w| name.contains(w))
+        }) {
+            return Some(hit);
+        }
+    }
+    None
+}
+
+pub struct PushInput<'a> {
+    pub repo_url: &'a str,
+    pub base: &'a str,
+    pub branch: &'a str,
+    pub patch_text: &'a str,
+    pub token: Option<&'a str>,
+}
+
+pub struct PushResult {
+    pub ok: bool,
+    pub detail: String,
+}
+
+#[async_trait::async_trait]
+pub trait GitRunner: Send + Sync {
+    async fn run(
+        &self,
+        args: &[&str],
+        cwd: &str,
+        env: &[(String, String)],
+    ) -> Result<(String, String), String>;
+}
+
+struct RealGit;
+
+#[async_trait::async_trait]
+impl GitRunner for RealGit {
+    async fn run(
+        &self,
+        args: &[&str],
+        cwd: &str,
+        env: &[(String, String)],
+    ) -> Result<(String, String), String> {
+        use std::process::Stdio;
+        use tokio::process::Command;
+        let mut cmd = Command::new("git");
+        cmd.args(args)
+            .current_dir(cwd)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        let output = cmd.output().await.map_err(|e| e.to_string())?;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        if output.status.success() {
+            Ok((stdout, stderr))
+        } else {
+            Err(if stderr.is_empty() { stdout } else { stderr })
+        }
+    }
+}
+
+fn with_username(url: &str, username: &str) -> String {
+    let trimmed = url.trim();
+    if let Some(rest) = trimmed.strip_prefix("https://")
+        && !rest.contains('@')
+    {
+        return format!("https://{username}@{rest}");
+    }
+    if let Some(rest) = trimmed.strip_prefix("http://")
+        && !rest.contains('@')
+    {
+        return format!("http://{username}@{rest}");
+    }
+    url.to_string()
+}
+
+pub async fn push_patch(input: PushInput<'_>, git: &dyn GitRunner) -> PushResult {
+    if input.patch_text.trim().is_empty() {
+        return PushResult {
+            ok: false,
+            detail: format!(
+                "No commits ahead of {}. Commit your changes with repo_run first.",
+                input.base
+            ),
+        };
+    }
+    let Some(token) = input.token.filter(|t| !t.is_empty()) else {
+        return PushResult {
+            ok: false,
+            detail: "GitHub is not authorized. Tell Josh to open Connectors and press Connect on GitHub.".to_string(),
+        };
+    };
+
+    let dir_path = std::env::temp_dir().join(format!("bullpen-repo-push-{}", uuid::Uuid::new_v4()));
+    if std::fs::create_dir_all(&dir_path).is_err() {
+        return PushResult {
+            ok: false,
+            detail: "Could not create a temp directory for git.".to_string(),
+        };
+    }
+    let askpass_path = dir_path.join(if cfg!(windows) {
+        "askpass.cmd"
+    } else {
+        "askpass.sh"
+    });
+    let patch_path = dir_path.join("changes.patch");
+    let remote_url = with_username(input.repo_url, "x-access-token");
+
+    let askpass_body = if cfg!(windows) {
+        "@echo off\r\necho %BULLPEN_GIT_TOKEN%\r\n".to_string()
+    } else {
+        "#!/bin/sh\nprintf '%s' \"$BULLPEN_GIT_TOKEN\"\n".to_string()
+    };
+    if let Err(e) = std::fs::write(&askpass_path, askpass_body) {
+        return PushResult {
+            ok: false,
+            detail: format!("Could not write askpass script: {e}"),
+        };
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&askpass_path, std::fs::Permissions::from_mode(0o700));
+    }
+    if let Err(e) = std::fs::write(&patch_path, input.patch_text) {
+        return PushResult {
+            ok: false,
+            detail: format!("Could not write patch file: {e}"),
+        };
+    }
+
+    let mut env: Vec<(String, String)> = std::env::vars().collect();
+    env.push(("GIT_TERMINAL_PROMPT".into(), "0".into()));
+    env.push((
+        "GIT_ASKPASS".into(),
+        askpass_path.to_string_lossy().into_owned(),
+    ));
+    env.push(("BULLPEN_GIT_TOKEN".into(), token.to_string()));
+    let cwd = dir_path.to_string_lossy().into_owned();
+    let dir_arg = cwd.as_str();
+    let patch_arg = patch_path.to_string_lossy().into_owned();
+    let branch_ref = format!("HEAD:refs/heads/{}", input.branch);
+
+    if let Err(e) = git.run(&["init", "-q"], &cwd, &env).await {
+        return scrub_push_err(e, token);
+    }
+    if let Err(e) = git
+        .run(
+            &["-C", dir_arg, "remote", "add", "origin", &remote_url],
+            &cwd,
+            &env,
+        )
+        .await
+    {
+        return scrub_push_err(e, token);
+    }
+    if let Err(e) = git
+        .run(
+            &[
+                "-C", dir_arg, "fetch", "--depth", "50", "origin", input.base,
+            ],
+            &cwd,
+            &env,
+        )
+        .await
+    {
+        return scrub_push_err(e, token);
+    }
+    if let Err(e) = git
+        .run(
+            &["-C", dir_arg, "checkout", "-B", input.branch, "FETCH_HEAD"],
+            &cwd,
+            &env,
+        )
+        .await
+    {
+        return scrub_push_err(e, token);
+    }
+    if let Err(e) = git
+        .run(
+            &[
+                "-C",
+                dir_arg,
+                "-c",
+                "user.email=bullpen@rainmade.local",
+                "-c",
+                "user.name=Bullpen",
+                "am",
+                &patch_arg,
+            ],
+            &cwd,
+            &env,
+        )
+        .await
+    {
+        let _ = git.run(&["-C", dir_arg, "am", "--abort"], &cwd, &env).await;
+        return scrub_push_err(e, token);
+    }
+    if let Err(e) = git
+        .run(&["-C", dir_arg, "push", "origin", &branch_ref], &cwd, &env)
+        .await
+    {
+        return scrub_push_err(e, token);
+    }
+    let _ = std::fs::remove_dir_all(&dir_path);
+
+    PushResult {
+        ok: true,
+        detail: format!("Pushed {} (base {}).", input.branch, input.base),
+    }
+}
+
+fn scrub_push_err(message: String, token: &str) -> PushResult {
+    let scrubbed = message.split(token).collect::<Vec<_>>().join("[redacted]");
+    let first = scrubbed.lines().next().unwrap_or(&scrubbed).to_string();
+    PushResult {
+        ok: false,
+        detail: format!("git failed: {first}"),
+    }
+}
+
+pub async fn push_patch_default(input: PushInput<'_>) -> PushResult {
+    push_patch(input, &RealGit).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -453,5 +842,38 @@ mod tests {
             Some("on"),
         );
         assert!(ok.ok);
+    }
+
+    #[test]
+    fn parse_github_repo_reads_owner_repo() {
+        let g = parse_github_repo("https://github.com/rainmade/bullpen").unwrap();
+        assert_eq!(g.owner, "rainmade");
+        assert_eq!(g.repo, "bullpen");
+        assert!(parse_github_repo("not a url").is_none());
+    }
+
+    #[test]
+    fn pick_github_tool_matches_connector_names() {
+        use crate::mcp::ConnectorTool;
+        let tools = vec![
+            ConnectorTool {
+                name: "create_pull_request".into(),
+                description: String::new(),
+                input_schema: serde_json::json!({}),
+            },
+            ConnectorTool {
+                name: "add_issue_comment".into(),
+                description: String::new(),
+                input_schema: serde_json::json!({}),
+            },
+        ];
+        assert_eq!(
+            pick_github_tool(&tools, "create").map(|t| t.name.as_str()),
+            Some("create_pull_request")
+        );
+        assert_eq!(
+            pick_github_tool(&tools, "comment").map(|t| t.name.as_str()),
+            Some("add_issue_comment")
+        );
     }
 }

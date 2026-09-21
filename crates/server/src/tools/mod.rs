@@ -588,7 +588,15 @@ pub fn build(params: BuildParams) -> ToolBox {
                     return ToolOutcome::new(text, None);
                 }
                 if name.starts_with("repo_") {
-                    let text = repo_tools::run(&db, sandbox.as_ref(), &bot_id, &name, &args).await;
+                    let text = repo_tools::run(
+                        &db,
+                        sandbox.as_ref(),
+                        &bot_id,
+                        &name,
+                        &args,
+                        connector_hooks.as_ref(),
+                    )
+                    .await;
                     return ToolOutcome::new(text, None);
                 }
                 if let Some((connector_slug, tool_name)) = crate::mcp::split_tool_name(&name) {
