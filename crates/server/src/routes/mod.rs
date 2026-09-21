@@ -33,6 +33,7 @@ mod slack;
 mod spend;
 mod teams;
 mod vms;
+mod workers;
 
 use crate::auth::presented_token;
 use crate::{ApiResult, AppError, AppState};
@@ -80,7 +81,8 @@ pub fn router() -> Router<AppState> {
         .merge(memory::router())
         .merge(slack::router())
         .merge(teams::router())
-        .merge(vms::router());
+        .merge(vms::router())
+        .merge(workers::router());
 
     // B2: exists only so `tests/errors.rs` can prove the db mutex recovers
     // from a poison instead of panicking every request after the first -

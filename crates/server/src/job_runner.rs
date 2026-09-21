@@ -101,6 +101,11 @@ impl JobRunnerDeps {
             max_ms: MAX_JOB_MS,
         }
     }
+
+    pub fn with_max_ms(mut self, max_ms: u64) -> Self {
+        self.max_ms = max_ms;
+        self
+    }
 }
 
 /// `JobEvents` backed by the real jobs table (for `WorkerSandbox` and production).

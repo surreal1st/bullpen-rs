@@ -164,6 +164,7 @@ pub async fn run_ask_in_background(
 pub async fn run_run_in_background(
     db: &Arc<Mutex<Db>>,
     job_sandbox: &Arc<dyn JobSandbox>,
+    job_max_ms: u64,
     bot_id: &str,
     args: &str,
 ) -> String {
@@ -177,7 +178,7 @@ pub async fn run_run_in_background(
     } else {
         Some(parsed.notify_when.trim())
     };
-    let deps = JobRunnerDeps::new(Arc::clone(db), Arc::clone(job_sandbox));
+    let deps = JobRunnerDeps::new(Arc::clone(db), Arc::clone(job_sandbox)).with_max_ms(job_max_ms);
     start_shell_job(&deps, bot_id, parsed.label.trim(), command, notify).await
 }
 
@@ -205,6 +206,7 @@ pub fn run_job_status(db: &Arc<Mutex<Db>>, bot_id: &str, args: &str) -> String {
 pub async fn run_await_job(
     db: &Arc<Mutex<Db>>,
     job_sandbox: &Arc<dyn JobSandbox>,
+    job_max_ms: u64,
     bot_id: &str,
     args: &str,
 ) -> String {
@@ -214,13 +216,14 @@ pub async fn run_await_job(
         return "No job id was given.".to_string();
     }
     let seconds = parsed.seconds.map(|s| s.round() as u32).filter(|&s| s > 0);
-    let deps = JobRunnerDeps::new(Arc::clone(db), Arc::clone(job_sandbox));
+    let deps = JobRunnerDeps::new(Arc::clone(db), Arc::clone(job_sandbox)).with_max_ms(job_max_ms);
     await_job(&deps, bot_id, id, seconds).await
 }
 
 pub async fn run_stop_job(
     db: &Arc<Mutex<Db>>,
     job_sandbox: &Arc<dyn JobSandbox>,
+    job_max_ms: u64,
     bot_id: &str,
     args: &str,
 ) -> String {
@@ -229,6 +232,6 @@ pub async fn run_stop_job(
     if id.is_empty() {
         return "No job id was given.".to_string();
     }
-    let deps = JobRunnerDeps::new(Arc::clone(db), Arc::clone(job_sandbox));
+    let deps = JobRunnerDeps::new(Arc::clone(db), Arc::clone(job_sandbox)).with_max_ms(job_max_ms);
     stop_job(&deps, bot_id, id).await
 }

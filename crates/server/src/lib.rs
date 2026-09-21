@@ -29,6 +29,7 @@ pub mod routines;
 pub mod rules;
 pub mod runs;
 pub mod sandbox;
+pub mod sandbox_routing;
 pub mod schedule;
 pub mod settings_secrets;
 pub mod slack;
@@ -412,6 +413,9 @@ impl AppState {
             Ok(0) => {}
             Ok(n) => tracing::info!("reaped {n} background job(s) lost to a restart"),
             Err(err) => tracing::error!("failed to reap orphaned jobs: {err}"),
+        }
+        if let Err(err) = workers::ensure_bot_worker_column(&db) {
+            tracing::error!("failed to ensure bots.worker column exists: {err}");
         }
         let db = Arc::new(Mutex::new(db));
         let desktop_states = Arc::new(observations::DesktopStateRegistry::new());

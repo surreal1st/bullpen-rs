@@ -268,6 +268,26 @@ pub fn list_workers(db: &Db) -> Vec<WorkerPublic> {
     read_all(db).iter().map(to_public).collect()
 }
 
+/// JSON shape the settings UI and iOS client expect (`WorkerPublic` in TS).
+pub fn worker_public_to_value(w: &WorkerPublic) -> Value {
+    json!({
+        "id": w.id,
+        "label": w.label,
+        "kind": w.kind.as_str(),
+        "host": w.host,
+        "port": w.port,
+        "hasCert": w.has_cert,
+        "sshUser": w.ssh_user,
+        "sshHost": w.ssh_host,
+        "lastState": w.last_state.as_str(),
+        "lastCheckedAt": w.last_checked_at,
+        "lastOs": w.last_os,
+        "lastArch": w.last_arch,
+        "lastVersion": w.last_version,
+        "lastError": w.last_error,
+    })
+}
+
 /// Internal only - carries the encrypted secrets. Never returned from a route.
 pub fn get_worker(db: &Db, id: &str) -> Option<Worker> {
     read_all(db).into_iter().find(|w| w.id == id)
@@ -547,6 +567,28 @@ fn persist_test_result(db: &Db, worker: &Worker, result: TestResult) -> WorkerPu
 /// configuration gap, not a network failure). Which `DockerRun` to build for
 /// a given `Worker` is the same out-of-scope judgment call this file's
 /// header explains for `WorkerSandbox`.
+/// HTTP `POST /api/workers/:id/test` when real `DockerRun` is not wired yet.
+pub fn test_worker_without_docker(
+    db: &Db,
+    id: &str,
+    checked_at: impl Into<String>,
+) -> Option<WorkerPublic> {
+    let worker = get_worker(db, id)?;
+    let checked_at = checked_at.into();
+    Some(persist_test_result(
+        db,
+        &worker,
+        TestResult {
+            state: WorkerState::Asleep,
+            os: None,
+            arch: None,
+            version: None,
+            error: Some("No client certificate is saved for this worker yet.".to_string()),
+            checked_at,
+        },
+    ))
+}
+
 pub async fn test_worker(
     db: &Db,
     id: &str,
@@ -556,18 +598,7 @@ pub async fn test_worker(
     let worker = get_worker(db, id)?;
     let checked_at = checked_at.into();
     let Some(docker) = docker else {
-        return Some(persist_test_result(
-            db,
-            &worker,
-            TestResult {
-                state: WorkerState::Asleep,
-                os: None,
-                arch: None,
-                version: None,
-                error: Some("No client certificate is saved for this worker yet.".to_string()),
-                checked_at,
-            },
-        ));
+        return test_worker_without_docker(db, id, checked_at);
     };
     let result = docker
         .run(

@@ -1474,6 +1474,17 @@ impl RunManager {
                 .await
             })
         });
+        let resolved = {
+            let db = self.db();
+            let job_events = crate::sandbox_routing::store_job_events(Arc::clone(&self.db));
+            crate::sandbox_routing::resolve_bot_sandboxes(
+                &db,
+                bot_id,
+                Arc::clone(&self.sandbox),
+                Arc::clone(&self.job_sandbox),
+                job_events,
+            )
+        };
         tools::build(tools::BuildParams {
             db: Arc::clone(&self.db),
             port: Arc::clone(&self.port),
@@ -1484,8 +1495,9 @@ impl RunManager {
             initial_model: model.to_string(),
             changes: self.changes.clone(),
             perms,
-            sandbox: Arc::clone(&self.sandbox),
-            job_sandbox: Arc::clone(&self.job_sandbox),
+            sandbox: resolved.exec,
+            job_sandbox: resolved.job,
+            job_max_ms: resolved.job_max_ms,
             vm_docker: Arc::clone(&self.vm_docker),
             vm_config: Arc::clone(&self.vm_config),
             vm_enabled: self.vm_enabled,

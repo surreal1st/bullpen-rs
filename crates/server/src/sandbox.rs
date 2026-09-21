@@ -557,6 +557,32 @@ fn cap_text(text: &str, max: usize) -> String {
 /// F17: the `..` check is scoped to path COMPONENTS via the loop below (the
 /// `Component::ParentDir` arm) - a blanket `path.contains("..")` used to
 /// also reject legitimate names like `build..old.log`.
+/// Reads a path under `/work` by running `cat` through an arbitrary [`Sandbox`].
+pub(crate) async fn read_file_via_exec(
+    sandbox: &dyn Sandbox,
+    bot_id: &str,
+    path: &str,
+) -> Result<String, String> {
+    validate_read_path(path)?;
+    let command = format!("cat -- {path}");
+    let result = sandbox.exec(bot_id, &command).await;
+    if result.unavailable {
+        return Err(result.stderr);
+    }
+    if result.exit_code == 0 {
+        Ok(cap_text(
+            &result.stdout,
+            SandboxConfig::default().max_output_bytes,
+        ))
+    } else {
+        Err(if result.stderr.is_empty() {
+            format!("cat exited with code {}", result.exit_code)
+        } else {
+            result.stderr
+        })
+    }
+}
+
 fn validate_read_path(path: &str) -> Result<(), String> {
     // Reject absolute paths
     if path.starts_with('/') {

@@ -286,6 +286,8 @@ pub struct BuildParams {
     pub connector_hooks: Option<Arc<crate::runs::ConnectorHooks>>,
     /// S9-03: background shell jobs (`run_in_background`, etc.).
     pub job_sandbox: Arc<dyn crate::job_runner::JobSandbox>,
+    /// S9-05: per-bot job polling ceiling (meridian vs worker wake timeout).
+    pub job_max_ms: u64,
     /// S9-04: how far nested this toolbox is (`message_bot` / `ask_in_background`).
     pub delegation_depth: u32,
     /// S9-04: runs a colleague model call for an agent job (cost lands on the job row).
@@ -445,6 +447,7 @@ pub fn build(params: BuildParams) -> ToolBox {
     let data_dir = Arc::clone(&params.data_dir);
     let connector_hooks = params.connector_hooks.clone();
     let job_sandbox = Arc::clone(&params.job_sandbox);
+    let job_max_ms = params.job_max_ms;
     let delegation_depth = params.delegation_depth;
     let colleague_ask = Arc::clone(&params.colleague_ask);
     let toolbox_bot_id = bot_id.clone();
@@ -500,6 +503,7 @@ pub fn build(params: BuildParams) -> ToolBox {
             let data_dir = Arc::clone(&data_dir);
             let connector_hooks = connector_hooks.clone();
             let job_sandbox = Arc::clone(&job_sandbox);
+            let job_max_ms = job_max_ms;
             let colleague_ask = Arc::clone(&colleague_ask);
             let delegation_depth = delegation_depth;
             let execution_context = handler_execution_context.clone();
@@ -622,8 +626,14 @@ pub fn build(params: BuildParams) -> ToolBox {
                     "use_skill" => (use_skill::run(&db, &bot_id, &args), None),
                     "hire_bot" => (hire_bot::run(&db, &bot_id, &args), None),
                     "run_in_background" => (
-                        background_jobs::run_run_in_background(&db, &job_sandbox, &bot_id, &args)
-                            .await,
+                        background_jobs::run_run_in_background(
+                            &db,
+                            &job_sandbox,
+                            job_max_ms,
+                            &bot_id,
+                            &args,
+                        )
+                        .await,
                         None,
                     ),
                     "ask_in_background" => (
@@ -639,11 +649,25 @@ pub fn build(params: BuildParams) -> ToolBox {
                     ),
                     "job_status" => (background_jobs::run_job_status(&db, &bot_id, &args), None),
                     "await_job" => (
-                        background_jobs::run_await_job(&db, &job_sandbox, &bot_id, &args).await,
+                        background_jobs::run_await_job(
+                            &db,
+                            &job_sandbox,
+                            job_max_ms,
+                            &bot_id,
+                            &args,
+                        )
+                        .await,
                         None,
                     ),
                     "stop_job" => (
-                        background_jobs::run_stop_job(&db, &job_sandbox, &bot_id, &args).await,
+                        background_jobs::run_stop_job(
+                            &db,
+                            &job_sandbox,
+                            job_max_ms,
+                            &bot_id,
+                            &args,
+                        )
+                        .await,
                         None,
                     ),
                     // S8a-02: the `Cdp` is resolved HERE, at call time, by
