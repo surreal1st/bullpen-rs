@@ -13,7 +13,7 @@
 //! one context menu, and its RAIL-02 doc comment for the `sectionId`
 //! handling itself.
 
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{patch, post};
@@ -50,12 +50,14 @@ fn name_from_body(body: &axum::body::Bytes) -> String {
 /// RAIL-02: `POST /api/sections` - port of `app.ts:2314-2317`.
 async fn create_section(
     State(state): State<AppState>,
+    Extension(scope): Extension<crate::scope::Scope>,
     body: axum::body::Bytes,
 ) -> Result<Response, crate::AppError> {
     let name = name_from_body(&body);
     let db = state.db();
     match store::create_section(&db, &name)? {
         Some(section) => {
+            store::stamp_owned_root(&db, "sections", &section.id, &scope.user_id)?;
             Ok((StatusCode::CREATED, Json(json!({ "section": section }))).into_response())
         }
         None => Err(crate::AppError::bad_request("Give the section a name.")),
@@ -69,6 +71,7 @@ async fn create_section(
 /// the two apart.
 async fn rename_section(
     State(state): State<AppState>,
+    Extension(scope): Extension<crate::scope::Scope>,
     Path(id): Path<String>,
     body: axum::body::Bytes,
 ) -> Result<Response, crate::AppError> {
@@ -79,7 +82,8 @@ async fn rename_section(
             "no such section, or the name was empty",
         ));
     }
-    let sections = store::list_sections(&db)?;
+    let filter = scope.list_filter();
+    let sections = store::list_sections(&db, Some(&filter))?;
     Ok(Json(json!({ "sections": sections })).into_response())
 }
 
@@ -92,13 +96,15 @@ async fn rename_section(
 /// null`).
 async fn delete_section(
     State(state): State<AppState>,
+    Extension(scope): Extension<crate::scope::Scope>,
     Path(id): Path<String>,
 ) -> Result<Response, crate::AppError> {
     let db = state.db();
     if !store::delete_section(&db, &id)? {
         return Err(crate::AppError::not_found("no such section"));
     }
-    let sections = store::list_sections(&db)?;
-    let bots = store::list_roster(&db)?;
+    let filter = scope.list_filter();
+    let sections = store::list_sections(&db, Some(&filter))?;
+    let bots = store::list_roster(&db, Some(&filter))?;
     Ok(Json(json!({ "sections": sections, "bots": bots })).into_response())
 }

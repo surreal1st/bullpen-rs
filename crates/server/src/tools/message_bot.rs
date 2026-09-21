@@ -152,7 +152,7 @@ pub async fn run(
 
     let bots = {
         let db = lock_db(db);
-        store::list_bots(&db, false).expect("list_bots")
+        store::list_bots(&db, false, None).expect("list_bots")
     };
     let target = bots
         .iter()

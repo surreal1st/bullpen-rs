@@ -72,12 +72,12 @@ pub fn run(db: &Arc<Mutex<Db>>, _bot_id: &str, args: &str) -> String {
 
     let db = lock_db(db);
 
-    if list_bots(&db, false)
+    if list_bots(&db, false, None)
         .unwrap_or_default()
         .iter()
         .any(|b| b.name.eq_ignore_ascii_case(draft_name))
     {
-        let existing = list_bots(&db, false)
+        let existing = list_bots(&db, false, None)
             .unwrap_or_default()
             .into_iter()
             .find(|b| b.name.eq_ignore_ascii_case(draft_name))
@@ -105,7 +105,7 @@ pub fn run(db: &Arc<Mutex<Db>>, _bot_id: &str, args: &str) -> String {
 
     let section_name = input.section.as_deref().unwrap_or("").trim().to_string();
     if !section_name.is_empty() {
-        let sections = list_sections(&db).unwrap_or_default();
+        let sections = list_sections(&db, None).unwrap_or_default();
         if let Some(target) = sections
             .iter()
             .find(|s| s.name.eq_ignore_ascii_case(&section_name))

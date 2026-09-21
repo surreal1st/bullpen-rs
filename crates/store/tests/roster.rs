@@ -19,7 +19,7 @@ fn test_list_roster() {
     let db = Db::open(temp_db.to_str().unwrap()).expect("Failed to open database");
 
     // Test list_roster returns exactly 3 entries
-    let roster = store::list_roster(&db).expect("Failed to list roster");
+    let roster = store::list_roster(&db, None).expect("Failed to list roster");
     assert_eq!(roster.len(), 3, "Expected 3 roster entries");
 
     // Check names and ids
@@ -109,7 +109,7 @@ fn test_roster_entry_serialization() {
     let db = Db::open(temp_db.to_str().unwrap()).expect("Failed to open database");
 
     // Get a roster entry
-    let roster = store::list_roster(&db).expect("Failed to list roster");
+    let roster = store::list_roster(&db, None).expect("Failed to list roster");
     let arthur = roster
         .iter()
         .find(|e| e.id == "arthur")

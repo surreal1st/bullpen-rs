@@ -89,6 +89,10 @@ pub struct PasswordRecord {
 
 /// Hashes a password for storage. Never store, log or return the plaintext.
 /// Mirrors the TS `hashPassword`.
+pub fn hash_new_password(password: &str) -> PasswordRecord {
+    hash_password(password)
+}
+
 fn hash_password(password: &str) -> PasswordRecord {
     let salt = random_bytes(16);
     let mut output = [0u8; KEY_LENGTH];

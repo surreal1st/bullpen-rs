@@ -39,7 +39,7 @@ mod workers;
 
 use crate::auth::presented_token;
 use crate::{ApiResult, AppError, AppState};
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -197,10 +197,14 @@ struct RosterResponse {
     bots: Vec<shared::RosterEntry>,
 }
 
-async fn roster(State(state): State<AppState>) -> ApiResult<impl IntoResponse> {
+async fn roster(
+    State(state): State<AppState>,
+    Extension(scope): Extension<crate::scope::Scope>,
+) -> ApiResult<impl IntoResponse> {
     let db = state.db();
-    let sections = store::list_sections(&db)?;
-    let bots = store::list_roster(&db)?;
+    let filter = scope.list_filter();
+    let sections = store::list_sections(&db, Some(&filter))?;
+    let bots = store::list_roster(&db, Some(&filter))?;
     Ok(Json(RosterResponse { sections, bots }))
 }
 
@@ -234,6 +238,7 @@ fn backdate_1ms(iso: &str) -> String {
 /// take with `db.conn()` for writes their own crate has no query for.
 async fn mark_bot_seen(
     State(state): State<AppState>,
+    Extension(scope): Extension<crate::scope::Scope>,
     Path(id): Path<String>,
 ) -> ApiResult<Response> {
     let db = state.db();
@@ -244,7 +249,8 @@ async fn mark_bot_seen(
         "UPDATE bots SET last_seen_at = ?1 WHERE id = ?2",
         rusqlite::params![now_iso(), id],
     )?;
-    let bots = store::list_roster(&db)?;
+    let filter = scope.list_filter();
+    let bots = store::list_roster(&db, Some(&filter))?;
     Ok(Json(json!({ "bots": bots })).into_response())
 }
 
@@ -264,6 +270,7 @@ async fn mark_bot_seen(
 /// as the TS.
 async fn mark_bot_unseen(
     State(state): State<AppState>,
+    Extension(scope): Extension<crate::scope::Scope>,
     Path(id): Path<String>,
 ) -> ApiResult<Response> {
     let db = state.db();
@@ -288,6 +295,7 @@ async fn mark_bot_unseen(
             rusqlite::params![backdate_1ms(&last_at), id],
         )?;
     }
-    let bots = store::list_roster(&db)?;
+    let filter = scope.list_filter();
+    let bots = store::list_roster(&db, Some(&filter))?;
     Ok(Json(json!({ "bots": bots })).into_response())
 }

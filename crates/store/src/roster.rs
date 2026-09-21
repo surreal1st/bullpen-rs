@@ -1,4 +1,6 @@
 use crate::Db;
+use crate::list_scope::ListScope;
+use rusqlite::params;
 use shared::{Bot, Effort, RosterEntry};
 use std::collections::HashMap;
 
@@ -182,9 +184,10 @@ fn is_hr(line: &str) -> bool {
 }
 
 /// List all non-archived bots as roster entries with unread counts, preview, lastAt, and busy status.
-pub fn list_roster(db: &Db) -> rusqlite::Result<Vec<RosterEntry>> {
+pub fn list_roster(db: &Db, scope: Option<&ListScope>) -> rusqlite::Result<Vec<RosterEntry>> {
+    let scope_sql = scope.map(|s| s.and_sql("b")).unwrap_or_default();
     // First, fetch the rail data (unread, preview, last_at, busy) for each bot
-    let mut stmt = db.conn().prepare(
+    let rail_sql = format!(
         "SELECT b.id AS bot_id,
                 (SELECT COUNT(*)
                    FROM messages m
@@ -210,11 +213,13 @@ pub fn list_roster(db: &Db) -> rusqlite::Result<Vec<RosterEntry>> {
                   WHERE r.bot_id = b.id
                     AND r.status IN ('running', 'waiting')) AS busy
            FROM bots b
-          WHERE b.archived_at IS NULL",
-    )?;
+          WHERE b.archived_at IS NULL{scope_sql}",
+    );
+    let mut stmt = db.conn().prepare(&rail_sql)?;
 
-    let rail_rows = stmt
-        .query_map([], |row| {
+    let rail_rows: Vec<RailRow> = if let Some(s) = scope {
+        let (owner, user) = s.bind_values();
+        stmt.query_map(params![owner, user], |row| {
             Ok(RailRow {
                 bot_id: row.get(0)?,
                 unread: row.get(1)?,
@@ -223,7 +228,19 @@ pub fn list_roster(db: &Db) -> rusqlite::Result<Vec<RosterEntry>> {
                 busy: row.get(4)?,
             })
         })?
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, _>>()?
+    } else {
+        stmt.query_map([], |row| {
+            Ok(RailRow {
+                bot_id: row.get(0)?,
+                unread: row.get(1)?,
+                preview: row.get(2)?,
+                last_at: row.get(3)?,
+                busy: row.get(4)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?
+    };
 
     let by_bot: HashMap<String, RailRow> = rail_rows
         .into_iter()
@@ -243,14 +260,16 @@ pub fn list_roster(db: &Db) -> rusqlite::Result<Vec<RosterEntry>> {
     // Settings section would notice a flag flipped without a page reload -
     // narrowing this query the way `archived_at IS NULL` does would give
     // the client nothing to filter.
-    let mut stmt = db.conn().prepare(
+    let bots_sql = format!(
         "SELECT id, name, purpose, instructions, model, archived_at, has_routine,
                 section_id, pinned_at, hidden_at, avatar, shape, effort, is_template, voice
-         FROM bots WHERE archived_at IS NULL ORDER BY pinned_at IS NULL, name",
-    )?;
+         FROM bots WHERE archived_at IS NULL{scope_sql} ORDER BY pinned_at IS NULL, name",
+    );
+    let mut stmt = db.conn().prepare(&bots_sql)?;
 
-    let bots = stmt
-        .query_map([], |row| {
+    let bots: Vec<BotRow> = if let Some(s) = scope {
+        let (owner, user) = s.bind_values();
+        stmt.query_map(params![owner, user], |row| {
             Ok(BotRow {
                 id: row.get(0)?,
                 name: row.get(1)?,
@@ -269,7 +288,29 @@ pub fn list_roster(db: &Db) -> rusqlite::Result<Vec<RosterEntry>> {
                 voice: row.get(14)?,
             })
         })?
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, _>>()?
+    } else {
+        stmt.query_map([], |row| {
+            Ok(BotRow {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                purpose: row.get(2)?,
+                instructions: row.get(3)?,
+                model: row.get(4)?,
+                archived_at: row.get(5)?,
+                has_routine: row.get(6)?,
+                section_id: row.get(7)?,
+                pinned_at: row.get(8)?,
+                hidden_at: row.get(9)?,
+                avatar: row.get(10)?,
+                shape: row.get(11)?,
+                effort: row.get(12)?,
+                is_template: row.get(13)?,
+                voice: row.get(14)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?
+    };
 
     // Map bots to roster entries
     let roster = bots

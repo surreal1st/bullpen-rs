@@ -90,7 +90,7 @@ async fn list_templates(
 
 fn installed_bot_names(state: AppState) -> HashSet<String> {
     let db = state.db();
-    store::list_roster(&db)
+    store::list_roster(&db, None)
         .unwrap_or_default()
         .into_iter()
         .map(|b| b.name.to_lowercase())

@@ -170,6 +170,87 @@ fn to_user(row: UserRow) -> User {
     }
 }
 
+/// Stamps a root-owned row at creation time (S11-02). Missed stamps still read
+/// as the owner's via `COALESCE`, but the column should say who created it.
+pub fn stamp_owned_root(db: &Db, table: &str, id: &str, user_id: &str) -> rusqlite::Result<()> {
+    let sql = match table {
+        "bots" => "UPDATE bots SET user_id = ?1 WHERE id = ?2",
+        "sections" => "UPDATE sections SET user_id = ?1 WHERE id = ?2",
+        "attachments" => "UPDATE attachments SET user_id = ?1 WHERE id = ?2",
+        _ => return Ok(()),
+    };
+    db.conn().execute(sql, params![user_id, id])?;
+    Ok(())
+}
+
+/// Creates a member account (S11-03 invite claim will reuse this shape).
+pub fn create_member(
+    db: &Db,
+    name: &str,
+    password: &str,
+    email: Option<&str>,
+) -> Result<User, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Give the person a name.".to_string());
+    }
+    if password.len() < 8 {
+        return Err("Use a password of at least 8 characters.".to_string());
+    }
+    let record = crate::auth::hash_new_password(password);
+    let id = user_id_for(db, name);
+    let now = Utc::now().to_rfc3339();
+    db.conn()
+        .execute(
+            "INSERT INTO users (id, name, email, salt, hash, role, ceiling_usd, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'member', NULL, ?6)",
+            params![
+                id,
+                name,
+                email.filter(|e| !e.is_empty()),
+                record.salt,
+                record.hash,
+                now,
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+    get_user(db, &id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "member row missing after insert".to_string())
+}
+
+fn user_id_for(db: &Db, name: &str) -> String {
+    let base: String = name
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .trim_matches('-')
+        .chars()
+        .take(40)
+        .collect();
+    let base = if base.is_empty() {
+        "member".to_string()
+    } else {
+        base
+    };
+    let mut candidate = base.clone();
+    let mut n = 2i32;
+    while db
+        .conn()
+        .query_row(
+            "SELECT 1 FROM users WHERE id = ?1",
+            params![candidate],
+            |_| Ok(()),
+        )
+        .is_ok()
+    {
+        candidate = format!("{base}-{n}");
+        n += 1;
+    }
+    candidate
+}
+
 pub fn get_user(db: &Db, id: &str) -> rusqlite::Result<Option<User>> {
     let row = db
         .conn()

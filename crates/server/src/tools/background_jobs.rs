@@ -140,7 +140,7 @@ pub async fn run_ask_in_background(
     let Some((to_id, to_name)) = target else {
         let roster = {
             let guard = super::lock_db(db);
-            store::list_bots(&guard, false)
+            store::list_bots(&guard, false, None)
                 .unwrap_or_default()
                 .into_iter()
                 .map(|b| b.name)

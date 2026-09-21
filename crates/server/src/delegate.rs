@@ -28,7 +28,7 @@ pub fn find_bot(db: &Db, name_or_id: &str) -> Option<(String, String)> {
     if needle.is_empty() {
         return None;
     }
-    let all = store::list_bots(db, false).ok()?;
+    let all = store::list_bots(db, false, None).ok()?;
     if let Some(direct) = all.iter().find(|b| b.id == needle && !b.archived) {
         return Some((direct.id.clone(), direct.name.clone()));
     }

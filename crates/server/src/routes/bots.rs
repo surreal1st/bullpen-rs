@@ -122,7 +122,7 @@
 //! land in the SAME final scope the existing `model`/`effort` writes
 //! already use, after that `.await` has resolved.
 
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, State};
 use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -154,6 +154,7 @@ pub fn router() -> Router<AppState> {
 /// in the same 400 a genuinely empty body gets.
 async fn create_bot(
     State(state): State<AppState>,
+    Extension(scope): Extension<crate::scope::Scope>,
     body: axum::body::Bytes,
 ) -> Result<Response, crate::AppError> {
     let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap_or_else(|_| json!({}));
@@ -210,6 +211,7 @@ async fn create_bot(
     };
     let db = state.db();
     let bot = store::create_bot(&db, draft)?;
+    store::stamp_owned_root(&db, "bots", &bot.id, &scope.user_id)?;
     Ok((StatusCode::CREATED, Json(json!({ "bot": bot }))).into_response())
 }
 
@@ -491,9 +493,13 @@ async fn export_bot(
 /// (`{"bots": [...]}`) `mark_bot_seen`/`mark_bot_unseen` in `routes/mod.rs`
 /// already answer with, rather than inventing a third shape for "a list of
 /// bots".
-async fn list_archived_bots(State(state): State<AppState>) -> Result<Response, crate::AppError> {
+async fn list_archived_bots(
+    State(state): State<AppState>,
+    Extension(scope): Extension<crate::scope::Scope>,
+) -> Result<Response, crate::AppError> {
     let db = state.db();
-    let bots = store::list_bots(&db, true)?;
+    let filter = scope.list_filter();
+    let bots = store::list_bots(&db, true, Some(&filter))?;
     Ok(Json(json!({ "bots": bots })).into_response())
 }
 
@@ -527,6 +533,7 @@ async fn list_archived_bots(State(state): State<AppState>) -> Result<Response, c
 /// no-op 200, not a 400.
 async fn patch_rail(
     State(state): State<AppState>,
+    Extension(scope): Extension<crate::scope::Scope>,
     Path(id): Path<String>,
     body: axum::body::Bytes,
 ) -> Result<Response, crate::AppError> {
@@ -580,7 +587,8 @@ async fn patch_rail(
     // `mark_bot_seen`/`mark_bot_unseen` in `routes/mod.rs` already answer
     // with for the same reason (a client that wants the new order/flags
     // does not need a second round trip to get them).
-    let bots = store::list_roster(&db)?;
+    let filter = scope.list_filter();
+    let bots = store::list_roster(&db, Some(&filter))?;
     Ok(Json(json!({ "bots": bots })).into_response())
 }
 

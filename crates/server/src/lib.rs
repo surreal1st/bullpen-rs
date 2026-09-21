@@ -838,10 +838,15 @@ pub fn build_app(state: AppState) -> Router {
     // B7: the session gate wraps ONLY the API routes, not the static/SPA
     // fallback below - "static files stay open" falls out of that ordering
     // for free, with no path check needed inside the layer itself.
-    let api = routes::router().layer(axum::middleware::from_fn_with_state(
-        state.clone(),
-        auth::require_session,
-    ));
+    let api = routes::router()
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            scope::require_scope,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::require_session,
+        ));
 
     Router::new()
         .merge(api)

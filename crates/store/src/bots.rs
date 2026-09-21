@@ -54,15 +54,22 @@ fn row_to_bot(row: BotRow) -> Bot {
 /// second, near-duplicate query function - every existing call site wants
 /// `false` (the roster's own bots), and the new archived-bot listing route
 /// is the one caller that wants `true`.
-pub fn list_bots(db: &Db, archived: bool) -> rusqlite::Result<Vec<Bot>> {
-    let mut stmt = db.conn().prepare(
+pub fn list_bots(
+    db: &Db,
+    archived: bool,
+    scope: Option<&crate::list_scope::ListScope>,
+) -> rusqlite::Result<Vec<Bot>> {
+    let scope_sql = scope.map(|s| s.and_sql("bots")).unwrap_or_default();
+    let sql = format!(
         "SELECT id, name, purpose, instructions, model, archived_at, has_routine,
                 section_id, pinned_at, hidden_at, avatar, shape, effort, is_template, voice
-         FROM bots WHERE (archived_at IS NOT NULL) = ?1 ORDER BY name",
-    )?;
+         FROM bots WHERE (archived_at IS NOT NULL) = ?1{scope_sql} ORDER BY name",
+    );
+    let mut stmt = db.conn().prepare(&sql)?;
 
-    let bots = stmt
-        .query_map(params![archived as i64], |row| {
+    let bots = if let Some(s) = scope {
+        let (owner, user) = s.bind_values();
+        stmt.query_map(params![archived as i64, owner, user], |row| {
             Ok(BotRow {
                 id: row.get(0)?,
                 name: row.get(1)?,
@@ -81,7 +88,29 @@ pub fn list_bots(db: &Db, archived: bool) -> rusqlite::Result<Vec<Bot>> {
                 voice: row.get(14)?,
             })
         })?
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, _>>()?
+    } else {
+        stmt.query_map(params![archived as i64], |row| {
+            Ok(BotRow {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                purpose: row.get(2)?,
+                instructions: row.get(3)?,
+                model: row.get(4)?,
+                archived_at: row.get(5)?,
+                has_routine: row.get(6)?,
+                section_id: row.get(7)?,
+                pinned_at: row.get(8)?,
+                hidden_at: row.get(9)?,
+                avatar: row.get(10)?,
+                shape: row.get(11)?,
+                effort: row.get(12)?,
+                is_template: row.get(13)?,
+                voice: row.get(14)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?
+    };
 
     Ok(bots.into_iter().map(row_to_bot).collect())
 }
@@ -137,20 +166,35 @@ pub fn get_bot(db: &Db, id: &str) -> rusqlite::Result<Option<Bot>> {
 }
 
 /// List all sections, ordered by position.
-pub fn list_sections(db: &Db) -> rusqlite::Result<Vec<Section>> {
-    let mut stmt = db
-        .conn()
-        .prepare("SELECT id, name, position FROM sections ORDER BY position")?;
+pub fn list_sections(
+    db: &Db,
+    scope: Option<&crate::list_scope::ListScope>,
+) -> rusqlite::Result<Vec<Section>> {
+    let scope_sql = scope.map(|s| s.and_sql("sections")).unwrap_or_default();
+    let sql =
+        format!("SELECT id, name, position FROM sections WHERE 1=1{scope_sql} ORDER BY position");
+    let mut stmt = db.conn().prepare(&sql)?;
 
-    let sections = stmt
-        .query_map([], |row| {
+    let sections = if let Some(s) = scope {
+        let (owner, user) = s.bind_values();
+        stmt.query_map(params![owner, user], |row| {
             Ok(Section {
                 id: row.get(0)?,
                 name: row.get(1)?,
                 position: row.get(2)?,
             })
         })?
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, _>>()?
+    } else {
+        stmt.query_map([], |row| {
+            Ok(Section {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                position: row.get(2)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?
+    };
 
     Ok(sections)
 }

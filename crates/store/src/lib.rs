@@ -9,6 +9,7 @@ pub mod connectors;
 pub mod conversations;
 pub mod goals;
 pub mod jobs;
+pub mod list_scope;
 pub mod memory;
 pub mod messages;
 mod migrations;
@@ -51,6 +52,7 @@ pub use jobs::{
     describe_job, ensure_job_tables, finish_job, get_job, list_jobs, mark_job_notified,
     reap_orphaned_jobs,
 };
+pub use list_scope::ListScope;
 pub use memory::{
     LogEntry, Project, RECALL_TOKEN_BUDGET, Recall, Scope, add_project_member, count_scoped,
     create_project, forget, get_core, get_shared_core, note, projects_for, recall_for, recent_log,
@@ -72,7 +74,8 @@ pub use routines::{
     routine_runs, set_routine_active, update_routine,
 };
 pub use users::{
-    INVITE_DAYS, OWNER_ID, User, UserRole, adopt_owner, ensure_user_tables, get_user, owner_id,
+    INVITE_DAYS, OWNER_ID, User, UserRole, adopt_owner, create_member, ensure_user_tables,
+    get_user, owner_id, stamp_owned_root,
 };
 
 use rusqlite::{Connection, OptionalExtension, params};
