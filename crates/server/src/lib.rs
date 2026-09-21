@@ -12,6 +12,7 @@ pub mod egress_proxy;
 mod error;
 mod export_scrub;
 pub mod goals;
+pub mod helpers;
 pub mod hooks;
 pub mod import_open;
 pub mod job_runner;

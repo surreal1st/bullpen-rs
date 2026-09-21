@@ -56,6 +56,7 @@ mod say;
 mod search_memory;
 mod shell;
 mod snap_desk;
+mod spawn_helper;
 mod use_skill;
 
 use std::future::Future;
@@ -234,6 +235,23 @@ impl ToolBox {
             .expect("escalated mutex poisoned")
             .take()
     }
+
+    /// Helper errands offer exactly the kind's tools — no always-on set.
+    pub(crate) fn narrow_to(&self, allowed: &[&str]) -> Self {
+        let allowed: std::collections::HashSet<&str> = allowed.iter().copied().collect();
+        Self {
+            specs: self
+                .specs
+                .iter()
+                .filter(|s| allowed.contains(s.name.as_str()))
+                .cloned()
+                .collect(),
+            handler: Arc::clone(&self.handler),
+            bot_id: self.bot_id.clone(),
+            execution_context: self.execution_context.clone(),
+            escalated: Arc::clone(&self.escalated),
+        }
+    }
 }
 
 /// Parameters for building a toolbox. Reduces parameter count to avoid
@@ -288,8 +306,12 @@ pub struct BuildParams {
     pub job_sandbox: Arc<dyn crate::job_runner::JobSandbox>,
     /// S9-05: per-bot job polling ceiling (meridian vs worker wake timeout).
     pub job_max_ms: u64,
-    /// S9-04: how far nested this toolbox is (`message_bot` / `ask_in_background`).
+    /// S9-06: when true, `only` narrows to exactly those tools (no always-on).
+    pub exact_only: bool,
+    /// S9-06: nested helper / delegation turns.
     pub delegation_depth: u32,
+    /// S9-06: `spawn_helper` runs a nested turn through the run manager.
+    pub run_manager: Arc<crate::runs::RunManager>,
     /// S9-04: runs a colleague model call for an agent job (cost lands on the job row).
     pub colleague_ask: ColleagueAskHook,
 }
@@ -395,6 +417,7 @@ fn all_specs() -> Vec<ToolSpec> {
         background_jobs::job_status_spec(),
         background_jobs::await_job_spec(),
         background_jobs::stop_job_spec(),
+        spawn_helper::spec(),
     ]
 }
 
@@ -448,7 +471,9 @@ pub fn build(params: BuildParams) -> ToolBox {
     let connector_hooks = params.connector_hooks.clone();
     let job_sandbox = Arc::clone(&params.job_sandbox);
     let job_max_ms = params.job_max_ms;
+    let exact_only = params.exact_only;
     let delegation_depth = params.delegation_depth;
+    let run_manager = Arc::clone(&params.run_manager);
     let colleague_ask = Arc::clone(&params.colleague_ask);
     let toolbox_bot_id = bot_id.clone();
     let bot_made_specs = crate::bot_tools::approved_tool_specs(&db, db_path.as_str());
@@ -470,9 +495,10 @@ pub fn build(params: BuildParams) -> ToolBox {
         .chain(bot_made_specs)
         .chain(connector_specs)
         .filter(|spec| perms.get(spec.name.as_str()).copied() != Some(Decision::Deny))
-        .filter(|spec| match &only {
-            None => true,
-            Some(allowed) => {
+        .filter(|spec| match (&only, exact_only) {
+            (None, _) => true,
+            (Some(allowed), true) => allowed.iter().any(|n| n == &spec.name),
+            (Some(allowed), false) => {
                 always_on.contains(&spec.name.as_str()) || allowed.iter().any(|n| n == &spec.name)
             }
         })
@@ -504,6 +530,7 @@ pub fn build(params: BuildParams) -> ToolBox {
             let connector_hooks = connector_hooks.clone();
             let job_sandbox = Arc::clone(&job_sandbox);
             let job_max_ms = job_max_ms;
+            let run_manager = Arc::clone(&run_manager);
             let colleague_ask = Arc::clone(&colleague_ask);
             let delegation_depth = delegation_depth;
             let execution_context = handler_execution_context.clone();
@@ -647,6 +674,18 @@ pub fn build(params: BuildParams) -> ToolBox {
                         .await,
                         None,
                     ),
+                    "spawn_helper" => {
+                        let outcome = spawn_helper::run(
+                            &run_manager,
+                            &bot_id,
+                            trigger,
+                            room,
+                            delegation_depth,
+                            &args,
+                        )
+                        .await;
+                        (outcome.text, outcome.usage)
+                    }
                     "job_status" => (background_jobs::run_job_status(&db, &bot_id, &args), None),
                     "await_job" => (
                         background_jobs::run_await_job(

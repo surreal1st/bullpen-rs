@@ -8,7 +8,7 @@
 //! them, or the cache never hits and the core costs full price on every
 //! message.
 
-use model::ModelMessage;
+use model::{MessageContent, ModelMessage};
 use shared::Bot;
 use shared::nothing_new::NOTHING_NEW;
 use store::Db;
@@ -73,6 +73,31 @@ a routine that found nothing."#;
 /// dependency and a per-run cost to save nothing, because the budget is a
 /// judgement call, not a limit anyone hits exactly.
 const HISTORY_BUDGET_TOKENS: i64 = 6000;
+
+/// System + user messages for a throwaway helper — no identity or memory blocks.
+pub fn build_helper_prompt(db: &Db, instruction: &str, brief: &str) -> Vec<ModelMessage> {
+    let rules_raw = house_rules(db);
+    let rules = rules_raw.trim();
+    let system = if rules.is_empty() {
+        instruction.to_string()
+    } else {
+        format!("{instruction}\n\n## Rules for every bot\n\n{rules}")
+    };
+    vec![
+        ModelMessage {
+            role: "system".to_string(),
+            content: MessageContent::Text(system),
+            tool_calls: None,
+            tool_call_id: None,
+        },
+        ModelMessage {
+            role: "user".to_string(),
+            content: MessageContent::Text(brief.to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+        },
+    ]
+}
 
 /// One turn of conversation history. Narrower than `shared::Message` on
 /// purpose: `recent_history` and `build_prompt` only care who spoke and what

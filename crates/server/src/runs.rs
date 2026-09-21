@@ -233,9 +233,9 @@ struct ActivityState {
 /// The end state of one call to `port.stream`, folded across every step of
 /// the turn. Shared by both `Outcome` variants so the settle path does not
 /// duplicate five fields twice.
-struct RunState {
+pub(crate) struct RunState {
     messages: Vec<ModelMessage>,
-    text: String,
+    pub(crate) text: String,
     /// The model selected by Bullpen for the next request. This is the value
     /// persisted on the run row so an approval resume keeps routing and
     /// escalation decisions.
@@ -244,11 +244,11 @@ struct RunState {
     /// remains the model attributed to the saved assistant message and done
     /// event, even when the provider served a different model than requested.
     responding_model: String,
-    usage: Option<ModelUsage>,
+    pub(crate) usage: Option<ModelUsage>,
     steps: i64,
 }
 
-enum Outcome {
+pub(crate) enum Outcome {
     Answered(RunState),
     Failed {
         state: RunState,
@@ -1033,7 +1033,7 @@ impl RunManager {
     /// see `AppState::db`'s doc for why `.expect("db mutex poisoned")` used
     /// to be dangerous: a poisoned `Mutex` made every later run fail too,
     /// not just the one that panicked under the lock.
-    fn db(&self) -> MutexGuard<'_, Db> {
+    pub(crate) fn db(&self) -> MutexGuard<'_, Db> {
         self.db.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
@@ -1438,9 +1438,55 @@ impl RunManager {
         only: Option<Vec<String>>,
         execution_context: tools::RunExecutionContext,
     ) -> ToolBox {
-        // A-F6: the same `permissions_for_run` resolution `run_turn` does
-        // for its own decision loop, so the spec list offered and the
-        // decisions made against it agree on what this run is allowed.
+        self.toolbox_for_context_inner(
+            bot_id,
+            trigger,
+            room,
+            model,
+            only,
+            execution_context,
+            0,
+            false,
+        )
+    }
+
+    /// S9-06: toolbox for a nested helper turn — exact tool list, caller depth.
+    pub fn toolbox_for_helper(
+        self: &Arc<Self>,
+        caller_bot_id: &str,
+        trigger: Trigger,
+        room: bool,
+        delegation_depth: u32,
+        only: Vec<String>,
+    ) -> ToolBox {
+        let model = {
+            let db = self.db();
+            model::ladder::default_model(&db)
+        };
+        self.toolbox_for_context_inner(
+            caller_bot_id,
+            trigger,
+            room,
+            &model,
+            Some(only),
+            tools::RunExecutionContext::Unbound,
+            delegation_depth,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn toolbox_for_context_inner(
+        self: &Arc<Self>,
+        bot_id: &str,
+        trigger: Trigger,
+        room: bool,
+        model: &str,
+        only: Option<Vec<String>>,
+        execution_context: tools::RunExecutionContext,
+        delegation_depth: u32,
+        exact_only: bool,
+    ) -> ToolBox {
         let perms = {
             let db = self.db();
             permissions::permissions_for_run(&db, bot_id, trigger).unwrap_or_default()
@@ -1509,7 +1555,9 @@ impl RunManager {
             db_path: Arc::new(self.db_path()),
             data_dir: Arc::new(self.data_dir()),
             connector_hooks: self.connector_hooks(),
-            delegation_depth: 0,
+            exact_only,
+            delegation_depth,
+            run_manager: Arc::clone(self),
             colleague_ask,
         })
     }
@@ -1694,6 +1742,7 @@ impl RunManager {
                 String::new(),
                 routing_usage,
                 None,
+                MAX_STEPS,
             )
             .await;
         self.settle(&run_id, &bot_id, &conversation_id, outcome);
@@ -1709,7 +1758,7 @@ impl RunManager {
     /// transcript both span the WHOLE run, not just what happened after
     /// Josh answered.
     #[allow(clippy::too_many_arguments)]
-    async fn run_turn(
+    pub(crate) async fn run_turn(
         &self,
         run_id: &str,
         bot_id: &str,
@@ -1722,6 +1771,7 @@ impl RunManager {
         starting_text: String,
         starting_usage: Option<ModelUsage>,
         mut pending_observation: Option<ScreenObservation>,
+        step_limit: i64,
     ) -> Outcome {
         let mut text = starting_text;
         let mut responding_model = effective_requested_model.clone();
@@ -1755,7 +1805,7 @@ impl RunManager {
             })
         };
 
-        while steps < MAX_STEPS {
+        while steps < step_limit {
             if self.take_stop(run_id) {
                 return Outcome::Failed {
                     state: RunState {
@@ -2696,7 +2746,7 @@ were doing unless he changed it."
                 usage,
                 steps,
             },
-            failure: format!("Stopped after {MAX_STEPS} tool steps without an answer."),
+            failure: format!("Stopped after {step_limit} tool steps without an answer."),
             status: None,
         }
     }
@@ -3430,6 +3480,7 @@ is looking at."
                     text,
                     starting_usage,
                     pending_observation,
+                    MAX_STEPS,
                 )
                 .await;
             manager.settle(&run_id, &bot_id, &conversation_id, outcome);
