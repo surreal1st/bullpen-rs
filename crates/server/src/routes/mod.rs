@@ -173,10 +173,16 @@ async fn auth_status(
     let db = state.db();
     let configured = store::is_configured(&db)?;
     let signed_in = store::session_valid(&db, &token)?;
+    let role = if signed_in {
+        let scope = crate::scope::scope_for_token(&db, &token)?;
+        Some(if scope.is_owner { "owner" } else { "member" })
+    } else {
+        None
+    };
     Ok(Json(AuthStatus {
         configured,
         signed_in,
-        role: if signed_in { Some("owner") } else { None },
+        role,
     }))
 }
 

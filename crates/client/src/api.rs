@@ -8,13 +8,13 @@ use crate::types::{
     ApprovalsResponse, ArchivedBotsResponse, AuthStatus, AutoReviewLogEntry, AutoReviewLogResponse,
     AutoReviewState, Bot, BotPatchResponse, BotSkillNames, BotToolsField, ConversationView,
     CoreStatus, Goal, HiddenBotsResponse, MadeTool, MemoryEntry, MemoryEntryField, MemoryView,
-    ModelError, ModelField, ModelsResponse, OpenImportError, OpenImportResponse, OpenPreview,
-    OpenPreviewResponse, OpenQuestion, PendingApproval, PermissionsField, ProjectField,
-    ProjectSummary, ProjectsField, QuestionsResponse, RoomResponse, RoomSummary, RoomsResponse,
-    Roster, Routine, RoutineRun, RoutingState, RulesField, Section, SectionField, SectionsField,
-    SharedCoreField, SharedLogField, SkillBodyField, SkillSummary, SkillsField, SpendView,
-    ThreadResponse, ThreadSummary, ThreadsResponse, Tier1Models, Tier1Response, VmState,
-    WorkingBot, WorkingResponse,
+    MintInviteResponse, ModelError, ModelField, ModelsResponse, OpenImportError,
+    OpenImportResponse, OpenPreview, OpenPreviewResponse, OpenQuestion, PendingApproval,
+    PermissionsField, ProjectField, ProjectSummary, ProjectsField, QuestionsResponse, RoomResponse,
+    RoomSummary, RoomsResponse, Roster, Routine, RoutineRun, RoutingState, RulesField, Section,
+    SectionField, SectionsField, SharedCoreField, SharedLogField, SkillBodyField, SkillSummary,
+    SkillsField, SpendView, ThreadResponse, ThreadSummary, ThreadsResponse, Tier1Models,
+    Tier1Response, UsersListResponse, VmState, WorkingBot, WorkingResponse,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -452,6 +452,92 @@ pub async fn auth_status() -> Result<AuthStatus, String> {
         return Err(format!("/api/auth/status -> {}", resp.status()));
     }
     resp.json::<AuthStatus>().await.map_err(|e| e.to_string())
+}
+
+/* ---------------------------------------------------------- S11-03: people */
+
+pub async fn fetch_users() -> Result<UsersListResponse, String> {
+    let resp = Request::get("/api/users")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("/api/users -> {}", resp.status()));
+    }
+    resp.json::<UsersListResponse>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+pub async fn mint_user_invite() -> Result<MintInviteResponse, String> {
+    let resp = Request::post("/api/users/invite")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("/api/users/invite -> {}", resp.status()));
+    }
+    resp.json::<MintInviteResponse>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+pub async fn archive_user(id: &str) -> Result<(), String> {
+    let url = format!("/api/users/{id}");
+    let resp = Request::delete(&url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("{url} -> {}", resp.status()));
+    }
+    Ok(())
+}
+
+pub async fn set_user_ceiling(id: &str, ceiling: Option<f64>) -> Result<(), String> {
+    let url = format!("/api/users/{id}/ceiling");
+    let body = serde_json::json!({ "ceiling": ceiling });
+    let resp = Request::put(&url)
+        .json(&body)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("{url} -> {}", resp.status()));
+    }
+    Ok(())
+}
+
+pub async fn invite_link_valid(token: &str) -> Result<bool, String> {
+    let url = format!("/api/invites/{token}");
+    let resp = Request::get(&url).send().await.map_err(|e| e.to_string())?;
+    Ok(resp.ok())
+}
+
+#[derive(Serialize)]
+struct ClaimInviteBody<'a> {
+    name: &'a str,
+    password: &'a str,
+}
+
+pub async fn claim_invite(token: &str, name: &str, password: &str) -> Result<(), String> {
+    let url = format!("/api/invites/{token}/claim");
+    let resp = Request::post(&url)
+        .with_credentials()
+        .json(&ClaimInviteBody { name, password })
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        let status = resp.status();
+        match resp.json::<LoginError>().await {
+            Ok(err) => return Err(err.error),
+            Err(_) => return Err(format!("{url} -> {status}")),
+        }
+    }
+    Ok(())
 }
 
 /* -------------------------------------------------------------- S6-VM-01 */

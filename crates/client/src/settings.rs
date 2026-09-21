@@ -15,15 +15,17 @@ use crate::model_chip::short_model;
 use crate::slack_card::SlackCard;
 use crate::transport::sleep;
 use crate::types::{
-    AutoReviewLogEntry, AutoReviewState, CatalogEntry, RoutingState, Section, Skill, SkillSummary,
-    SpendView,
+    AutoReviewLogEntry, AutoReviewState, CatalogEntry, InviteSummary, PeopleUser, RoutingState,
+    Section, Skill, SkillSummary, SpendView,
 };
 use dioxus::prelude::*;
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 #[component]
 pub fn SettingsModal(
+    #[props(default = true)] is_owner: bool,
     on_close: EventHandler<()>,
     // ARCH-01: fires once a restore in `ArchivedBotsSection` below succeeds,
     // so `app.rs` can refresh the roster the same way `thread.rs`'s
@@ -65,6 +67,7 @@ pub fn SettingsModal(
                     }
                     div { class: "stg-panel",
                         GeneralSettings {
+                            is_owner,
                             on_restored,
                             sections,
                             on_open_marketplace: move |_| marketplace_open.set(true),
@@ -84,11 +87,20 @@ pub fn SettingsModal(
 
 #[component]
 fn GeneralSettings(
+    #[props(default = true)] is_owner: bool,
     #[props(default)] on_restored: Option<EventHandler<()>>,
     #[props(default)] sections: Vec<Section>,
     #[props(default)] on_open_marketplace: Option<EventHandler<()>>,
 ) -> Element {
     rsx! {
+        if is_owner {
+            section { class: "stg-group",
+                h3 { class: "stg-group-h", "People" }
+                div { class: "stg-card",
+                    PeopleSection {}
+                }
+            }
+        }
         section { class: "stg-group",
             h3 { class: "stg-group-h", "Bot" }
             div { class: "stg-card stg-card-loose",
@@ -108,10 +120,12 @@ fn GeneralSettings(
                 SharedMemorySection {}
             }
         }
-        section { class: "stg-group",
-            h3 { class: "stg-group-h", "Spend" }
-            div { class: "stg-card stg-card-loose",
-                SpendSection {}
+        if is_owner {
+            section { class: "stg-group",
+                h3 { class: "stg-group-h", "Spend" }
+                div { class: "stg-card stg-card-loose",
+                    SpendSection {}
+                }
             }
         }
         section { class: "stg-group",
@@ -577,6 +591,202 @@ fn SharedMemorySection() -> Element {
                     if is_busy { "Saving…" } else if is_dirty { "Save" } else { "Saved" }
                 }
             }
+        }
+    }
+}
+
+/* ------------------------------------------------------------------- People */
+
+fn people_initials(name: &str) -> String {
+    let parts: Vec<&str> = name.split_whitespace().filter(|p| !p.is_empty()).collect();
+    let first = parts.first().and_then(|p| p.chars().next()).unwrap_or('?');
+    let second = if parts.len() > 1 {
+        parts
+            .last()
+            .and_then(|p| p.chars().next())
+            .unwrap_or_default()
+    } else {
+        '\0'
+    };
+    if second == '\0' {
+        first.to_uppercase().to_string()
+    } else {
+        format!("{}{}", first.to_uppercase(), second.to_uppercase())
+    }
+}
+
+/// S11-03: owner-only People card — port of `People.tsx`.
+#[component]
+fn PeopleSection() -> Element {
+    let mut users = use_signal(Vec::<PeopleUser>::new);
+    let mut invites = use_signal(Vec::<InviteSummary>::new);
+    let mut minted = use_signal(|| None::<String>);
+    let mut busy = use_signal(|| false);
+    let mut problem = use_signal(|| None::<String>);
+    let mut refresh = use_signal(|| 0u32);
+    let mut ceiling_draft = use_signal(HashMap::<String, String>::new);
+
+    use_effect(move || {
+        let _ = *refresh.read();
+        spawn(async move {
+            if let Ok(body) = api::fetch_users().await {
+                users.set(body.users.clone());
+                invites.set(body.invites);
+                let mut drafts = HashMap::new();
+                for person in &body.users {
+                    if person.role != "owner" {
+                        drafts.insert(
+                            person.id.clone(),
+                            person
+                                .ceiling_usd
+                                .map(|v| v.to_string())
+                                .unwrap_or_default(),
+                        );
+                    }
+                }
+                ceiling_draft.set(drafts);
+            }
+        });
+    });
+
+    rsx! {
+        ul { class: "ppl-list",
+            for person in users.read().iter().cloned() {
+                li {
+                    key: "{person.id}",
+                    class: if person.archived_at.is_none() { "ppl-row" } else { "ppl-row is-gone" },
+                    span { class: "ppl-mark", "aria-hidden": "true", "{people_initials(&person.name)}" }
+                    span { class: "ppl-who",
+                        b { "{person.name}" }
+                        small {
+                            if person.role == "owner" {
+                                "Owns this Bullpen"
+                            } else if person.archived_at.is_none() {
+                                "Member"
+                            } else {
+                                "Member · removed"
+                            }
+                        }
+                    }
+                    if person.role == "owner" {
+                        span { class: "ppl-ceiling-note", "Uses the box ceiling" }
+                    } else {
+                        label { class: "ppl-ceiling",
+                            span { class: "ppl-ceiling-lbl", "Ceiling" }
+                            span { class: "ppl-dollar", "$" }
+                            input {
+                                r#type: "number",
+                                min: "0",
+                                step: "1",
+                                placeholder: "box",
+                                "aria-label": format!("Monthly ceiling for {}", person.name),
+                                value: ceiling_draft.read().get(&person.id).cloned().unwrap_or_default(),
+                                oninput: {
+                                    let id = person.id.clone();
+                                    move |evt| {
+                                        let mut next = ceiling_draft.read().clone();
+                                        next.insert(id.clone(), evt.value());
+                                        ceiling_draft.set(next);
+                                    }
+                                },
+                                onblur: {
+                                    let id = person.id.clone();
+                                    move |_| {
+                                        let id = id.clone();
+                                        let raw = ceiling_draft.read().get(&id).cloned().unwrap_or_default();
+                                        spawn(async move {
+                                            let trimmed = raw.trim();
+                                            let ceiling = if trimmed.is_empty() {
+                                                None
+                                            } else if let Ok(n) = trimmed.parse::<f64>() {
+                                                if n.is_finite() && n >= 0.0 {
+                                                    Some(n)
+                                                } else {
+                                                    return;
+                                                }
+                                            } else {
+                                                return;
+                                            };
+                                            let _ = api::set_user_ceiling(&id, ceiling).await;
+                                        });
+                                    }
+                                },
+                            }
+                            span { class: "ppl-per", "/mo" }
+                        }
+                    }
+                    if person.role == "member" && person.archived_at.is_none() {
+                        button {
+                            class: "stg-btn danger",
+                            onclick: move |_| {
+                                let id = person.id.clone();
+                                spawn(async move {
+                                    let _ = api::archive_user(&id).await;
+                                    refresh.set(refresh() + 1);
+                                });
+                            },
+                            "Remove"
+                        }
+                    }
+                }
+            }
+        }
+        div { class: "stg-row",
+            span {
+                "Invite someone"
+                small { class: "ppl-hint", "One person, one use, good for 7 days." }
+            }
+            button {
+                class: "stg-chip",
+                disabled: *busy.read(),
+                onclick: move |_| {
+                    busy.set(true);
+                    problem.set(None);
+                    spawn(async move {
+                        match api::mint_user_invite().await {
+                            Ok(body) => {
+                                let link = web_sys::window()
+                                    .and_then(|w| w.location().origin().ok())
+                                    .map(|origin| format!("{origin}/#invite={}", body.invite.token))
+                                    .unwrap_or_else(|| body.url);
+                                minted.set(Some(link));
+                                refresh.set(refresh() + 1);
+                            }
+                            Err(err) => problem.set(Some(err)),
+                        }
+                        busy.set(false);
+                    });
+                },
+                if *busy.read() { "Making a link…" } else { "Invite" }
+            }
+        }
+        if let Some(link) = minted.read().clone() {
+            div { class: "ppl-link",
+                code { "{link}" }
+                button {
+                    class: "stg-chip",
+                    onclick: move |_| {
+                        let text = link.clone();
+                        spawn(async move {
+                            if let Some(window) = web_sys::window() {
+                                let _ = window.navigator().clipboard().write_text(&text);
+                            }
+                        });
+                    },
+                    "Copy"
+                }
+            }
+        }
+        if !invites.read().is_empty() {
+            p { class: "ppl-hint",
+                "{invites.read().len()} invite link(s) still unused."
+            }
+        }
+        if let Some(problem) = problem.read().clone() {
+            p { class: "ppl-problem", "{problem}" }
+        }
+        p { class: "ppl-hint",
+            "Removing someone archives their account. Their bots, threads, memory and files stay exactly where they are."
         }
     }
 }

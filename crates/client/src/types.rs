@@ -319,14 +319,57 @@ pub struct QuestionsResponse {
 }
 
 /// `GET /api/auth/status`'s response shape - the gate's first question on
-/// every boot (`app.rs`, ported from `Gate.tsx:67-77`). `role` is not
-/// carried: this client has no member-vs-owner distinction yet (S5b's
-/// invites, `role` in the TS response, are out of scope for S1-F-11).
+/// every boot (`app.rs`, ported from `Gate.tsx:67-77`).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthStatus {
     pub configured: bool,
     pub signed_in: bool,
+    #[serde(default)]
+    pub role: Option<String>,
+}
+
+/* ---------------------------------------------------------- S11-03: people */
+
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+#[serde(rename_all = "camelCase")]
+pub struct PeopleUser {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub email: Option<String>,
+    pub role: String,
+    pub ceiling_usd: Option<f64>,
+    #[serde(default)]
+    pub created_at: String,
+    pub archived_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+#[serde(rename_all = "camelCase")]
+pub struct InviteSummary {
+    pub token: String,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub expires_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct UsersListResponse {
+    #[serde(default)]
+    pub users: Vec<PeopleUser>,
+    #[serde(default)]
+    pub invites: Vec<InviteSummary>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MintInviteResponse {
+    pub invite: InviteSummary,
+    pub url: String,
 }
 
 /* -------------------------------------------------------------- S6-VM-01 */

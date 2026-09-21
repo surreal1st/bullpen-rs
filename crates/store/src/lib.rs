@@ -74,8 +74,9 @@ pub use routines::{
     routine_runs, set_routine_active, update_routine,
 };
 pub use users::{
-    INVITE_DAYS, OWNER_ID, User, UserRole, adopt_owner, create_member, ensure_user_tables,
-    get_user, owner_id, stamp_owned_root,
+    ClaimInviteError, INVITE_DAYS, Invite, OWNER_ID, User, UserRole, adopt_owner, archive_user,
+    claim_invite, create_invite, create_member, ensure_user_tables, get_user, invite_valid,
+    list_invites, list_users, owner_id, revoke_invite, set_user_ceiling, stamp_owned_root,
 };
 
 use rusqlite::{Connection, OptionalExtension, params};

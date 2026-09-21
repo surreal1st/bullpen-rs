@@ -11,6 +11,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+base64 = { workspace = true }
 # S1-F-05: scrypt password hashing for the login route (`auth.rs`'s
 # `hash_password`/`verify_password`), porting the TS `auth.ts` scrypt calls.
 # The one new dependency this ticket adds - default features, using only the

@@ -2405,3 +2405,118 @@ button.effort-glyph:disabled {
   padding: 0.7rem;
   margin-top: 0.4rem;
 }
+
+/* S11-03: People settings — ported from bullpen-night shell.css `.ppl-*` */
+
+.ppl-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.ppl-row {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.5rem 0;
+  border-top: 1px solid var(--line);
+}
+
+.ppl-row:first-child {
+  border-top: 0;
+}
+
+.ppl-row.is-gone {
+  opacity: 0.55;
+}
+
+.ppl-mark {
+  flex: none;
+  width: 1.8rem;
+  height: 1.8rem;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--seam) 24%, var(--raised));
+  color: var(--ink);
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+.ppl-who {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.05rem;
+}
+
+.ppl-who b {
+  font-size: 0.88rem;
+}
+
+.ppl-who small,
+.ppl-hint,
+.ppl-ceiling-note {
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+
+.ppl-hint {
+  display: block;
+  margin: 0.45rem 0 0;
+}
+
+.ppl-ceiling {
+  flex: none;
+  display: flex;
+  align-items: baseline;
+  gap: 0.2rem;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.ppl-ceiling-lbl {
+  margin-right: 0.15rem;
+}
+
+.ppl-ceiling input {
+  width: 4.2rem;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink);
+  border-radius: 6px;
+  padding: 0.15rem 0.35rem;
+  font: inherit;
+  font-size: 0.78rem;
+}
+
+.ppl-dollar,
+.ppl-per {
+  opacity: 0.75;
+}
+
+.ppl-link {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.4rem;
+  padding: 0.45rem 0.6rem;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+}
+
+.ppl-link code {
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  white-space: nowrap;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.ppl-problem {
+  margin: 0.45rem 0 0;
+  color: var(--bad, #d66);
+  font-size: 0.76rem;
+}

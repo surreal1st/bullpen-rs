@@ -51,9 +51,7 @@ enum Selection {
     Room(RoomSummary),
 }
 
-/// What the gate is showing. Mirrors `Gate.tsx`'s `State` union, minus the
-/// `invited` branch - S5b's invite links are a separate feature this ticket
-/// does not port (see `AuthStatus`'s own doc on why `role` is dropped too).
+/// What the gate is showing. Mirrors `Gate.tsx`'s `State` union.
 #[derive(Clone, PartialEq)]
 enum GateState {
     Checking,
@@ -62,7 +60,38 @@ enum GateState {
     /// first paint, same as `Gate.tsx`'s `{ kind: "locked" }` (no `problem`
     /// key) vs `{ kind: "locked", problem }`.
     Locked(Option<String>),
+    Invited {
+        token: String,
+        problem: Option<String>,
+    },
     Open,
+}
+
+fn invited_token_from_hash() -> Option<String> {
+    let window = web_sys::window()?;
+    let hash = window.location().hash().ok()?;
+    let hash = hash.strip_prefix('#')?;
+    let token = hash.strip_prefix("invite=")?;
+    if token.is_empty()
+        || !token
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return None;
+    }
+    Some(token.to_string())
+}
+
+fn clear_invite_hash() {
+    if let Some(window) = web_sys::window() {
+        let path = window
+            .location()
+            .pathname()
+            .unwrap_or_else(|_| "/".to_string());
+        if let Ok(history) = window.history() {
+            let _ = history.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&path));
+        }
+    }
 }
 
 /// The sign-in gate - everything between the open internet and the app
@@ -78,6 +107,28 @@ pub fn App() -> Element {
 
     use_effect(move || {
         spawn(async move {
+            if let Some(token) = invited_token_from_hash() {
+                match api::invite_link_valid(&token).await {
+                    Ok(true) => {
+                        gate.set(GateState::Invited {
+                            token,
+                            problem: None,
+                        });
+                        return;
+                    }
+                    Ok(false) => {
+                        gate.set(GateState::Locked(Some(
+                            "That invite link is not valid any more.".to_string(),
+                        )));
+                        return;
+                    }
+                    Err(_) => {
+                        gate.set(GateState::Locked(Some("Cannot reach Bullpen.".to_string())));
+                        return;
+                    }
+                }
+            }
+
             match api::auth_status().await {
                 Ok(status) if !status.configured => gate.set(GateState::Setup),
                 Ok(status) if status.signed_in => gate.set(GateState::Open),
@@ -109,6 +160,44 @@ pub fn App() -> Element {
         });
     };
 
+    let mut invite_name = use_signal(String::new);
+    let mut accept_invite = move || {
+        if *busy.read() {
+            return;
+        }
+        let GateState::Invited { token, .. } = gate.read().clone() else {
+            return;
+        };
+        if invite_name.read().trim().is_empty() || password.read().len() < 8 {
+            gate.set(GateState::Invited {
+                token,
+                problem: Some("Give a name and a password of at least 8 characters.".to_string()),
+            });
+            return;
+        }
+        busy.set(true);
+        let name = invite_name.read().clone();
+        let pass = password.read().clone();
+        spawn(async move {
+            let result = api::claim_invite(&token, name.trim(), &pass).await;
+            busy.set(false);
+            match result {
+                Ok(()) => {
+                    password.set(String::new());
+                    invite_name.set(String::new());
+                    clear_invite_hash();
+                    gate.set(GateState::Open);
+                }
+                Err(err) => {
+                    gate.set(GateState::Invited {
+                        token,
+                        problem: Some(err),
+                    });
+                }
+            }
+        });
+    };
+
     let body = match gate.read().clone() {
         GateState::Checking => rsx! {
             div { class: "gate", "aria-busy": "true" }
@@ -119,6 +208,47 @@ pub fn App() -> Element {
                     h1 { "Bullpen" }
                     p { class: "gate-note",
                         "No password is set on this server yet, so it is refusing everything. Set one, then reload."
+                    }
+                }
+            }
+        },
+        GateState::Invited { problem, .. } => rsx! {
+            div { class: "gate",
+                form {
+                    class: "gate-card",
+                    onsubmit: move |evt| {
+                        evt.prevent_default();
+                        accept_invite();
+                    },
+                    h1 { "Join this Bullpen" }
+                    p { class: "gate-note", "Pick a name and a password. You will be signed in when this succeeds." }
+                    label { class: "gate-label", r#for: "gate-name", "Your name" }
+                    input {
+                        id: "gate-name",
+                        r#type: "text",
+                        autocomplete: "name",
+                        autofocus: true,
+                        value: "{invite_name}",
+                        oninput: move |evt| invite_name.set(evt.value()),
+                        class: "gate-input",
+                    }
+                    label { class: "gate-label", r#for: "gate-password", "Password" }
+                    input {
+                        id: "gate-password",
+                        r#type: "password",
+                        autocomplete: "new-password",
+                        value: "{password}",
+                        oninput: move |evt| password.set(evt.value()),
+                        class: "gate-input",
+                    }
+                    button {
+                        r#type: "submit",
+                        class: "gate-button",
+                        disabled: *busy.read(),
+                        if *busy.read() { "Joining…" } else { "Join" }
+                    }
+                    if let Some(problem) = problem {
+                        p { class: "gate-problem", "{problem}" }
                     }
                 }
             }
@@ -186,6 +316,7 @@ fn AppShell() -> Element {
     // this signal still just tracks whether the modal itself is open - see
     // `settings.rs`'s own doc comment for what it renders.
     let mut settings_open = use_signal(|| false);
+    let mut is_owner = use_signal(|| true);
     // Bumped whenever a "roster" change lands while a ROOM is open, to
     // force that `ChatPane` to remount and re-fetch - ported from
     // `App.tsx`'s `roomOpen.current` branch: a room's second (and later)
@@ -196,6 +327,9 @@ fn AppShell() -> Element {
 
     use_effect(move || {
         spawn(async move {
+            if let Ok(status) = api::auth_status().await {
+                is_owner.set(status.role.as_deref() != Some("member"));
+            }
             let result = fetch_roster().await;
             roster.set(Some(result));
         });
@@ -459,6 +593,7 @@ fn AppShell() -> Element {
         {body}
         if *settings_open.read() {
             SettingsModal {
+                is_owner: *is_owner.read(),
                 on_close: move |_| settings_open.set(false),
                 // ARCH-01: a restore from `ArchivedBotsSection` should bring
                 // the bot back into the rail right away, same refresh
