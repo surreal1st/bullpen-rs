@@ -129,10 +129,11 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use model::judge_pin;
+use serde::Serialize;
 use serde_json::json;
 
 use super::settings::refuse_if_premium;
-use crate::AppState;
+use crate::{ApiResult, AppError, AppState};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -144,6 +145,27 @@ pub fn router() -> Router<AppState> {
         .route("/api/bots/{id}/duplicate", post(duplicate_bot))
         .route("/api/bots/{id}/rail", patch(patch_rail))
         .route("/api/bots/{id}/export", get(export_bot))
+        .route(
+            "/api/bots/{id}/share",
+            post(create_bot_share)
+                .get(get_bot_share)
+                .delete(revoke_bot_share),
+        )
+}
+
+pub(crate) fn bot_export_markdown(bot: &shared::Bot) -> Result<String, crate::AppError> {
+    let mut markdown = String::from("---\n");
+    markdown.push_str(&format!("name: {}\n", serde_json::to_string(&bot.name)?));
+    markdown.push_str(&format!(
+        "description: {}\n",
+        serde_json::to_string(&bot.purpose)?
+    ));
+    if let Some(model) = &bot.model {
+        markdown.push_str(&format!("model: {}\n", serde_json::to_string(model)?));
+    }
+    markdown.push_str("---\n\n");
+    markdown.push_str(&crate::export_scrub::scrub_export_text(&bot.instructions));
+    Ok(markdown)
 }
 
 /// F7b-01: `POST /api/bots`. The body is read as a raw JSON object, same
@@ -458,17 +480,7 @@ async fn export_bot(
         return Ok(no_such_bot());
     };
 
-    let mut markdown = String::from("---\n");
-    markdown.push_str(&format!("name: {}\n", serde_json::to_string(&bot.name)?));
-    markdown.push_str(&format!(
-        "description: {}\n",
-        serde_json::to_string(&bot.purpose)?
-    ));
-    if let Some(model) = &bot.model {
-        markdown.push_str(&format!("model: {}\n", serde_json::to_string(model)?));
-    }
-    markdown.push_str("---\n\n");
-    markdown.push_str(&crate::export_scrub::scrub_export_text(&bot.instructions));
+    let markdown = bot_export_markdown(&bot)?;
 
     let mut response = (StatusCode::OK, markdown).into_response();
     response.headers_mut().insert(
@@ -605,4 +617,70 @@ async fn list_hidden_bots(State(state): State<AppState>) -> Result<Response, cra
     let db = state.db();
     let bots = store::list_hidden(&db)?;
     Ok(Json(json!({ "bots": bots })).into_response())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShareJson {
+    token: String,
+    bot_id: String,
+    expires_at: String,
+}
+
+async fn create_bot_share(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<impl IntoResponse> {
+    let db = state.db();
+    if store::get_bot(&db, &id)?.is_none() {
+        return Err(AppError::not_found("no such bot"));
+    }
+    let share = crate::share::create_share_token(&db, &id)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "share": ShareJson {
+                token: share.token,
+                bot_id: share.bot_id,
+                expires_at: share.expires_at,
+            }
+        })),
+    ))
+}
+
+async fn get_bot_share(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Response> {
+    let db = state.db();
+    if store::get_bot(&db, &id)?.is_none() {
+        return Err(AppError::not_found("no such bot"));
+    }
+    match crate::share::get_share_token(&db, &id)? {
+        Some(share) => Ok(Json(json!({
+            "share": ShareJson {
+                token: share.token,
+                bot_id: share.bot_id,
+                expires_at: share.expires_at,
+            }
+        }))
+        .into_response()),
+        None => Ok((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "no active share" })),
+        )
+            .into_response()),
+    }
+}
+
+async fn revoke_bot_share(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let db = state.db();
+    if store::get_bot(&db, &id)?.is_none() {
+        return Err(AppError::not_found("no such bot"));
+    }
+    crate::share::revoke_share_token(&db, &id)?;
+    Ok(Json(json!({ "ok": true })))
 }

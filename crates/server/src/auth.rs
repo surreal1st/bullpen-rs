@@ -138,7 +138,7 @@ const OPEN_PATHS: &[&str] = &[
     "/api/oauth/callback",
 ];
 
-const OPEN_PREFIXES: &[&str] = &["/api/hooks/", "/api/invites/"];
+const OPEN_PREFIXES: &[&str] = &["/api/hooks/", "/api/invites/", "/api/share/"];
 
 pub fn is_open_path(path: &str) -> bool {
     OPEN_PATHS.contains(&path) || OPEN_PREFIXES.iter().any(|prefix| path.starts_with(prefix))

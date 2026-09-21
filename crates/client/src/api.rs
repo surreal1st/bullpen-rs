@@ -1425,6 +1425,28 @@ pub async fn set_bot_shape(bot_id: &str, shape: Option<&str>) -> Result<(), Stri
 /// `vm_card::base64_encode`, the same encoder that trick already needed)
 /// and renders a real `<a download>` from it, so the actual save-file UI is
 /// still the platform's own, not a hand-rolled one.
+/// `POST /api/bots/:id/share` — mints a 7-day export link (S11-05).
+pub async fn create_bot_share_link(bot_id: &str) -> Result<(String, String), String> {
+    let url = format!("/api/bots/{bot_id}/share");
+    let resp = Request::post(&url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("{url} -> {}", resp.status()));
+    }
+    let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let token = body["share"]["token"]
+        .as_str()
+        .ok_or_else(|| "share response missing token".to_string())?
+        .to_string();
+    let expires_at = body["share"]["expiresAt"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    Ok((token, expires_at))
+}
+
 pub async fn export_bot_markdown(bot_id: &str) -> Result<Vec<u8>, String> {
     let url = format!("/api/bots/{bot_id}/export");
     let resp = Request::get(&url).send().await.map_err(|e| e.to_string())?;

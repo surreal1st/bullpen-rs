@@ -336,6 +336,8 @@ pub fn ChatPane(
     // `local_bot` at all - the new bot is a DIFFERENT row, handed straight
     // up through `on_duplicated` instead (see that prop's own doc).
     let mut duplicate_busy = use_signal(|| false);
+    let mut share_busy = use_signal(|| false);
+    let mut share_note = use_signal(|| None::<String>);
 
     rsx! {
         div { class: "pane",
@@ -560,6 +562,48 @@ pub fn ChatPane(
                     // `on_duplicated` (see that prop's own doc for why -
                     // there is no local row to patch, unlike every pin/
                     // hide/move/avatar/shape toggle above).
+                    let share_bot_id = bot_id.clone();
+                    let on_share_click = move |_| {
+                        if *share_busy.read() {
+                            return;
+                        }
+                        share_busy.set(true);
+                        share_note.set(None);
+                        rail_error.set(None);
+                        let bot_id = share_bot_id.clone();
+                        spawn(async move {
+                            match api::create_bot_share_link(&bot_id).await {
+                                Ok((token, expires_at)) => {
+                                    share_busy.set(false);
+                                    let share_path = format!("/api/share/{token}");
+                                    #[cfg(target_arch = "wasm32")]
+                                    {
+                                        if let Some(window) = web_sys::window() {
+                                            if let Ok(origin) = window.location().origin() {
+                                                let full = format!("{origin}{share_path}");
+                                                let _ = window
+                                                    .navigator()
+                                                    .clipboard()
+                                                    .write_text(&full);
+                                                share_note.set(Some(format!(
+                                                    "Share link copied (expires {expires_at})"
+                                                )));
+                                                return;
+                                            }
+                                        }
+                                    }
+                                    share_note.set(Some(format!(
+                                        "Share link: {share_path} (expires {expires_at})"
+                                    )));
+                                }
+                                Err(err) => {
+                                    share_busy.set(false);
+                                    rail_error.set(Some(err));
+                                }
+                            }
+                        });
+                    };
+
                     let duplicate_bot_id = bot_id.clone();
                     let on_duplicate_click = move |_| {
                         if *duplicate_busy.read() {
@@ -666,6 +710,12 @@ pub fn ChatPane(
                                 }
                                 button {
                                     class: "pane-perms-btn",
+                                    disabled: *share_busy.read(),
+                                    onclick: on_share_click,
+                                    if *share_busy.read() { "Sharing…" } else { "Share link" }
+                                }
+                                button {
+                                    class: "pane-perms-btn",
                                     disabled: *duplicate_busy.read(),
                                     onclick: on_duplicate_click,
                                     if *duplicate_busy.read() { "Duplicating…" } else { "Duplicate" }
@@ -680,6 +730,9 @@ pub fn ChatPane(
                                     on_saved: move |updated: Bot| local_bot.set(Some(updated)),
                                 }
                             }
+                        }
+                        if let Some(note) = share_note.read().clone() {
+                            p { class: "muted", "{note}" }
                         }
                         if let Some(err) = rail_error.read().clone() {
                             p { class: "composer-error", "{err}" }

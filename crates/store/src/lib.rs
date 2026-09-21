@@ -18,6 +18,7 @@ pub mod questions;
 pub mod rooms;
 pub mod roster;
 pub mod routines;
+pub mod share;
 pub mod skills;
 pub mod slack;
 pub mod users;
@@ -219,6 +220,7 @@ impl Db {
         bot_tools::ensure_bot_tool_tables(&db)?;
         jobs::ensure_job_tables(&db)?;
         users::ensure_user_tables(&db)?;
+        share::ensure_share_tokens_table(&db)?;
 
         Ok(db)
     }

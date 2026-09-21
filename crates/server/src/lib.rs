@@ -36,6 +36,7 @@ pub mod sandbox_routing;
 pub mod schedule;
 pub mod scope;
 pub mod settings_secrets;
+pub mod share;
 pub mod slack;
 pub mod spend;
 pub mod teams;

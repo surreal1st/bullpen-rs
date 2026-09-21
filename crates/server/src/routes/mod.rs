@@ -29,6 +29,7 @@ mod routines;
 mod runs;
 mod sections;
 mod settings;
+mod share;
 mod skills;
 mod slack;
 mod spend;
@@ -75,6 +76,7 @@ pub fn router() -> Router<AppState> {
         .merge(rooms::router())
         .merge(routines::router())
         .merge(sections::router())
+        .merge(share::router())
         .merge(skills::router())
         .merge(messages::router())
         .merge(events::router())
