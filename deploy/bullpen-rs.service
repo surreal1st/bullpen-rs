@@ -63,7 +63,9 @@ Environment=RUST_LOG=info,server=debug,model=debug,bullpen=debug
 #
 # What bullpen-rs.env actually holds, read off the box 2026-09-17 (names only -
 # never the values): BULLPEN_OPENROUTER_KEY_FILE, BULLPEN_SANDBOX, BULLPEN_VM,
-# PUBLIC_URL. The old comment here claimed it held only the key file, which was
+# PUBLIC_URL. Optional since S9-JEV (same file, same rules as OpenRouter):
+# BULLPEN_TYPESAFE_KEY_FILE or BULLPEN_TYPESAFE_KEY — when unset, helper-kind
+# gate and repo_grep re-rank stay off (no Jev HTTP). The old comment here claimed it held only the key file, which was
 # wrong, and the two it did not mention were exactly the two that never made it
 # into this tracked file. Only the key-file path genuinely needs to live outside
 # the repo; the other three are plain operational settings, so BULLPEN_SANDBOX
