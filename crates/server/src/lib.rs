@@ -141,13 +141,15 @@ impl AppState {
     pub fn new(db: Db) -> Self {
         let vm_config = default_vm_config();
         let vm_docker = default_vm_docker(&vm_config);
+        let (sandbox, job_sandbox) = sandbox::default_sandbox_pair();
         Self::build(
             db,
             default_client_root(),
             default_port(),
             default_catalog(),
             default_credits(),
-            default_sandbox(),
+            sandbox,
+            job_sandbox,
             default_slack_api(),
             vm_docker,
             vm_config,
@@ -158,13 +160,15 @@ impl AppState {
     pub fn with_client_root(db: Db, client_root: String) -> Self {
         let vm_config = default_vm_config();
         let vm_docker = default_vm_docker(&vm_config);
+        let (sandbox, job_sandbox) = sandbox::default_sandbox_pair();
         Self::build(
             db,
             client_root,
             default_port(),
             default_catalog(),
             default_credits(),
-            default_sandbox(),
+            sandbox,
+            job_sandbox,
             default_slack_api(),
             vm_docker,
             vm_config,
@@ -179,13 +183,15 @@ impl AppState {
     pub fn with_port(db: Db, port: Arc<dyn model::ModelPort>) -> Self {
         let vm_config = default_vm_config();
         let vm_docker = default_vm_docker(&vm_config);
+        let (sandbox, job_sandbox) = sandbox::default_sandbox_pair();
         Self::build(
             db,
             default_client_root(),
             port,
             default_catalog(),
             default_credits(),
-            default_sandbox(),
+            sandbox,
+            job_sandbox,
             default_slack_api(),
             vm_docker,
             vm_config,
@@ -197,13 +203,15 @@ impl AppState {
     pub fn with_catalog(db: Db, catalog: Arc<dyn Catalog>) -> Self {
         let vm_config = default_vm_config();
         let vm_docker = default_vm_docker(&vm_config);
+        let (sandbox, job_sandbox) = sandbox::default_sandbox_pair();
         Self::build(
             db,
             default_client_root(),
             default_port(),
             catalog,
             default_credits(),
-            default_sandbox(),
+            sandbox,
+            job_sandbox,
             default_slack_api(),
             vm_docker,
             vm_config,
@@ -217,13 +225,15 @@ impl AppState {
     pub fn with_credits(db: Db, credits: Arc<dyn spend::CreditsPort>) -> Self {
         let vm_config = default_vm_config();
         let vm_docker = default_vm_docker(&vm_config);
+        let (sandbox, job_sandbox) = sandbox::default_sandbox_pair();
         Self::build(
             db,
             default_client_root(),
             default_port(),
             default_catalog(),
             credits,
-            default_sandbox(),
+            sandbox,
+            job_sandbox,
             default_slack_api(),
             vm_docker,
             vm_config,
@@ -243,6 +253,7 @@ impl AppState {
             default_catalog(),
             default_credits(),
             sandbox,
+            Arc::new(job_runner::UnavailableJobSandbox),
             default_slack_api(),
             vm_docker,
             vm_config,
@@ -260,13 +271,15 @@ impl AppState {
         vm_config: store::vms::VmConfig,
         vm_enabled: bool,
     ) -> Self {
+        let (sandbox, job_sandbox) = sandbox::default_sandbox_pair();
         Self::build(
             db,
             default_client_root(),
             default_port(),
             default_catalog(),
             default_credits(),
-            default_sandbox(),
+            sandbox,
+            job_sandbox,
             default_slack_api(),
             docker,
             Arc::new(vm_config),
@@ -285,13 +298,15 @@ impl AppState {
     ) -> Self {
         let vm_config = default_vm_config();
         let vm_docker = default_vm_docker(&vm_config);
+        let (sandbox, job_sandbox) = sandbox::default_sandbox_pair();
         Self::build(
             db,
             default_client_root(),
             port,
             default_catalog(),
             credits,
-            default_sandbox(),
+            sandbox,
+            job_sandbox,
             default_slack_api(),
             vm_docker,
             vm_config,
@@ -305,13 +320,15 @@ impl AppState {
     pub fn with_slack_api(db: Db, slack_api: Arc<dyn slack::SlackApi + Send + Sync>) -> Self {
         let vm_config = default_vm_config();
         let vm_docker = default_vm_docker(&vm_config);
+        let (sandbox, job_sandbox) = sandbox::default_sandbox_pair();
         Self::build(
             db,
             default_client_root(),
             default_port(),
             default_catalog(),
             default_credits(),
-            default_sandbox(),
+            sandbox,
+            job_sandbox,
             slack_api,
             vm_docker,
             vm_config,
@@ -329,13 +346,15 @@ impl AppState {
     ) -> Self {
         let vm_config = default_vm_config();
         let vm_docker = default_vm_docker(&vm_config);
+        let (sandbox, job_sandbox) = sandbox::default_sandbox_pair();
         Self::build(
             db,
             default_client_root(),
             port,
             default_catalog(),
             default_credits(),
-            default_sandbox(),
+            sandbox,
+            job_sandbox,
             slack_api,
             vm_docker,
             vm_config,
@@ -351,6 +370,7 @@ impl AppState {
         catalog: Arc<dyn Catalog>,
         credits: Arc<dyn spend::CreditsPort>,
         sandbox: Arc<dyn sandbox::Sandbox>,
+        job_sandbox: Arc<dyn job_runner::JobSandbox>,
         slack_api: Arc<dyn slack::SlackApi + Send + Sync>,
         vm_docker: Arc<dyn vm::DockerRun>,
         vm_config: Arc<store::vms::VmConfig>,
@@ -410,6 +430,7 @@ impl AppState {
             Arc::clone(&db),
             port,
             Arc::clone(&sandbox),
+            Arc::clone(&job_sandbox),
             Arc::clone(&vm_docker),
             Arc::clone(&vm_config),
             vm_enabled,
@@ -727,16 +748,6 @@ fn default_credits() -> Arc<dyn spend::CreditsPort> {
 /// storage by the caller.
 fn default_slack_api() -> Arc<dyn slack::SlackApi + Send + Sync> {
     Arc::new(slack::ReqwestSlackApi)
-}
-
-/// S6L-01: the sandbox for executing bot commands. Reads `BULLPEN_SANDBOX`
-/// to decide whether to create a real `DockerSandbox` or an `UnavailableSandbox`.
-/// A startup probe (`docker version`) failing under `on` logs once and falls
-/// back to Unavailable. S6L-02 moved the body to `sandbox::default_sandbox`
-/// so `RunManager` can resolve the same default; this stays as the name
-/// every constructor above already calls.
-fn default_sandbox() -> Arc<dyn sandbox::Sandbox> {
-    sandbox::default_sandbox()
 }
 
 /// S6-W-01: this process's own environment, snapshotted once - what every

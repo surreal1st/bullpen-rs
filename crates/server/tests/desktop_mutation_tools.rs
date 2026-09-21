@@ -286,6 +286,7 @@ fn shell_manager(
         db,
         Arc::new(NeverCalledPort),
         sandbox::default_sandbox(),
+        sandbox::default_job_sandbox(),
         Arc::clone(&docker) as Arc<dyn DockerRun>,
         Arc::new(config()),
         true,

@@ -14,6 +14,37 @@ use store::{
 use crate::sandbox::{ExecResult, ProbeResult, SpawnResult, container_for_job, job_log_path};
 use crate::workers::JobEvents;
 
+/// Sandbox cannot background — same message shape as TS when `spawn` is absent.
+pub struct UnavailableJobSandbox;
+
+#[async_trait::async_trait]
+impl JobSandbox for UnavailableJobSandbox {
+    fn supports_background(&self) -> bool {
+        false
+    }
+
+    async fn exec_with_timeout(
+        &self,
+        _bot_id: &str,
+        _command: &str,
+        _timeout_ms: u64,
+    ) -> ExecResult {
+        unreachable!()
+    }
+
+    async fn spawn(&self, _bot_id: &str, _job_id: &str, _command: &str) -> SpawnResult {
+        unreachable!()
+    }
+
+    async fn probe(&self, _handle: &str) -> ProbeResult {
+        unreachable!()
+    }
+
+    async fn kill(&self, _handle: &str) -> bool {
+        unreachable!()
+    }
+}
+
 pub const NOTIFY_PATTERN_MAX_CHARS: usize = 200;
 
 const POLL_MS: u64 = 3_000;
@@ -285,6 +316,81 @@ fn say_to_josh(deps: &JobRunnerDeps, bot_id: &str, text: &str) {
             ..Default::default()
         },
     );
+}
+
+pub async fn await_job(
+    deps: &JobRunnerDeps,
+    bot_id: &str,
+    job_id: &str,
+    seconds: Option<u32>,
+) -> String {
+    let max_seconds = seconds.unwrap_or(30).clamp(1, 60);
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_secs(u64::from(max_seconds));
+    let poll_ms = deps.poll_ms.min(500);
+
+    loop {
+        if std::time::Instant::now() > deadline {
+            return format!(
+                "Still running after {max_seconds} seconds; check again later with job_status."
+            );
+        }
+
+        let current = {
+            let db = deps.db.lock().expect("db lock");
+            store::get_job(&db, bot_id, job_id)
+        };
+        let Some(current) = current else {
+            return "No job of yours has that id.".to_string();
+        };
+        if current.status != JobStatus::Running {
+            return format!(
+                "[{}] {}\n{}",
+                current.status.as_str(),
+                current.label,
+                if current.output.is_empty() {
+                    "(no output)".to_string()
+                } else {
+                    current.output.clone()
+                }
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(poll_ms)).await;
+    }
+}
+
+pub async fn stop_job(deps: &JobRunnerDeps, bot_id: &str, job_id: &str) -> String {
+    let job = {
+        let db = deps.db.lock().expect("db lock");
+        store::get_job(&db, bot_id, job_id)
+    };
+    let Some(job) = job else {
+        return "No job of yours has that id.".to_string();
+    };
+    if job.status != JobStatus::Running {
+        return format!("That job is already {}.", job.status.as_str());
+    }
+
+    if job.kind == JobKind::Shell {
+        deps.sandbox.kill(&container_for_job(&job.id)).await;
+    }
+
+    let output = if job.kind == JobKind::Agent {
+        "Stopped. The colleague may still finish its turn, but its answer will be discarded."
+            .to_string()
+    } else {
+        "Stopped before it finished.".to_string()
+    };
+
+    if let Ok(db) = deps.db.lock() {
+        let _ = finish_job(&db, &job.id, JobStatus::Stopped, &output, None, None);
+    }
+
+    format!("Stopped {}.", job.label)
+}
+
+pub fn job_runner_deps(db: Arc<Mutex<Db>>, sandbox: Arc<dyn JobSandbox>) -> JobRunnerDeps {
+    JobRunnerDeps::new(db, sandbox)
 }
 
 async fn read_log(deps: &JobRunnerDeps, bot_id: &str, job_id: &str, prefix: &str) -> String {

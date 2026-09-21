@@ -9,6 +9,7 @@
 
 mod add_to_room;
 mod ask_josh;
+mod background_jobs;
 // S6-W-03: `pub`, not `mod`/`pub(crate)` like every sibling tool module -
 // `crates/server/tests/browse_tools.rs` (the bite tests this ticket's own
 // instructions require) is a SEPARATE crate, and Rust visibility is not
@@ -277,6 +278,8 @@ pub struct BuildParams {
     pub data_dir: Arc<String>,
     /// S7-04: MCP connector tools for enabled integrations (optional in tests).
     pub connector_hooks: Option<Arc<crate::runs::ConnectorHooks>>,
+    /// S9-03: background shell jobs (`run_in_background`, etc.).
+    pub job_sandbox: Arc<dyn crate::job_runner::JobSandbox>,
 }
 
 /// F1: the full spec list this crate's toolbox can offer, before either
@@ -375,6 +378,10 @@ fn all_specs() -> Vec<ToolSpec> {
         propose_tool::spec(),
         connector_resources::list_resources_spec(),
         connector_resources::read_resource_spec(),
+        background_jobs::run_in_background_spec(),
+        background_jobs::job_status_spec(),
+        background_jobs::await_job_spec(),
+        background_jobs::stop_job_spec(),
     ]
 }
 
@@ -426,6 +433,7 @@ pub fn build(params: BuildParams) -> ToolBox {
     let db_path = Arc::clone(&params.db_path);
     let data_dir = Arc::clone(&params.data_dir);
     let connector_hooks = params.connector_hooks.clone();
+    let job_sandbox = Arc::clone(&params.job_sandbox);
     let toolbox_bot_id = bot_id.clone();
     let bot_made_specs = crate::bot_tools::approved_tool_specs(&db, db_path.as_str());
     let connector_specs: Vec<ToolSpec> =
@@ -478,6 +486,7 @@ pub fn build(params: BuildParams) -> ToolBox {
             let db_path = Arc::clone(&db_path);
             let data_dir = Arc::clone(&data_dir);
             let connector_hooks = connector_hooks.clone();
+            let job_sandbox = Arc::clone(&job_sandbox);
             let execution_context = handler_execution_context.clone();
             Box::pin(async move {
                 if crate::bot_tools::is_bot_made_tool(&db, &name) {
@@ -597,6 +606,20 @@ pub fn build(params: BuildParams) -> ToolBox {
                     "reflect" => (goal_tools::run_reflect(&db, &bot_id, &args), None),
                     "use_skill" => (use_skill::run(&db, &bot_id, &args), None),
                     "hire_bot" => (hire_bot::run(&db, &bot_id, &args), None),
+                    "run_in_background" => (
+                        background_jobs::run_run_in_background(&db, &job_sandbox, &bot_id, &args)
+                            .await,
+                        None,
+                    ),
+                    "job_status" => (background_jobs::run_job_status(&db, &bot_id, &args), None),
+                    "await_job" => (
+                        background_jobs::run_await_job(&db, &job_sandbox, &bot_id, &args).await,
+                        None,
+                    ),
+                    "stop_job" => (
+                        background_jobs::run_stop_job(&db, &job_sandbox, &bot_id, &args).await,
+                        None,
+                    ),
                     // S8a-02: the `Cdp` is resolved HERE, at call time, by
                     // `desk::cdp_for_bot` - the calling bot's OWN machine
                     // (`vm::desk_for_in` -> `vm::vm_desk`) when per-bot VMs

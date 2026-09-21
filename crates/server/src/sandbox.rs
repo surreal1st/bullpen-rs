@@ -905,12 +905,11 @@ pub fn sandbox_network_name() -> String {
 /// compiling and keeps seeing the S2 Unavailable text unchanged, since
 /// `BULLPEN_SANDBOX` is never `on` in a test process (the probe below is
 /// therefore never reached by the test suite either).
-pub fn default_sandbox() -> std::sync::Arc<dyn Sandbox> {
+/// `Ok(None)` — sandboxing off. `Ok(Some)` — live docker. `Err` — on but daemon missing.
+fn open_docker_sandbox() -> Result<Option<std::sync::Arc<DockerSandbox>>, String> {
     let sandbox_mode = std::env::var("BULLPEN_SANDBOX").unwrap_or_default();
     if sandbox_mode != "on" {
-        return std::sync::Arc::new(UnavailableSandbox::new(
-            "Sandboxing is off here. Set BULLPEN_SANDBOX=on where it is wanted.",
-        ));
+        return Ok(None);
     }
 
     let mut config = SandboxConfig::default();
@@ -937,15 +936,48 @@ pub fn default_sandbox() -> std::sync::Arc<dyn Sandbox> {
     match probe_docker(&config.docker_host) {
         Ok(()) => {
             let runner = std::sync::Arc::new(TokioRunner::new(config.docker_host.clone()));
-            std::sync::Arc::new(DockerSandbox::new(config, runner))
+            Ok(Some(std::sync::Arc::new(DockerSandbox::new(
+                config, runner,
+            ))))
         }
         Err(reason) => {
             tracing::error!("sandbox startup probe failed: {reason}");
-            std::sync::Arc::new(UnavailableSandbox::new(format!(
-                "The sandbox daemon did not answer at startup. {reason}"
-            )))
+            Err(reason)
         }
     }
+}
+
+pub fn default_sandbox_pair() -> (
+    std::sync::Arc<dyn Sandbox>,
+    std::sync::Arc<dyn crate::job_runner::JobSandbox>,
+) {
+    match open_docker_sandbox() {
+        Ok(Some(d)) => {
+            let exec: std::sync::Arc<dyn Sandbox> = d.clone();
+            let jobs: std::sync::Arc<dyn crate::job_runner::JobSandbox> = d;
+            (exec, jobs)
+        }
+        Ok(None) => (
+            std::sync::Arc::new(UnavailableSandbox::new(
+                "Sandboxing is off here. Set BULLPEN_SANDBOX=on where it is wanted.",
+            )),
+            std::sync::Arc::new(crate::job_runner::UnavailableJobSandbox),
+        ),
+        Err(reason) => (
+            std::sync::Arc::new(UnavailableSandbox::new(format!(
+                "The sandbox daemon did not answer at startup. {reason}"
+            ))),
+            std::sync::Arc::new(crate::job_runner::UnavailableJobSandbox),
+        ),
+    }
+}
+
+pub fn default_sandbox() -> std::sync::Arc<dyn Sandbox> {
+    default_sandbox_pair().0
+}
+
+pub fn default_job_sandbox() -> std::sync::Arc<dyn crate::job_runner::JobSandbox> {
+    default_sandbox_pair().1
 }
 
 #[cfg(test)]

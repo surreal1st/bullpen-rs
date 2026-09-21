@@ -306,6 +306,8 @@ pub struct RunManager {
     /// (`new`, `with_backlog_ttl`); injected by `with_sandbox` for
     /// `AppState::build` and sandbox-aware tests.
     sandbox: Arc<dyn sandbox::Sandbox>,
+    /// S9-03: what background job tools use for spawn/probe/kill.
+    job_sandbox: Arc<dyn crate::job_runner::JobSandbox>,
     /// S8a-02: what `toolbox_for` hands `browse`/`read_page` to resolve
     /// their `Cdp` against - `desk::cdp_for_bot`'s own doc has the routing
     /// decisions. Resolved from `BULLPEN_VM` by the no-arg constructors
@@ -482,6 +484,7 @@ impl RunManager {
             db,
             port,
             sandbox::default_sandbox(),
+            sandbox::default_job_sandbox(),
             vm_docker,
             vm_config,
             vm_enabled,
@@ -508,11 +511,22 @@ impl RunManager {
         port: Arc<dyn ModelPort>,
         sandbox: Arc<dyn sandbox::Sandbox>,
     ) -> Self {
+        Self::with_sandbox_and_job_sandbox(db, port, sandbox, sandbox::default_job_sandbox())
+    }
+
+    /// S9-03: inject the job runner sandbox (often the same `Arc<DockerSandbox>` as `sandbox`).
+    pub fn with_sandbox_and_job_sandbox(
+        db: Arc<Mutex<Db>>,
+        port: Arc<dyn ModelPort>,
+        sandbox: Arc<dyn sandbox::Sandbox>,
+        job_sandbox: Arc<dyn crate::job_runner::JobSandbox>,
+    ) -> Self {
         let (vm_docker, vm_config, vm_enabled) = default_vm_parts();
         Self::build(
             db,
             port,
             sandbox,
+            job_sandbox,
             vm_docker,
             vm_config,
             vm_enabled,
@@ -584,6 +598,7 @@ impl RunManager {
             db,
             port,
             sandbox,
+            sandbox::default_job_sandbox(),
             vm_docker,
             vm_config,
             vm_enabled,
@@ -598,6 +613,7 @@ impl RunManager {
         db: Arc<Mutex<Db>>,
         port: Arc<dyn ModelPort>,
         sandbox: Arc<dyn sandbox::Sandbox>,
+        job_sandbox: Arc<dyn crate::job_runner::JobSandbox>,
         vm_docker: Arc<dyn vm::DockerRun>,
         vm_config: Arc<store::vms::VmConfig>,
         vm_enabled: bool,
@@ -609,6 +625,7 @@ impl RunManager {
             db,
             port,
             sandbox,
+            job_sandbox,
             vm_docker,
             vm_config,
             vm_enabled,
@@ -625,6 +642,7 @@ impl RunManager {
         db: Arc<Mutex<Db>>,
         port: Arc<dyn ModelPort>,
         sandbox: Arc<dyn sandbox::Sandbox>,
+        job_sandbox: Arc<dyn crate::job_runner::JobSandbox>,
         vm_docker: Arc<dyn vm::DockerRun>,
         vm_config: Arc<store::vms::VmConfig>,
         vm_enabled: bool,
@@ -636,6 +654,7 @@ impl RunManager {
             db,
             port,
             sandbox,
+            job_sandbox,
             vm_docker,
             vm_config,
             vm_enabled,
@@ -652,6 +671,7 @@ impl RunManager {
         db: Arc<Mutex<Db>>,
         port: Arc<dyn ModelPort>,
         sandbox: Arc<dyn sandbox::Sandbox>,
+        job_sandbox: Arc<dyn crate::job_runner::JobSandbox>,
         vm_docker: Arc<dyn vm::DockerRun>,
         vm_config: Arc<store::vms::VmConfig>,
         vm_enabled: bool,
@@ -670,6 +690,7 @@ impl RunManager {
             desktop_states,
             frame_capture,
             sandbox,
+            job_sandbox,
             vm_docker,
             vm_config,
             vm_enabled,
@@ -1450,6 +1471,7 @@ impl RunManager {
             changes: self.changes.clone(),
             perms,
             sandbox: Arc::clone(&self.sandbox),
+            job_sandbox: Arc::clone(&self.job_sandbox),
             vm_docker: Arc::clone(&self.vm_docker),
             vm_config: Arc::clone(&self.vm_config),
             vm_enabled: self.vm_enabled,
