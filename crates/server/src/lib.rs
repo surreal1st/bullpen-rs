@@ -5,6 +5,7 @@ pub mod approvals;
 mod auth;
 pub mod catalogue;
 pub mod changes;
+pub mod delegate;
 pub mod desk;
 pub mod egress;
 pub mod egress_proxy;

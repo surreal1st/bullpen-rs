@@ -11,6 +11,7 @@ use store::{
     mark_job_notified,
 };
 
+use crate::delegate::AskResult;
 use crate::sandbox::{ExecResult, ProbeResult, SpawnResult, container_for_job, job_log_path};
 use crate::workers::JobEvents;
 
@@ -193,6 +194,58 @@ pub async fn start_shell_job(
 
     format!(
         "Started in the background. Job id {}. Do NOT wait for it here and do not poll it in a loop - finish what else you can do, and read it with `job_status` on a later turn or in your next run.",
+        job.id
+    )
+}
+
+/// Hands a question to another bot without waiting — port of TS `startAgentJob`.
+pub fn start_agent_job<F, Fut>(
+    db: Arc<Mutex<Db>>,
+    bot_id: &str,
+    to_bot_id: &str,
+    to_name: &str,
+    question: &str,
+    ask: F,
+) -> String
+where
+    F: FnOnce(String, String) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = AskResult> + Send + 'static,
+{
+    let label = format!("ask {to_name}");
+    let job = {
+        let db = db.lock().expect("db lock");
+        match create_job(&db, bot_id, JobKind::Agent, &label, question, None) {
+            Ok(job) => job,
+            Err(msg) => return msg,
+        }
+    };
+
+    let job_id = job.id.clone();
+    let to_name_owned = to_name.to_string();
+    let to_name_spawn = to_name_owned.clone();
+    let to_bot_id = to_bot_id.to_string();
+    let question = question.to_string();
+    tokio::spawn(async move {
+        let result = ask(to_bot_id, question).await;
+        let db = db.lock().expect("db lock");
+        if let Some(err) = result.error {
+            let _ = finish_job(
+                &db,
+                &job_id,
+                JobStatus::Failed,
+                &format!("{to_name_spawn} could not answer: {err}"),
+                None,
+                None,
+            );
+            return;
+        }
+        let cost = result.usage.map(|u| u.cost_usd);
+        let output = format!("{to_name_spawn} says:\n{}", result.reply.trim());
+        let _ = finish_job(&db, &job_id, JobStatus::Done, &output, Some(0), cost);
+    });
+
+    format!(
+        "Asked {to_name_owned} in the background. Job id {}. Carry on with something else and read the answer with `job_status` on a later turn.",
         job.id
     )
 }

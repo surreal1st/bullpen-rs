@@ -1,5 +1,5 @@
-//! Background job tools — `run_in_background`, `job_status`, `await_job`, `stop_job`.
-//! Port of `app.ts` tool specs and dispatch (shell jobs only; `ask_in_background` is S9-04).
+//! Background job tools — shell and agent background work.
+//! Port of `app.ts` tool specs and dispatch for job tools.
 
 use std::sync::{Arc, Mutex};
 
@@ -8,7 +8,26 @@ use serde::Deserialize;
 use serde_json::json;
 use store::{Db, describe_job, get_job, list_jobs};
 
-use crate::job_runner::{JobRunnerDeps, JobSandbox, await_job, start_shell_job, stop_job};
+use crate::delegate::{DEPTH_REFUSAL, MAX_DELEGATION_DEPTH, find_bot};
+use crate::job_runner::{
+    JobRunnerDeps, JobSandbox, await_job, start_agent_job, start_shell_job, stop_job,
+};
+use crate::tools::ColleagueAskHook;
+
+pub fn ask_in_background_spec() -> ToolSpec {
+    ToolSpec {
+        name: "ask_in_background".to_string(),
+        description: "Ask another bot something WITHOUT waiting for its answer. Use this instead of message_bot when you want two or three colleagues working at once, or when their answer is not needed before you can carry on. Read the answer later with job_status.".to_string(),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "bot": { "type": "string", "description": "The colleague's name." },
+                "question": { "type": "string", "description": "What to ask. Include the context they need." }
+            },
+            "required": ["bot", "question"]
+        }),
+    }
+}
 
 pub fn run_in_background_spec() -> ToolSpec {
     ToolSpec {
@@ -69,6 +88,14 @@ pub fn stop_job_spec() -> ToolSpec {
 }
 
 #[derive(Deserialize, Default)]
+struct AskInBackgroundArgs {
+    #[serde(default)]
+    bot: String,
+    #[serde(default)]
+    question: String,
+}
+
+#[derive(Deserialize, Default)]
 struct RunInBackgroundArgs {
     #[serde(default)]
     command: String,
@@ -89,6 +116,49 @@ struct AwaitJobArgs {
     #[serde(default)]
     id: String,
     seconds: Option<f64>,
+}
+
+pub async fn run_ask_in_background(
+    db: &Arc<Mutex<Db>>,
+    bot_id: &str,
+    delegation_depth: u32,
+    colleague_ask: &ColleagueAskHook,
+    args: &str,
+) -> String {
+    if delegation_depth >= MAX_DELEGATION_DEPTH {
+        return DEPTH_REFUSAL.to_string();
+    }
+    let parsed: AskInBackgroundArgs = serde_json::from_str(args).unwrap_or_default();
+    let question = parsed.question.trim();
+    if question.is_empty() {
+        return "Nothing was asked: the question was empty.".to_string();
+    }
+    let target = {
+        let guard = super::lock_db(db);
+        find_bot(&guard, parsed.bot.trim())
+    };
+    let Some((to_id, to_name)) = target else {
+        let roster = {
+            let guard = super::lock_db(db);
+            store::list_bots(&guard, false)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|b| b.name)
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        return format!("There is no bot called that. The roster is: {roster}");
+    };
+    if to_id == bot_id {
+        return "That is you. Answer it yourself.".to_string();
+    }
+
+    let db = Arc::clone(db);
+    let ask = Arc::clone(colleague_ask);
+    start_agent_job(db, bot_id, &to_id, &to_name, question, move |to, q| {
+        let ask = Arc::clone(&ask);
+        ask(to, q)
+    })
 }
 
 pub async fn run_run_in_background(

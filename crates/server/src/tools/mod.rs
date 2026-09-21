@@ -45,7 +45,7 @@ pub(crate) mod escalate;
 mod goal_tools;
 mod hire_bot;
 mod local_read;
-mod message_bot;
+pub(crate) mod message_bot;
 mod note;
 mod project_remember;
 mod propose_tool;
@@ -60,6 +60,8 @@ mod use_skill;
 
 use std::future::Future;
 use std::pin::Pin;
+
+use crate::delegate::AskResult;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -118,6 +120,10 @@ pub(crate) fn lock_db(db: &Arc<Mutex<Db>>) -> MutexGuard<'_, Db> {
 /// `message_bot` call into a room still posts the message either way, it
 /// just cannot wake the round yet.
 pub type RoomHook = Arc<Mutex<Option<Box<dyn Fn(&str, bool) -> bool + Send + Sync>>>>;
+
+/// S9-04: async colleague ask used by `ask_in_background` agent jobs.
+pub type ColleagueAskHook =
+    Arc<dyn Fn(String, String) -> Pin<Box<dyn Future<Output = AskResult> + Send>> + Send + Sync>;
 
 /// A tool's text result, plus (F3) whatever a delegated model call inside it
 /// spent - `None` for every tool but `message_bot`'s bot branch. `runs.rs`'s
@@ -280,6 +286,10 @@ pub struct BuildParams {
     pub connector_hooks: Option<Arc<crate::runs::ConnectorHooks>>,
     /// S9-03: background shell jobs (`run_in_background`, etc.).
     pub job_sandbox: Arc<dyn crate::job_runner::JobSandbox>,
+    /// S9-04: how far nested this toolbox is (`message_bot` / `ask_in_background`).
+    pub delegation_depth: u32,
+    /// S9-04: runs a colleague model call for an agent job (cost lands on the job row).
+    pub colleague_ask: ColleagueAskHook,
 }
 
 /// F1: the full spec list this crate's toolbox can offer, before either
@@ -379,6 +389,7 @@ fn all_specs() -> Vec<ToolSpec> {
         connector_resources::list_resources_spec(),
         connector_resources::read_resource_spec(),
         background_jobs::run_in_background_spec(),
+        background_jobs::ask_in_background_spec(),
         background_jobs::job_status_spec(),
         background_jobs::await_job_spec(),
         background_jobs::stop_job_spec(),
@@ -434,6 +445,8 @@ pub fn build(params: BuildParams) -> ToolBox {
     let data_dir = Arc::clone(&params.data_dir);
     let connector_hooks = params.connector_hooks.clone();
     let job_sandbox = Arc::clone(&params.job_sandbox);
+    let delegation_depth = params.delegation_depth;
+    let colleague_ask = Arc::clone(&params.colleague_ask);
     let toolbox_bot_id = bot_id.clone();
     let bot_made_specs = crate::bot_tools::approved_tool_specs(&db, db_path.as_str());
     let connector_specs: Vec<ToolSpec> =
@@ -487,6 +500,8 @@ pub fn build(params: BuildParams) -> ToolBox {
             let data_dir = Arc::clone(&data_dir);
             let connector_hooks = connector_hooks.clone();
             let job_sandbox = Arc::clone(&job_sandbox);
+            let colleague_ask = Arc::clone(&colleague_ask);
+            let delegation_depth = delegation_depth;
             let execution_context = handler_execution_context.clone();
             Box::pin(async move {
                 if crate::bot_tools::is_bot_made_tool(&db, &name) {
@@ -609,6 +624,17 @@ pub fn build(params: BuildParams) -> ToolBox {
                     "run_in_background" => (
                         background_jobs::run_run_in_background(&db, &job_sandbox, &bot_id, &args)
                             .await,
+                        None,
+                    ),
+                    "ask_in_background" => (
+                        background_jobs::run_ask_in_background(
+                            &db,
+                            &bot_id,
+                            delegation_depth,
+                            &colleague_ask,
+                            &args,
+                        )
+                        .await,
                         None,
                     ),
                     "job_status" => (background_jobs::run_job_status(&db, &bot_id, &args), None),

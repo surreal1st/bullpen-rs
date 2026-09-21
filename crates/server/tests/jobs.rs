@@ -1,14 +1,16 @@
 //! S9-02: shell job runner — port of TS `test/jobs.test.ts` background command cases.
 
 use async_trait::async_trait;
-use server::job_runner::{JobRunnerDeps, JobSandbox, start_shell_job};
+use server::delegate::AskResult;
+use server::job_runner::{JobRunnerDeps, JobSandbox, start_agent_job, start_shell_job, stop_job};
 use server::sandbox::{ExecResult, ProbeResult, SpawnResult, container_for_job, job_log_path};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use store::Db;
-use store::JobStatus;
 use store::bots::{BotDraft, create_bot};
+use store::create_job;
 use store::jobs::get_job;
+use store::{JobKind, JobStatus};
 
 struct FakeJobSandbox {
     probes: AtomicU32,
@@ -168,6 +170,33 @@ fn seed() -> (Db, String) {
     (db, id)
 }
 
+fn seed_two() -> (Db, String, String) {
+    let db = Db::open(":memory:").expect("open");
+    let a = create_bot(
+        &db,
+        BotDraft {
+            name: "A".into(),
+            purpose: "p".into(),
+            instructions: "i".into(),
+            model: None,
+        },
+    )
+    .expect("bot")
+    .id;
+    let b = create_bot(
+        &db,
+        BotDraft {
+            name: "B".into(),
+            purpose: "p".into(),
+            instructions: "i".into(),
+            model: None,
+        },
+    )
+    .expect("bot")
+    .id;
+    (db, a, b)
+}
+
 fn id_from(reply: &str) -> String {
     reply
         .split("Job id ")
@@ -314,6 +343,97 @@ async fn kills_past_time_limit() {
     assert_eq!(job.status, JobStatus::Failed);
     assert!(job.output.contains("two-hour limit"));
     assert_eq!(fake.killed_handles().len(), 1);
+}
+
+#[tokio::test]
+async fn agent_job_returns_immediately_and_fills_answer_later() {
+    let (db, a, b) = seed_two();
+    let db = Arc::new(Mutex::new(db));
+    let (tx, rx) = tokio::sync::oneshot::channel::<AskResult>();
+    let reply = start_agent_job(
+        Arc::clone(&db),
+        &a,
+        &b,
+        "B",
+        "what do you think?",
+        move |_, _| async move {
+            rx.await.unwrap_or(AskResult {
+                reply: String::new(),
+                usage: None,
+                error: Some("channel closed".into()),
+            })
+        },
+    );
+    let id = id_from(&reply);
+    {
+        let guard = db.lock().unwrap();
+        assert_eq!(get_job(&guard, &a, &id).unwrap().status, JobStatus::Running);
+    }
+    let _ = tx.send(AskResult {
+        reply: "I think yes".into(),
+        usage: None,
+        error: None,
+    });
+    let job = settle(&db, &a, &id).await.unwrap();
+    assert_eq!(job.status, JobStatus::Done);
+    assert!(job.output.contains("I think yes"));
+}
+
+#[tokio::test]
+async fn agent_job_records_colleague_failure() {
+    let (db, a, b) = seed_two();
+    let db = Arc::new(Mutex::new(db));
+    let reply = start_agent_job(Arc::clone(&db), &a, &b, "B", "q", |_, _| async move {
+        AskResult {
+            reply: String::new(),
+            usage: None,
+            error: Some("429 rate limited".into()),
+        }
+    });
+    let job = settle(&db, &a, &id_from(&reply)).await.unwrap();
+    assert_eq!(job.status, JobStatus::Failed);
+    assert!(job.output.contains("429"));
+}
+
+#[tokio::test]
+async fn agent_job_records_cost_usd_on_finish() {
+    let (db, a, b) = seed_two();
+    let db = Arc::new(Mutex::new(db));
+    let reply = start_agent_job(Arc::clone(&db), &a, &b, "B", "q", |_, _| async move {
+        AskResult {
+            reply: "ok".into(),
+            usage: Some(model::ModelUsage {
+                cost_usd: 0.0025,
+                input_tokens: 0,
+                output_tokens: 0,
+                cached_tokens: 0,
+                cost_known: true,
+            }),
+            error: None,
+        }
+    });
+    let job = settle(&db, &a, &id_from(&reply)).await.unwrap();
+    assert_eq!(job.cost_usd, Some(0.0025));
+}
+
+#[tokio::test]
+async fn stopping_agent_job_says_answer_is_discarded() {
+    let (db, a) = seed();
+    let db = Arc::new(Mutex::new(db));
+    let sandbox = Arc::new(FakeJobSandbox::new(99, Some(0), ""));
+    let job = {
+        let guard = db.lock().unwrap();
+        create_job(&guard, &a, JobKind::Agent, "ask B", "q", None).expect("job")
+    };
+    let deps = JobRunnerDeps::new(Arc::clone(&db), sandbox);
+    stop_job(&deps, &a, &job.id).await;
+    let guard = db.lock().unwrap();
+    assert!(
+        get_job(&guard, &a, &job.id)
+            .unwrap()
+            .output
+            .contains("discarded")
+    );
 }
 
 #[test]

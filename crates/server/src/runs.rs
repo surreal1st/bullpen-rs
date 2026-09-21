@@ -1460,6 +1460,20 @@ impl RunManager {
                 })
             })
         };
+        let ask_db = Arc::clone(&self.db);
+        let ask_port = Arc::clone(&self.port);
+        let caller_id = bot_id.to_string();
+        let colleague_ask: tools::ColleagueAskHook = Arc::new(move |to_id, question| {
+            let db = Arc::clone(&ask_db);
+            let port = Arc::clone(&ask_port);
+            let caller_id = caller_id.clone();
+            Box::pin(async move {
+                crate::delegate::ask_colleague(
+                    &db, &port, &caller_id, &to_id, &question, trigger, room,
+                )
+                .await
+            })
+        });
         tools::build(tools::BuildParams {
             db: Arc::clone(&self.db),
             port: Arc::clone(&self.port),
@@ -1483,6 +1497,8 @@ impl RunManager {
             db_path: Arc::new(self.db_path()),
             data_dir: Arc::new(self.data_dir()),
             connector_hooks: self.connector_hooks(),
+            delegation_depth: 0,
+            colleague_ask,
         })
     }
 

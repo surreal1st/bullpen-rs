@@ -150,7 +150,6 @@ pub async fn run(
         );
     }
 
-    // 2. A bot, matched by id or name.
     let bots = {
         let db = lock_db(db);
         store::list_bots(&db, false).expect("list_bots")
@@ -159,8 +158,6 @@ pub async fn run(
         .iter()
         .find(|b| b.id == to || b.name.eq_ignore_ascii_case(to))
         .cloned();
-    // F10: an unresolvable name hands back the whole roster so the model can
-    // retry with a real one, instead of a dead end it can only apologise for.
     let Some(bot) = target else {
         let roster = bots
             .iter()
@@ -172,19 +169,95 @@ pub async fn run(
             None,
         );
     };
-    // F10: a bot asking itself is a paid model call for nothing - it already
-    // has the answer.
-    if bot.id == caller_bot_id {
-        return ("That is you. Answer it yourself.".to_string(), None);
+
+    let result = ask_colleague(db, port, caller_bot_id, &bot.id, question, trigger, room).await;
+    if let Some(err) = result.error {
+        if result.colleague_name.is_empty() {
+            return (err, result.usage);
+        }
+        return (
+            format!("{} could not answer: {err}", result.colleague_name),
+            result.usage,
+        );
+    }
+    if result.reply.trim().is_empty() {
+        return (
+            format!("{} had nothing to say.", result.colleague_name),
+            result.usage,
+        );
+    }
+    (
+        format!(
+            "{}: {}",
+            result.colleague_name,
+            fence_tool_output(result.reply.trim())
+        ),
+        result.usage,
+    )
+}
+
+/// One model call to a colleague bot by id — shared by `message_bot` and agent jobs.
+pub struct ColleagueAskOutcome {
+    pub colleague_name: String,
+    pub reply: String,
+    pub usage: Option<ModelUsage>,
+    pub error: Option<String>,
+}
+
+pub async fn ask_colleague(
+    db: &Arc<std::sync::Mutex<Db>>,
+    port: &Arc<dyn ModelPort>,
+    caller_bot_id: &str,
+    to_bot_id: &str,
+    question: &str,
+    trigger: Trigger,
+    room: bool,
+) -> ColleagueAskOutcome {
+    let question = question.trim();
+    if question.is_empty() {
+        return ColleagueAskOutcome {
+            colleague_name: String::new(),
+            reply: String::new(),
+            usage: None,
+            error: Some("Nothing was asked: the question was empty.".to_string()),
+        };
     }
 
+    let bot = {
+        let db = lock_db(db);
+        store::get_bot(&db, to_bot_id)
+            .expect("get_bot")
+            .filter(|b| !b.archived)
+    };
+    let Some(bot) = bot else {
+        return ColleagueAskOutcome {
+            colleague_name: String::new(),
+            reply: String::new(),
+            usage: None,
+            error: Some("no such bot".to_string()),
+        };
+    };
+    if bot.id == caller_bot_id {
+        return ColleagueAskOutcome {
+            colleague_name: String::new(),
+            reply: String::new(),
+            usage: None,
+            error: Some("That is you. Answer it yourself.".to_string()),
+        };
+    }
+
+    let caller_name = {
+        let db = lock_db(db);
+        store::get_bot(&db, caller_bot_id)
+            .expect("get_bot")
+            .map(|b| b.name)
+            .unwrap_or_else(|| caller_bot_id.to_string())
+    };
+
     let framed = format!(
-        "A colleague is asking you this, on Josh's behalf:\n\n{question}\n\nAnswer as yourself, \
+        "{caller_name} is asking you this, on Josh's behalf:\n\n{question}\n\nAnswer as yourself, \
 briefly. If it is not your area, say whose it is rather than guessing."
     );
-    // F2: the colleague's OWN pin does not get to opt out of the caller's
-    // floor - `model_for_run` is the only place a run's model is settled,
-    // same as the TS `askBot` (`delegate.ts:105`).
     let request_model = {
         let db_guard = lock_db(db);
         let raw = bot
@@ -212,33 +285,25 @@ briefly. If it is not your area, say whose it is rather than guessing."
                 usage = u;
                 break;
             }
-            // No nested tool loop here - see the module doc.
             ModelEvent::ToolCalls { usage: u, .. } => {
                 usage = u;
                 break;
             }
             ModelEvent::Error { message, .. } => {
-                return (format!("{} could not answer: {message}", bot.name), usage);
+                return ColleagueAskOutcome {
+                    colleague_name: bot.name,
+                    reply: String::new(),
+                    usage,
+                    error: Some(message),
+                };
             }
         }
     }
 
-    if text.trim().is_empty() {
-        (format!("{} had nothing to say.", bot.name), usage)
-    } else {
-        // F5(b): `text` is a SECOND model's own generated output - the
-        // colleague answered from its own context, which may itself hold a
-        // page it just browsed (fenced to IT, not to the caller). Nothing
-        // marks that answer as data once it lands here, so it would read to
-        // the calling model as ordinary trusted narration - the exact relay
-        // this ticket exists to close. `bot.name` stays OUTSIDE the fence:
-        // it is server-generated (looked up by id/name against the roster,
-        // never chosen by either model) and is how the caller knows who
-        // answered; only the reply body the colleague actually wrote is
-        // untrusted.
-        (
-            format!("{}: {}", bot.name, fence_tool_output(text.trim())),
-            usage,
-        )
+    ColleagueAskOutcome {
+        colleague_name: bot.name,
+        reply: text,
+        usage,
+        error: None,
     }
 }
