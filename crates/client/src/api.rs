@@ -5,16 +5,17 @@
 
 use crate::transport::{Request, Response};
 use crate::types::{
-    ApprovalsResponse, ArchivedBotsResponse, AuthStatus, AutoReviewLogEntry, AutoReviewLogResponse,
-    AutoReviewState, Bot, BotPatchResponse, BotSkillNames, BotToolsField, ConversationView,
-    CoreStatus, Goal, HiddenBotsResponse, MadeTool, MemoryEntry, MemoryEntryField, MemoryView,
-    MintInviteResponse, ModelError, ModelField, ModelsResponse, OpenImportError,
-    OpenImportResponse, OpenPreview, OpenPreviewResponse, OpenQuestion, PendingApproval,
-    PermissionsField, ProjectField, ProjectSummary, ProjectsField, QuestionsResponse, RoomResponse,
-    RoomSummary, RoomsResponse, Roster, Routine, RoutineRun, RoutingState, RulesField, Section,
-    SectionField, SectionsField, SharedCoreField, SharedLogField, SkillBodyField, SkillSummary,
-    SkillsField, SpendView, ThreadResponse, ThreadSummary, ThreadsResponse, Tier1Models,
-    Tier1Response, UsersListResponse, VmState, WorkingBot, WorkingResponse,
+    ApprovalsResponse, ArchivedBotsResponse, Attention, AuthStatus, AutoReviewLogEntry,
+    AutoReviewLogResponse, AutoReviewState, AwayPayload, Bot, BotPatchResponse, BotSkillNames,
+    BotToolsField, ConversationView, CoreStatus, Goal, HiddenBotsResponse, MadeTool, MemoryEntry,
+    MemoryEntryField, MemoryView, MintInviteResponse, ModelError, ModelField, ModelsResponse,
+    OpenImportError, OpenImportResponse, OpenPreview, OpenPreviewResponse, OpenQuestion,
+    PendingApproval, PermissionsField, ProjectField, ProjectSummary, ProjectsField,
+    QuestionsResponse, RoomResponse, RoomSummary, RoomsResponse, Roster, Routine, RoutineRun,
+    RoutingState, RulesField, Section, SectionField, SectionsField, SharedCoreField,
+    SharedLogField, SkillBodyField, SkillSummary, SkillsField, SpendView, ThreadResponse,
+    ThreadSummary, ThreadsResponse, Tier1Models, Tier1Response, UsersListResponse, VmState,
+    WorkingBot, WorkingResponse,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -360,6 +361,43 @@ pub async fn fetch_approvals() -> Result<Vec<PendingApproval>, String> {
         .await
         .map_err(|e| e.to_string())?;
     Ok(body.approvals)
+}
+
+/* ----------------------------------------------------------- S11-07: away */
+
+/// `GET /api/away` — fetched once on mount; non-2xx yields `None`, same as
+/// `AwayCard.tsx`'s `useAway`.
+pub async fn fetch_away() -> Result<Option<AwayPayload>, String> {
+    let resp = Request::get("/api/away")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Ok(None);
+    }
+    resp.json::<AwayPayload>()
+        .await
+        .map_err(|e| e.to_string())
+        .map(Some)
+}
+
+/// `POST /api/away/dismiss` — errors are ignored on the wire (optimistic UI).
+pub async fn dismiss_away() {
+    let _ = Request::post("/api/away/dismiss").send().await;
+}
+
+/* -------------------------------------------------------- S11-08: attention */
+
+/// `GET /api/attention` — tab badge poll in `app.rs`.
+pub async fn fetch_attention() -> Result<Attention, String> {
+    let resp = Request::get("/api/attention")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("/api/attention -> {}", resp.status()));
+    }
+    resp.json::<Attention>().await.map_err(|e| e.to_string())
 }
 
 #[derive(Serialize)]

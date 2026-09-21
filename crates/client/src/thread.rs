@@ -9,6 +9,7 @@
 
 use crate::api;
 use crate::approvals::Approvals;
+use crate::away_card::AwayCard;
 use crate::bubble::Bubble;
 use crate::composer::Composer;
 use crate::edit_bot::EditBotModal;
@@ -20,7 +21,7 @@ use crate::permissions_editor::PermissionsModal;
 use crate::questions::Questions;
 use crate::routines_editor::RoutinesModal;
 use crate::threads::Threads;
-use crate::types::{Bot, Message, Role, Section};
+use crate::types::{AwayPayload, Bot, Message, Role, Section};
 use crate::vm_card::VmCard;
 use crate::working_bar::WorkingBar;
 use dioxus::prelude::*;
@@ -98,6 +99,10 @@ pub fn ChatPane(
     // pattern this ticket asked to reuse, just under its own name since
     // `ChatPane` (not `NewBotModal`) is where this fires from.
     on_duplicated: EventHandler<Bot>,
+    // S11-07: fetched once in `app.rs`, same mount-once posture as TS `useAway`.
+    #[props(default)] away: Option<AwayPayload>,
+    #[props(default)] on_dismiss_away: EventHandler<()>,
+    #[props(default)] on_open_bot_away: EventHandler<String>,
 ) -> Element {
     let mut messages = use_signal(Vec::<Message>::new);
     let mut streaming = use_signal(|| None::<String>);
@@ -837,6 +842,9 @@ pub fn ChatPane(
                 bot_name: bot_name.clone(),
                 conversation_id,
                 section_ids: section_ids.clone(),
+                away: away.clone(),
+                on_dismiss_away,
+                on_open_bot_away,
             }
             // A paused run is the most urgent thing on screen - never folded
             // into a popover, and just above the composer, same placement
@@ -868,6 +876,9 @@ fn Thread(
     bot_name: String,
     conversation_id: Signal<Option<String>>,
     #[props(default)] section_ids: Vec<String>,
+    #[props(default)] away: Option<AwayPayload>,
+    #[props(default)] on_dismiss_away: EventHandler<()>,
+    #[props(default)] on_open_bot_away: EventHandler<String>,
 ) -> Element {
     let mut anchor = use_signal(|| None::<Rc<MountedData>>);
 
@@ -907,6 +918,11 @@ fn Thread(
 
     rsx! {
         div { class: "thread",
+            AwayCard {
+                away: away.clone(),
+                on_dismiss: on_dismiss_away,
+                on_open_bot: on_open_bot_away,
+            }
             if msgs.is_empty() && live_text.is_none() {
                 p { class: "empty", "Ask {bot_name} something." }
             }

@@ -2,7 +2,9 @@
 mod api;
 mod app;
 mod approvals;
+mod attention;
 mod avatar;
+mod away_card;
 mod bubble;
 mod composer;
 mod connectors_card;

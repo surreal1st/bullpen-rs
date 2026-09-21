@@ -21,6 +21,7 @@
 //! ticket's own framing for why this exists.
 
 use crate::api;
+use crate::attention;
 use crate::events::{ChangeKind, subscribe_events};
 use crate::new_bot::NewBotModal;
 use crate::rail::Rail;
@@ -28,7 +29,7 @@ use crate::room_picker::{PickerMode, RoomPicker};
 use crate::settings::SettingsModal;
 use crate::thread::ChatPane;
 use crate::transport::Request;
-use crate::types::{Bot, RoomSummary, Roster};
+use crate::types::{AwayPayload, Bot, RoomSummary, Roster};
 use dioxus::prelude::*;
 
 async fn fetch_roster() -> Result<Roster, String> {
@@ -324,6 +325,29 @@ fn AppShell() -> Element {
     // first member's own SSE stream already closed by the time the next
     // one starts.
     let room_refresh = use_signal(|| 0u32);
+    // S11-07: one fetch for the whole session — `AwayCard.tsx`'s `useAway`.
+    let mut away = use_signal(|| None::<AwayPayload>);
+
+    use_effect(move || {
+        spawn(async move {
+            if let Ok(Some(payload)) = api::fetch_away().await {
+                away.set(Some(payload));
+            }
+        });
+    });
+
+    // S11-08: tab title from `/api/attention` (8s poll).
+    const ATTENTION_MS: u32 = 8_000;
+    use_effect(move || {
+        spawn(async move {
+            loop {
+                if let Ok(counts) = api::fetch_attention().await {
+                    attention::apply_document_title(counts.total);
+                }
+                crate::transport::sleep(ATTENTION_MS).await;
+            }
+        });
+    });
 
     use_effect(move || {
         spawn(async move {
@@ -399,6 +423,21 @@ fn AppShell() -> Element {
                 _ => None,
             };
             let selected_room_id = selected_room.as_ref().map(|r| r.id.clone());
+            let away_snapshot = away.read().clone();
+            let mut away_signal = away;
+            let dismiss_away = move |_| {
+                away_signal.with_mut(|state| {
+                    if let Some(payload) = state.as_mut() {
+                        payload.show = false;
+                    }
+                });
+                crate::transport::spawn_task(async move {
+                    api::dismiss_away().await;
+                });
+            };
+            let open_bot_from_away = move |id: String| {
+                selected.set(Some(Selection::Bot(id)));
+            };
 
             rsx! {
                 div { class: "shell",
@@ -469,6 +508,9 @@ fn AppShell() -> Element {
                                     roster.set(Some(fetch_roster().await));
                                 });
                             },
+                            away: away_snapshot.clone(),
+                            on_dismiss_away: dismiss_away,
+                            on_open_bot_away: open_bot_from_away,
                         }
                     } else if let Some(bot) = selected_bot {
                         ChatPane {
@@ -532,6 +574,9 @@ fn AppShell() -> Element {
                                 drop(current);
                                 selected.set(Some(Selection::Bot(bot.id.clone())));
                             },
+                            away: away_snapshot,
+                            on_dismiss_away: dismiss_away,
+                            on_open_bot_away: open_bot_from_away,
                         }
                     } else {
                         div { class: "pane pane-empty", "Pick a bot to start talking." }

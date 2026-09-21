@@ -884,3 +884,81 @@
 .vm-state {
   color: var(--muted);
 }
+
+/* W6 — port of `shell.css` `.away-card*` (bullpen-night) */
+
+.away-card {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #0f151d;
+  padding: 0.75rem 0.9rem;
+  margin: 0 0 0.7rem;
+}
+
+.away-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.35rem;
+}
+
+.away-card-title {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #b9c1cb;
+}
+
+.away-card-dismiss {
+  border: 0;
+  background: transparent;
+  color: #7d8896;
+  font: inherit;
+  cursor: pointer;
+  font-size: 0.75rem;
+}
+
+.away-card-summary {
+  margin: 0 0 0.55rem;
+  font-size: 0.86rem;
+  line-height: 1.45;
+}
+
+.away-card-bots {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.away-card-bot {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  font-size: 0.78rem;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+}
+
+.away-card-bot:hover {
+  text-decoration: underline;
+}
+
+.away-card-bot-name {
+  font-weight: 600;
+  color: #b9c1cb;
+}
+
+.away-card-bot-detail {
+  color: #7d8896;
+}
+
+@media (max-width: 620px) {
+  .away-card {
+    padding: 0.6rem 0.7rem;
+  }
+}

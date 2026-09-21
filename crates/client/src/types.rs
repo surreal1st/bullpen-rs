@@ -984,3 +984,43 @@ pub struct Goal {
     pub last_report_at: Option<String>,
     pub created_at: String,
 }
+
+/* ----------------------------------------------------------- S11-07: away */
+
+/// W6: `GET /api/away` — one row per bot with something to catch up on.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AwayBotRow {
+    pub bot_id: String,
+    pub bot_name: String,
+    pub unread: i64,
+    pub last_unread_line: String,
+    pub questions: i64,
+    pub approvals: i64,
+    pub stopped_routines: Vec<String>,
+}
+
+/// W6: `GET /api/away`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AwayPayload {
+    pub show: bool,
+    #[serde(default)]
+    pub gap_hours: Option<f64>,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub bots: Option<Vec<AwayBotRow>>,
+    #[serde(default)]
+    pub generated_at: Option<String>,
+}
+
+/* -------------------------------------------------------- S11-08: attention */
+
+/// `GET /api/attention` — same shape as `store::attention::Attention`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub struct Attention {
+    pub approvals: i64,
+    pub unread: i64,
+    pub total: i64,
+}
