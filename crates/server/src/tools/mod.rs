@@ -25,6 +25,7 @@ mod ask_josh;
 // ticket's Results, exactly the "write the function, tell me the line"
 // pattern S6-W-02 already uses for its own `main.rs` call site.
 pub mod browse;
+mod connector_resources;
 mod create_room;
 // S8c-03: private `mod`, NOT `pub` like `browse`/`desk_shell` above - this
 // ticket's own bite/table tests all live inside `desk_act.rs`'s own
@@ -372,6 +373,8 @@ fn all_specs() -> Vec<ToolSpec> {
         use_skill::spec(),
         hire_bot::spec(),
         propose_tool::spec(),
+        connector_resources::list_resources_spec(),
+        connector_resources::read_resource_spec(),
     ]
 }
 
@@ -496,6 +499,19 @@ pub fn build(params: BuildParams) -> ToolBox {
                     let text =
                         propose_tool::run(&db, db_path.as_str(), data_dir.as_str(), &bot_id, &args)
                             .await;
+                    return ToolOutcome::new(text, None);
+                }
+                if name == "list_resources" || name == "read_resource" {
+                    let Some(hooks) = connector_hooks else {
+                        return ToolOutcome::new(format!("Unknown tool: {name}"), None);
+                    };
+                    let text = if name == "list_resources" {
+                        connector_resources::run_list_resources(&db, &bot_id, &args, hooks.as_ref())
+                            .await
+                    } else {
+                        connector_resources::run_read_resource(&db, &bot_id, &args, hooks.as_ref())
+                            .await
+                    };
                     return ToolOutcome::new(text, None);
                 }
                 if let Some((connector_slug, tool_name)) = crate::mcp::split_tool_name(&name) {

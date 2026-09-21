@@ -41,6 +41,31 @@ pub struct ListToolsOutcome {
     pub challenge: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConnectorResource {
+    pub uri: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub mime_type: Option<String>,
+}
+
+pub struct ListResourcesOutcome {
+    pub ok: bool,
+    pub resources: Vec<ConnectorResource>,
+    pub error: Option<String>,
+    pub needs_auth: bool,
+    pub challenge: Option<String>,
+}
+
+pub struct ReadResourceOutcome {
+    pub ok: bool,
+    pub text: Option<String>,
+    pub mime_type: Option<String>,
+    pub error: Option<String>,
+    pub needs_auth: bool,
+    pub challenge: Option<String>,
+}
+
 /// HTTP seam for MCP POSTs — production uses reqwest; tests inject a fake.
 #[async_trait]
 pub trait McpTransport: Send + Sync {
@@ -276,6 +301,181 @@ pub async fn call_connector_tool(
         return "The connector returned no readable text.".to_string();
     }
     text.chars().take(32_000).collect()
+}
+
+pub async fn list_connector_resources(
+    connector: &ConnectorFull,
+    options: McpCallOptions<'_>,
+) -> ListResourcesOutcome {
+    let init = rpc(
+        connector,
+        "initialize",
+        json!({
+            "protocolVersion": PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": { "name": "Bullpen", "version": "0.1.0" },
+        }),
+        options,
+    )
+    .await;
+    if !init.ok {
+        return ListResourcesOutcome {
+            ok: false,
+            resources: vec![],
+            error: init.error,
+            needs_auth: init.needs_auth,
+            challenge: init.challenge,
+        };
+    }
+
+    let listed = rpc(connector, "resources/list", json!({}), options).await;
+    if !listed.ok {
+        return ListResourcesOutcome {
+            ok: false,
+            resources: vec![],
+            error: listed.error,
+            needs_auth: listed.needs_auth,
+            challenge: listed.challenge,
+        };
+    }
+
+    let raw = listed
+        .result
+        .as_ref()
+        .and_then(|r| r.get("resources"))
+        .and_then(|t| t.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let resources = raw
+        .into_iter()
+        .filter_map(|r| {
+            let uri = r.get("uri")?.as_str()?.trim();
+            if uri.is_empty() {
+                return None;
+            }
+            Some(ConnectorResource {
+                uri: uri.to_string(),
+                name: r
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                description: r
+                    .get("description")
+                    .and_then(|d| d.as_str())
+                    .map(str::to_string),
+                mime_type: r
+                    .get("mimeType")
+                    .and_then(|m| m.as_str())
+                    .map(str::to_string),
+            })
+        })
+        .collect();
+
+    ListResourcesOutcome {
+        ok: true,
+        resources,
+        error: None,
+        needs_auth: false,
+        challenge: None,
+    }
+}
+
+pub async fn read_connector_resource(
+    connector: &ConnectorFull,
+    uri: &str,
+    options: McpCallOptions<'_>,
+) -> ReadResourceOutcome {
+    let init = rpc(
+        connector,
+        "initialize",
+        json!({
+            "protocolVersion": PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": { "name": "Bullpen", "version": "0.1.0" },
+        }),
+        options,
+    )
+    .await;
+    if !init.ok {
+        return ReadResourceOutcome {
+            ok: false,
+            text: None,
+            mime_type: None,
+            error: init.error,
+            needs_auth: init.needs_auth,
+            challenge: init.challenge,
+        };
+    }
+
+    let read = rpc(connector, "resources/read", json!({ "uri": uri }), options).await;
+    if !read.ok {
+        return ReadResourceOutcome {
+            ok: false,
+            text: None,
+            mime_type: None,
+            error: read.error,
+            needs_auth: read.needs_auth,
+            challenge: read.challenge,
+        };
+    }
+
+    let content = read
+        .result
+        .as_ref()
+        .and_then(|r| r.get("contents"))
+        .and_then(|c| c.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let Some(first) = content.first() else {
+        return ReadResourceOutcome {
+            ok: true,
+            text: Some(String::new()),
+            mime_type: Some("text/plain".to_string()),
+            error: None,
+            needs_auth: false,
+            challenge: None,
+        };
+    };
+
+    let mime_type = first
+        .get("mimeType")
+        .and_then(|m| m.as_str())
+        .map(str::to_string);
+
+    if first.get("blob").is_some() && first.get("text").is_none() {
+        let blob = first.get("blob").and_then(|b| b.as_str()).unwrap_or("");
+        let blob_bytes = blob.len().saturating_mul(3).div_ceil(4);
+        return ReadResourceOutcome {
+            ok: true,
+            text: Some(format!("[Binary content, {blob_bytes} bytes, not shown]")),
+            mime_type: Some(mime_type.unwrap_or_else(|| "application/octet-stream".to_string())),
+            error: None,
+            needs_auth: false,
+            challenge: None,
+        };
+    }
+
+    let text = first
+        .get("text")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_string();
+    let capped = if text.len() > 20_000 {
+        format!("{}\n[truncated]", &text[..20_000])
+    } else {
+        text
+    };
+
+    ReadResourceOutcome {
+        ok: true,
+        text: Some(capped),
+        mime_type,
+        error: None,
+        needs_auth: false,
+        challenge: None,
+    }
 }
 
 async fn rpc(
@@ -557,6 +757,72 @@ mod tests {
             assert_eq!(outcome.tools.len(), 1);
             assert_eq!(outcome.tools[0].name, "search");
         }
+    }
+
+    #[tokio::test]
+    async fn list_and_read_resources_parse_mcp_results() {
+        let init_body = json!({ "jsonrpc": "2.0", "id": "1", "result": {} }).to_string();
+        let list_body = json!({
+            "jsonrpc": "2.0",
+            "id": "2",
+            "result": {
+                "resources": [
+                    { "uri": "file://one.txt", "name": "File One", "mimeType": "text/plain" },
+                    { "uri": "file://two.txt", "name": "File Two" }
+                ]
+            }
+        })
+        .to_string();
+        let read_body = json!({
+            "jsonrpc": "2.0",
+            "id": "3",
+            "result": {
+                "contents": [{ "uri": "file://one.txt", "text": "Hello from the resource!" }]
+            }
+        })
+        .to_string();
+
+        let transport = ScriptTransport {
+            scripts: Mutex::new(VecDeque::from([
+                McpHttpResponse {
+                    status: 200,
+                    headers: HeaderMap::new(),
+                    body: init_body.clone(),
+                },
+                McpHttpResponse {
+                    status: 200,
+                    headers: HeaderMap::new(),
+                    body: list_body,
+                },
+                McpHttpResponse {
+                    status: 200,
+                    headers: HeaderMap::new(),
+                    body: init_body,
+                },
+                McpHttpResponse {
+                    status: 200,
+                    headers: HeaderMap::new(),
+                    body: read_body,
+                },
+            ])),
+        };
+        let resolver = FakeResolver {
+            addrs: vec!["93.184.216.34".to_string()],
+        };
+        let conn = connector("https://fake-mcp.test/mcp");
+        let opts = McpCallOptions {
+            transport: &transport,
+            resolver: &resolver,
+            bearer: None,
+        };
+        let listed = list_connector_resources(&conn, opts).await;
+        assert!(listed.ok);
+        assert_eq!(listed.resources.len(), 2);
+        assert_eq!(listed.resources[0].uri, "file://one.txt");
+
+        let read = read_connector_resource(&conn, "file://one.txt", opts).await;
+        assert!(read.ok);
+        assert_eq!(read.text.as_deref(), Some("Hello from the resource!"));
     }
 
     #[test]
