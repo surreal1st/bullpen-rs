@@ -4,7 +4,7 @@
 
 use model::MessageContent;
 use server::prompt::{
-    HistoryTurn, build_prompt, house_rules, room_instruction, set_house_rules,
+    DEFAULT_RULES, HistoryTurn, build_prompt, house_rules, room_instruction, set_house_rules,
     with_room_instruction,
 };
 use shared::nothing_new::NOTHING_NEW;
@@ -24,6 +24,33 @@ fn system_text(messages: &[model::ModelMessage]) -> String {
         MessageContent::Text(t) => t.clone(),
         MessageContent::Parts(_) => panic!("system message must be plain text"),
     }
+}
+
+#[test]
+fn default_rules_prefer_connector_and_keep_exhaust_routes_guidance() {
+    assert!(
+        DEFAULT_RULES.contains("list_resources"),
+        "house rules must tell bots to prefer connector tools"
+    );
+    let browse_pos = DEFAULT_RULES.find("`browse`").expect("browse in rules");
+    let connector_pos = DEFAULT_RULES
+        .find("namespaced tools")
+        .expect("connector guidance in rules");
+    assert!(
+        connector_pos < browse_pos,
+        "connector guidance must appear before browser tools in DEFAULT_RULES"
+    );
+    assert!(
+        DEFAULT_RULES.contains("try it again or by another"),
+        "must not weaken the existing try-another-route guidance"
+    );
+
+    let db = Db::open(":memory:").unwrap();
+    assert_eq!(
+        house_rules(&db),
+        DEFAULT_RULES,
+        "fresh db should get DEFAULT_RULES including prefer-connector"
+    );
 }
 
 #[test]

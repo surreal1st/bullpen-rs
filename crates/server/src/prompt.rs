@@ -127,10 +127,11 @@ pub fn recent_history(history: &[HistoryTurn]) -> Vec<HistoryTurn> {
     kept
 }
 
-/// Josh's own rules, applied to every bot. Verbatim from the TS
-/// `DEFAULT_RULES` (`prompt.ts:227-273`). `pub`: F13's `GET /api/rules`
-/// echoes this back as `fallback` (`app.ts:2958`) so the rules textarea has
-/// a real placeholder instead of reading as "no house rules exist".
+/// Josh's own rules, applied to every bot. Mostly verbatim from the TS
+/// `DEFAULT_RULES` (`prompt.ts:227-273`), plus S7-06's Grok-shaped
+/// prefer-connector line (PLAN.md — not in TS yet). `pub`: F13's
+/// `GET /api/rules` echoes this back as `fallback` (`app.ts:2958`) so the
+/// rules textarea has a real placeholder instead of reading as "no house rules exist".
 pub const DEFAULT_RULES: &str = r#"1. Never claim what you have not verified this run. If you cannot verify
    something, say so in the same breath - unconfirmed, untested, did not
    check. A confident guess is worse than no answer.
@@ -162,6 +163,12 @@ pub const DEFAULT_RULES: &str = r#"1. Never claim what you have not verified thi
    is what the roster is for, and a lead fanning work out to the bot whose
    job it is beats doing it badly yourself. Handing it to JOSH is the one
    place it must not go.
+
+   If a connector switched on for you can read or write what the task needs,
+   use its namespaced tools or `list_resources` / `read_resource` before
+   `browse`, `read_page`, or `fetch_url`. Josh already wired connectors for
+   the services they cover; the browser is for pages and apps no connector
+   reaches, or after a connector route you tried did not work.
 
    Exhaust the routes you hold first. A tool that failed once is not a wall,
    it is one route you have now tried: if a fetch comes back empty, open the
