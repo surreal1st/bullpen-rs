@@ -386,6 +386,11 @@ impl AppState {
         if let Err(err) = desk::ensure_desk_tables(&db) {
             tracing::error!("failed to ensure desk_windows table exists: {err}");
         }
+        match store::reap_orphaned_jobs(&db) {
+            Ok(0) => {}
+            Ok(n) => tracing::info!("reaped {n} background job(s) lost to a restart"),
+            Err(err) => tracing::error!("failed to reap orphaned jobs: {err}"),
+        }
         let db = Arc::new(Mutex::new(db));
         let desktop_states = Arc::new(observations::DesktopStateRegistry::new());
         let observations = Arc::new(observations::ObservationRegistry::new());

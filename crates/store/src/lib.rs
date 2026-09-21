@@ -8,6 +8,7 @@ pub mod bots;
 pub mod connectors;
 pub mod conversations;
 pub mod goals;
+pub mod jobs;
 pub mod memory;
 pub mod messages;
 mod migrations;
@@ -43,6 +44,10 @@ pub use connectors::{
 pub use conversations::{
     archive_thread, create_thread, get_conversation, get_or_create_conversation, list_threads,
     rename_thread, title_from_first_message, touch_thread, validate_members,
+};
+pub use jobs::{
+    Job, JobKind, JobStatus, MAX_JOB_OUTPUT, MAX_RUNNING_JOBS, append_job_output, create_job,
+    describe_job, ensure_job_tables, finish_job, get_job, list_jobs, reap_orphaned_jobs,
 };
 pub use memory::{
     LogEntry, Project, RECALL_TOKEN_BUDGET, Recall, Scope, add_project_member, count_scoped,
@@ -203,6 +208,7 @@ impl Db {
         slack::ensure_slack_tables(&db)?;
         vms::ensure_vm_tables(&db)?;
         bot_tools::ensure_bot_tool_tables(&db)?;
+        jobs::ensure_job_tables(&db)?;
 
         Ok(db)
     }
