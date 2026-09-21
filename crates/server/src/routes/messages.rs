@@ -10,7 +10,7 @@
 
 use std::convert::Infallible;
 
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
@@ -97,6 +97,7 @@ fn history_turns(db: &Db, conversation_id: &str) -> rusqlite::Result<Vec<History
 
 async fn post_message(
     State(state): State<AppState>,
+    Extension(scope): Extension<crate::scope::Scope>,
     Path(bot_id): Path<String>,
     body: axum::body::Bytes,
 ) -> Result<Response, AppError> {
@@ -139,7 +140,7 @@ async fn post_message(
     let account_usage = state.credits.total_usage().await.ok();
     let gate_check = {
         let db = state.db();
-        spend::gate_run(&db, ceiling, account_usage)
+        spend::gate_run(&db, Some(&scope), ceiling, account_usage)
     };
     // Allowed carries a warning (near the ceiling, or the balance could
     // not be read) that has to reach the run as its first event - see

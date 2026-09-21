@@ -491,21 +491,30 @@ pub async fn fire_due(state: &AppState, now: DateTime<Utc>) -> Vec<(String, Stri
             );
         }
 
-        // S5-03: the platform-wide spend ceiling, reused from `crate::
-        // spend` rather than reimplemented - port of `routines.ts:791-807`.
-        // Per-member ceilings (`scopeForBot`/`overUserCeiling`) are S5b: no
-        // member scope exists on this side yet (same gap `store::auth`'s
-        // module doc names for sessions). B2 discipline again: `db` is
-        // locked for the two synchronous reads and dropped before the
-        // `credits.total_usage()` await, exactly like `routes/messages.rs`.
-        let ceiling = {
+        // S5-03: member ceiling first, then platform gate — port of `routines.ts`.
+        // One `db` guard per synchronous block: `AppState::db` is not reentrant.
+        let (member_over, bot_scope, ceiling) = {
             let db = state.db();
-            spend::get_ceiling(&db)
+            let bot_scope = crate::scope::scope_for_bot(&db, &row.bot_id).ok();
+            let member_over = bot_scope
+                .as_ref()
+                .and_then(|s| spend::over_user_ceiling(&db, s, now));
+            let ceiling = spend::get_ceiling(&db);
+            (member_over, bot_scope, ceiling)
         };
+        if let Some(reason) = member_over {
+            let db = state.db();
+            let _ = db.conn().execute(
+                "UPDATE routines SET active = 0, paused_reason = ?1 WHERE id = ?2",
+                rusqlite::params![reason, row.id],
+            );
+            continue;
+        }
+
         let account_usage = state.credits.total_usage().await.ok();
         let gate = {
             let db = state.db();
-            spend::gate_run(&db, ceiling, account_usage)
+            spend::gate_run(&db, bot_scope.as_ref(), ceiling, account_usage)
         };
         if let spend::GateResult::Denied { reason } = gate {
             let db = state.db();

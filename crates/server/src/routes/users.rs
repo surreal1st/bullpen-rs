@@ -91,7 +91,7 @@ async fn get_users_me(
             .map(|row| row.cost_usd)
             .sum()
     } else {
-        0.0
+        spend::spent_by_user(&db, &month, &scope.list_filter())?
     };
 
     Ok(Json(UsersMeResponse {

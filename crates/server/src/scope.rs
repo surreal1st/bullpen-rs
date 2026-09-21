@@ -35,9 +35,16 @@ impl Scope {
 pub fn scope_for_token(db: &Db, token: &str) -> rusqlite::Result<Scope> {
     let owner_id = adopt_owner(db)?.unwrap_or_else(|| OWNER_ID.to_string());
     let session_uid = session_user_id(db, token)?;
-    let effective_user_id = session_uid.as_deref().unwrap_or(owner_id.as_str());
+    let effective_user_id = session_uid
+        .as_deref()
+        .unwrap_or(owner_id.as_str())
+        .to_string();
 
-    if effective_user_id == owner_id {
+    scope_for_user_id(db, &effective_user_id, owner_id)
+}
+
+fn scope_for_user_id(db: &Db, user_id: &str, owner_id: String) -> rusqlite::Result<Scope> {
+    if user_id == owner_id {
         return Ok(Scope {
             user_id: owner_id.clone(),
             owner_id,
@@ -45,8 +52,7 @@ pub fn scope_for_token(db: &Db, token: &str) -> rusqlite::Result<Scope> {
             is_owner: true,
         });
     }
-
-    match get_user(db, effective_user_id)? {
+    match get_user(db, user_id)? {
         Some(user) if user.archived_at.is_none() => Ok(Scope {
             user_id: user.id.clone(),
             owner_id,
@@ -60,6 +66,21 @@ pub fn scope_for_token(db: &Db, token: &str) -> rusqlite::Result<Scope> {
             is_owner: true,
         }),
     }
+}
+
+/// Scope for a bot row (routines, goals, background work). Port of `scopeForBot`.
+pub fn scope_for_bot(db: &Db, bot_id: &str) -> rusqlite::Result<Scope> {
+    let owner_id = adopt_owner(db)?.unwrap_or_else(|| OWNER_ID.to_string());
+    let user_id: Option<String> = db
+        .conn()
+        .query_row(
+            "SELECT user_id FROM bots WHERE id = ?1",
+            rusqlite::params![bot_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let effective = user_id.as_deref().unwrap_or(owner_id.as_str()).to_string();
+    scope_for_user_id(db, &effective, owner_id)
 }
 
 const NOT_IDS: &[&str] = &["tick", "archived", "hidden", "preview", "devices"];
@@ -82,9 +103,13 @@ fn addressed(path: &str) -> Option<(String, Option<String>)> {
 }
 
 fn one(db: &Db, sql: &str, id: &str) -> rusqlite::Result<Option<String>> {
-    db.conn()
-        .query_row(sql, rusqlite::params![id], |row| row.get(0))
-        .optional()
+    let row = db
+        .conn()
+        .query_row(sql, rusqlite::params![id], |row| {
+            row.get::<_, Option<String>>(0)
+        })
+        .optional()?;
+    Ok(row.flatten())
 }
 
 fn scoped_owner(db: &Db, resource: &str, id: &str) -> rusqlite::Result<Option<String>> {

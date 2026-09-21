@@ -266,6 +266,28 @@ pub fn fire_due_goals(state: &AppState, now: DateTime<Utc>) -> Vec<(String, Stri
 
         {
             let db = state.db();
+            if let Ok(bot_scope) = crate::scope::scope_for_bot(&db, &row.bot_id)
+                && let Some(over) = crate::spend::over_user_ceiling(&db, &bot_scope, now)
+            {
+                let _ = db.conn().execute(
+                    "UPDATE goals SET status = 'stopped', reason = ?1 WHERE id = ?2",
+                    rusqlite::params![over, row.id],
+                );
+                if let Ok(conversation_id) = store::get_or_create_conversation(&db, &row.bot_id) {
+                    let _ = store::append_message(
+                        &db,
+                        &conversation_id,
+                        "assistant",
+                        &over,
+                        store::NewMessage::default(),
+                    );
+                }
+                continue;
+            }
+        }
+
+        {
+            let db = state.db();
             let next = now + chrono::Duration::milliseconds(goals::GOAL_SESSION_MS);
             let _ = db.conn().execute(
                 "UPDATE goals SET next_session_at = ?1 WHERE id = ?2",

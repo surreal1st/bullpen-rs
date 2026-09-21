@@ -181,10 +181,50 @@ fn put_ceiling_cleans_negative_to_zero() {
 }
 
 #[test]
+fn gate_run_denies_member_over_personal_ceiling_before_platform() {
+    let db = store::Db::open(":memory:").expect("open");
+    store::set_password(&db, "owner-password-long-enough").expect("password");
+    store::adopt_owner(&db).expect("adopt");
+    let member = store::create_member(&db, "Kellie", "member-password-long", None).expect("member");
+    store::set_user_ceiling(&db, &member.id, Some(5.0)).expect("ceiling");
+    db.conn()
+        .execute(
+            "INSERT INTO bots (id, name, purpose, instructions, model, created_at, user_id)
+             VALUES ('k-bot', 'K', '', '', NULL, '2026-01-01T00:00:00Z', ?1)",
+            rusqlite::params![member.id],
+        )
+        .expect("bot");
+    db.conn()
+        .execute(
+            "INSERT INTO conversations (id, bot_id, kind, created_at) VALUES ('c1', 'k-bot', 'chat', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("convo");
+    db.conn()
+        .execute(
+            "INSERT INTO messages (id, conversation_id, role, content, created_at, seq, cost_usd)
+             VALUES ('m1', 'c1', 'assistant', 'hi', '2026-09-15T00:00:00Z', 1, 6.0)",
+            [],
+        )
+        .expect("msg");
+
+    let scope = server::scope::scope_for_bot(&db, "k-bot").expect("scope");
+    let result = spend::gate_run(&db, Some(&scope), 1000.0, Some(0.0));
+    match result {
+        spend::GateResult::Denied { reason } => {
+            assert!(reason.contains("You have used"));
+            assert!(reason.contains("$6.00"));
+            assert!(reason.contains("$5.00"));
+        }
+        other => panic!("expected member Denied, got {other:?}"),
+    }
+}
+
+#[test]
 fn gate_run_denies_when_over_ceiling() {
     let ceiling = 10.0;
     let db = store::Db::open(":memory:").expect("open test db");
-    let result = spend::gate_run(&db, ceiling, Some(11.0));
+    let result = spend::gate_run(&db, None, ceiling, Some(11.0));
 
     match result {
         spend::GateResult::Denied { reason } => {
@@ -200,7 +240,7 @@ fn gate_run_denies_when_over_ceiling() {
 fn gate_run_allows_when_under_ceiling() {
     let ceiling = 10.0;
     let db = store::Db::open(":memory:").expect("open test db");
-    let result = spend::gate_run(&db, ceiling, Some(5.0));
+    let result = spend::gate_run(&db, None, ceiling, Some(5.0));
 
     match result {
         spend::GateResult::Allowed { warning } => {
@@ -215,7 +255,7 @@ fn gate_run_warns_at_15_percent_headroom() {
     let ceiling = 100.0;
     let db = store::Db::open(":memory:").expect("open test db");
     // At 85% used: 15% headroom, should warn
-    let result = spend::gate_run(&db, ceiling, Some(85.0));
+    let result = spend::gate_run(&db, None, ceiling, Some(85.0));
 
     match result {
         spend::GateResult::Allowed { warning } => {
@@ -234,7 +274,7 @@ fn gate_run_allows_on_network_failure() {
     let ceiling = 10.0;
     let db = store::Db::open(":memory:").expect("open test db");
     // None = network read failed
-    let result = spend::gate_run(&db, ceiling, None);
+    let result = spend::gate_run(&db, None, ceiling, None);
 
     match result {
         spend::GateResult::Allowed { warning } => {
@@ -264,7 +304,7 @@ fn ceiling_gate_denies_posts_when_at_ceiling() {
     spend::set_ceiling(&db, 0.0).expect("set ceiling to 0");
 
     // Verify that gate_run denies when ceiling is 0 and account_usage is 0
-    let result = spend::gate_run(&db, 0.0, Some(0.0));
+    let result = spend::gate_run(&db, None, 0.0, Some(0.0));
     match result {
         spend::GateResult::Denied { reason } => {
             assert!(reason.contains("Spend ceiling reached"));

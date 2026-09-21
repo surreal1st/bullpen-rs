@@ -5,7 +5,9 @@ use std::time::{Duration, Instant};
 
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
-use store::Db;
+use store::{Db, ListScope, get_user};
+
+use crate::scope::Scope;
 
 const CEILING_KEY: &str = "spend.ceiling_usd";
 const DEFAULT_CEILING: f64 = 10.0;
@@ -58,7 +60,74 @@ pub enum GateResult {
 /// On a read failure (network, etc.), allows the run: a hard stop on a network
 /// blip is worse than the overspend it prevents, and the account has its own
 /// hard limit underneath.
-pub fn gate_run(_db: &Db, ceiling: f64, account_usage: Option<f64>) -> GateResult {
+/// Member-specific monthly ceiling, or none when the platform ceiling applies.
+pub fn user_ceiling(db: &Db, scope: &Scope) -> Option<f64> {
+    if scope.is_owner {
+        return None;
+    }
+    let user = get_user(db, &scope.user_id).ok()??;
+    user.ceiling_usd
+}
+
+/// One person's provider-reported spend for a calendar month (`YYYY-MM`).
+pub fn spent_by_user(db: &Db, month: &str, filter: &ListScope) -> rusqlite::Result<f64> {
+    let scope_sql = filter.and_sql("b");
+    let sql = format!(
+        "SELECT COALESCE(SUM(m.cost_usd), 0)
+           FROM messages m
+           JOIN conversations c ON c.id = m.conversation_id
+           JOIN bots b ON b.id = c.bot_id
+          WHERE m.role = 'assistant'
+            AND m.cost_usd IS NOT NULL
+            AND substr(m.created_at, 1, 7) = ?1{scope_sql}",
+    );
+    let (owner, user) = filter.bind_values();
+    db.conn()
+        .query_row(&sql, rusqlite::params![month, owner, user], |row| {
+            row.get(0)
+        })
+}
+
+/// Whether a member's own ceiling blocks unattended work (no OpenRouter read).
+pub fn over_user_ceiling(
+    db: &Db,
+    scope: &Scope,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<String> {
+    let ceiling = user_ceiling(db, scope)?;
+    let spent = spent_by_user(db, &current_month(now), &scope.list_filter()).ok()?;
+    if spent < ceiling {
+        return None;
+    }
+    Some(format!(
+        "Paused: ${spent:.2} of a ${ceiling:.2} monthly ceiling"
+    ))
+}
+
+pub fn gate_run(
+    db: &Db,
+    scope: Option<&Scope>,
+    ceiling: f64,
+    account_usage: Option<f64>,
+) -> GateResult {
+    if let Some(scope) = scope
+        && let Some(member_ceiling) = user_ceiling(db, scope)
+    {
+        match spent_by_user(db, &current_month(chrono::Utc::now()), &scope.list_filter()) {
+            Ok(spent) if spent >= member_ceiling => {
+                return GateResult::Denied {
+                    reason: format!(
+                        "Spend ceiling reached. You have used ${spent:.2} of your ${member_ceiling:.2} this month. Ask Josh to raise it.",
+                    ),
+                };
+            }
+            Err(err) => {
+                tracing::error!("member spend sum failed: {err}");
+            }
+            _ => {}
+        }
+    }
+
     match account_usage {
         Some(used) if used >= ceiling => GateResult::Denied {
             reason: format!(

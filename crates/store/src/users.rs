@@ -612,6 +612,62 @@ mod tests {
     }
 
     #[test]
+    fn scoped_roster_and_sections_for_member() {
+        use crate::ListScope;
+
+        let db = Db::open(":memory:").expect("open");
+        set_password(&db, "owner-password-long-enough").expect("password");
+        adopt_owner(&db).expect("adopt");
+        let member = create_member(&db, "Kellie", "member-password-long", None).expect("member");
+        let scope = ListScope {
+            owner_id: OWNER_ID.to_string(),
+            user_id: member.id.clone(),
+        };
+        db.conn()
+            .execute(
+                "INSERT INTO bots (id, name, purpose, instructions, model, created_at, user_id)
+                 VALUES ('josh-bot', 'Josh Bot', '', '', NULL, '2026-01-01T00:00:00Z', ?1)",
+                params![OWNER_ID],
+            )
+            .expect("owner bot");
+        db.conn()
+            .execute(
+                "INSERT INTO bots (id, name, purpose, instructions, model, created_at, user_id)
+                 VALUES ('kellie-bot', 'Kellie Bot', '', '', NULL, '2026-01-01T00:00:00Z', ?1)",
+                params![member.id],
+            )
+            .expect("member bot");
+        let roster = crate::list_roster(&db, Some(&scope)).expect("list roster");
+        assert_eq!(roster.len(), 1);
+        assert_eq!(roster[0].name, "Kellie Bot");
+        crate::list_sections(&db, Some(&scope)).expect("list sections");
+    }
+
+    #[test]
+    fn duplicate_copy_serves_memory_queries() {
+        use crate::bots::{BotDraft, create_bot, duplicate_bot};
+        use crate::memory;
+
+        let db = Db::open(":memory:").expect("open");
+        create_bot(
+            &db,
+            BotDraft {
+                name: "Source Bot".to_string(),
+                purpose: String::new(),
+                instructions: "You are Source Bot.".to_string(),
+                model: None,
+            },
+        )
+        .expect("source");
+        memory::remember(&db, "source-bot", "secret", "josh").expect("remember");
+        let copy = duplicate_bot(&db, "source-bot")
+            .expect("duplicate")
+            .expect("copy");
+        assert_eq!(memory::get_core(&db, &copy.id).expect("core"), "");
+        memory::recent_log(&db, &copy.id, 50).expect("log");
+    }
+
+    #[test]
     fn invite_is_single_use() {
         let db = Db::open(":memory:").expect("open");
         set_password(&db, "long-enough-password").expect("password");

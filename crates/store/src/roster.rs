@@ -263,7 +263,7 @@ pub fn list_roster(db: &Db, scope: Option<&ListScope>) -> rusqlite::Result<Vec<R
     let bots_sql = format!(
         "SELECT id, name, purpose, instructions, model, archived_at, has_routine,
                 section_id, pinned_at, hidden_at, avatar, shape, effort, is_template, voice
-         FROM bots WHERE archived_at IS NULL{scope_sql} ORDER BY pinned_at IS NULL, name",
+         FROM bots b WHERE b.archived_at IS NULL{scope_sql} ORDER BY b.pinned_at IS NULL, b.name",
     );
     let mut stmt = db.conn().prepare(&bots_sql)?;
 

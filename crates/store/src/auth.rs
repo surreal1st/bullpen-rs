@@ -202,13 +202,15 @@ pub fn session_user_id(db: &Db, token: &str) -> rusqlite::Result<Option<String>>
     if token.is_empty() {
         return Ok(None);
     }
-    db.conn()
+    let row = db
+        .conn()
         .query_row(
             "SELECT user_id FROM sessions WHERE token = ?1",
             params![token],
-            |row| row.get(0),
+            |row| row.get::<_, Option<String>>(0),
         )
-        .optional()
+        .optional()?;
+    Ok(row.flatten())
 }
 
 /// Ends one session (logout). A no-op if `token` names no row. Mirrors the
