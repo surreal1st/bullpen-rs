@@ -7,6 +7,7 @@ pub mod away;
 pub mod catalogue;
 pub mod changes;
 pub mod delegate;
+pub mod deliverables;
 pub mod desk;
 pub mod egress;
 pub mod egress_proxy;
