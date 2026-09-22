@@ -686,8 +686,127 @@ pub async fn login(password: &str) -> Result<(), String> {
 #[derive(Serialize)]
 struct SendBody<'a> {
     text: &'a str,
+    #[serde(rename = "attachmentId", skip_serializing_if = "Option::is_none")]
+    attachment_id: Option<&'a str>,
     #[serde(rename = "threadId", skip_serializing_if = "Option::is_none")]
     thread_id: Option<&'a str>,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentInfo {
+    pub id: String,
+    pub name: String,
+    pub content_type: String,
+    pub bytes: i64,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryItem {
+    pub id: String,
+    pub name: String,
+    pub content_type: String,
+    pub bytes: i64,
+    pub created_at: String,
+    pub kind: String,
+    pub bot_id: Option<String>,
+    pub bot_name: Option<String>,
+    pub message_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct UploadAttachmentResponse {
+    attachment: AttachmentInfo,
+}
+
+#[derive(Deserialize)]
+struct LibraryResponse {
+    items: Vec<LibraryItem>,
+}
+
+/// `POST /api/attachments` — raw bytes with `x-file-name` / `Content-Type`.
+pub async fn upload_attachment(
+    name: &str,
+    content_type: &str,
+    data: Vec<u8>,
+) -> Result<AttachmentInfo, String> {
+    let resp = Request::post("/api/attachments")
+        .header("x-file-name", name)
+        .header("Content-Type", content_type)
+        .raw_body(data)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        let status = resp.status();
+        #[derive(Deserialize)]
+        struct ErrBody {
+            error: Option<String>,
+        }
+        let msg = resp
+            .json::<ErrBody>()
+            .await
+            .ok()
+            .and_then(|b| b.error)
+            .unwrap_or_else(|| format!("upload -> {status}"));
+        return Err(msg);
+    }
+    resp.json::<UploadAttachmentResponse>()
+        .await
+        .map(|b| b.attachment)
+        .map_err(|e| e.to_string())
+}
+
+/// `GET /api/library` with optional filters.
+pub async fn fetch_library(q: &str, bot: &str, kind: &str) -> Result<Vec<LibraryItem>, String> {
+    let mut url = String::from("/api/library");
+    let mut params = Vec::new();
+    if !q.trim().is_empty() {
+        params.push(format!(
+            "q={}",
+            crate::transport::encode_uri_component(q.trim())
+        ));
+    }
+    if bot != "All" {
+        params.push(format!(
+            "bot={}",
+            crate::transport::encode_uri_component(bot)
+        ));
+    }
+    if kind != "All" {
+        params.push(format!(
+            "kind={}",
+            crate::transport::encode_uri_component(kind)
+        ));
+    }
+    if !params.is_empty() {
+        url.push('?');
+        url.push_str(&params.join("&"));
+    }
+    let resp = Request::get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("{url} -> {}", resp.status()));
+    }
+    resp.json::<LibraryResponse>()
+        .await
+        .map(|b| b.items)
+        .map_err(|e| e.to_string())
+}
+
+/// `DELETE /api/attachments/:id`
+pub async fn delete_attachment(id: &str) -> Result<(), String> {
+    let url = format!("/api/attachments/{id}");
+    let resp = Request::delete(&url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if resp.ok() {
+        Ok(())
+    } else {
+        Err(format!("{url} -> {}", resp.status()))
+    }
 }
 
 /// Sends the message and drives `on_event` for every frame in the response
@@ -707,11 +826,16 @@ pub async fn send_message(
     bot_id: &str,
     text: &str,
     thread_id: Option<&str>,
+    attachment_id: Option<&str>,
     mut on_event: impl FnMut(StreamEvent),
 ) -> Result<(), String> {
     let url = format!("/api/bots/{bot_id}/messages");
     let resp = Request::post(&url)
-        .json(&SendBody { text, thread_id })
+        .json(&SendBody {
+            text,
+            thread_id,
+            attachment_id,
+        })
         .map_err(|e| e.to_string())?
         .send()
         .await

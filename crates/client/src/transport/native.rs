@@ -214,10 +214,17 @@ async fn request_with_base(base: &str, spec: RequestSpec) -> Result<TransportRes
     if let Some(token) = stored_session_token() {
         builder = builder.bearer_auth(token);
     }
+    for (name, value) in &spec.extra_headers {
+        builder = builder.header(name, value);
+    }
     if let Some(bytes) = spec.body {
-        builder = builder
-            .header("content-type", "application/json")
-            .body(bytes);
+        if spec.body_is_json {
+            builder = builder
+                .header("content-type", "application/json")
+                .body(bytes);
+        } else {
+            builder = builder.body(bytes);
+        }
     }
     // `spec.with_credentials` is a web-only opt-in - see
     // `Request::with_credentials`'s doc. `client()`'s cookie store above
@@ -431,6 +438,8 @@ mod tests {
             method: Method::Get,
             url: "/api/rooms".to_string(),
             body: None,
+            body_is_json: true,
+            extra_headers: Vec::new(),
             with_credentials: false,
         };
         let resp = request_with_base(&base, spec)
@@ -517,6 +526,8 @@ mod tests {
             method: Method::Get,
             url: "/api/bots/dora/vm/thumbnail.png?f=1".to_string(),
             body: None,
+            body_is_json: true,
+            extra_headers: Vec::new(),
             with_credentials: false,
         };
         let resp = request_with_base(&base, spec)

@@ -29,6 +29,7 @@ pub fn Rail(
     // s2-settings.png` before this fix). It lives here now, beside "New
     // group chat", so it never overlaps the thread.
     on_settings: EventHandler<()>,
+    #[props(default)] on_library: Option<EventHandler<()>>,
 ) -> Element {
     let mut new_menu_open = use_signal(|| false);
     let section_ids: Vec<String> = sections.iter().map(|s| s.id.clone()).collect();
@@ -167,6 +168,13 @@ pub fn Rail(
                             on_select,
                         }
                     }
+                }
+            }
+            if let Some(open_library) = on_library {
+                button {
+                    class: "rail-store",
+                    onclick: move |_| open_library.call(()),
+                    "Library"
                 }
             }
         }

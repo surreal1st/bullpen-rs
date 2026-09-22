@@ -77,6 +77,11 @@ pub struct RequestSpec {
     pub method: Method,
     pub url: String,
     pub body: Option<Vec<u8>>,
+    /// When true (default for [`Request::json`]), the platform sets
+    /// `Content-Type: application/json`. When false, callers must set
+    /// content type via [`Request::header`] (uploads, transcribe, etc.).
+    pub body_is_json: bool,
+    pub extra_headers: Vec<(String, String)>,
     pub with_credentials: bool,
 }
 
@@ -156,13 +161,29 @@ impl Request {
                 method,
                 url: url.to_string(),
                 body: None,
+                body_is_json: true,
+                extra_headers: Vec::new(),
                 with_credentials: false,
             },
         }
     }
 
+    pub fn header(mut self, name: &str, value: &str) -> Self {
+        self.spec
+            .extra_headers
+            .push((name.to_string(), value.to_string()));
+        self
+    }
+
+    pub fn raw_body(mut self, bytes: Vec<u8>) -> Self {
+        self.spec.body = Some(bytes);
+        self.spec.body_is_json = false;
+        self
+    }
+
     pub fn json<T: Serialize>(mut self, body: &T) -> Result<Self, String> {
         self.spec.body = Some(serde_json::to_vec(body).map_err(|e| e.to_string())?);
+        self.spec.body_is_json = true;
         Ok(self)
     }
 

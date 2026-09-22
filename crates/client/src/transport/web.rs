@@ -39,18 +39,21 @@ impl Transport for WebTransport {
         if spec.with_credentials {
             builder = builder.credentials(web_sys::RequestCredentials::Include);
         }
-        // Ported from gloo-net's own `RequestBuilder::json` (it does
-        // exactly this: set the header, send the serialized text as the
-        // body) - reused here as raw bytes since `transport::Request::json`
-        // already serialized once in `mod.rs`, and re-serializing a second
-        // time would be pointless.
+        for (name, value) in &spec.extra_headers {
+            builder = builder.header(name, value);
+        }
         let request = match spec.body {
-            Some(bytes) => {
+            Some(bytes) if spec.body_is_json => {
                 let text = String::from_utf8(bytes).map_err(|e| e.to_string())?;
                 builder
                     .header("Content-Type", "application/json")
                     .body(text)
                     .map_err(|e| e.to_string())?
+            }
+            Some(bytes) => {
+                let array = js_sys::Uint8Array::new_with_length(bytes.len() as u32);
+                array.copy_from(&bytes);
+                builder.body(array).map_err(|e| e.to_string())?
             }
             None => builder.build().map_err(|e| e.to_string())?,
         };

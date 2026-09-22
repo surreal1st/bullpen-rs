@@ -2,9 +2,8 @@
 //! turn to a room's round), and stream the run back. Port of
 //! `src/server/app.ts:1463-1656`.
 //!
-//! 🔴 Scope, named here rather than silently: no attachments (per the
-//! ticket) - that still exists in the TS source inside this same line
-//! range. S2-04 adds the interject branch: an already-`running` run in
+//! S12-09: optional `attachmentId` on send — port of `app.ts:1480-1521`.
+//! S2-04 adds the interject branch: an already-`running` run in
 //! this thread gets a new message handed to it directly instead of racing
 //! it with a second run.
 
@@ -39,6 +38,8 @@ pub fn router() -> Router<AppState> {
 struct MessageBody {
     #[serde(default)]
     text: Option<String>,
+    #[serde(default)]
+    attachment_id: Option<String>,
     #[serde(default)]
     thread_id: Option<String>,
 }
@@ -122,6 +123,21 @@ async fn post_message(
             Json(json!({"error": "text is required"})),
         )
             .into_response());
+    }
+
+    let attachment_id = parsed
+        .attachment_id
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.trim().to_string());
+    if let Some(ref id) = attachment_id {
+        let db = state.db();
+        if !crate::scope::can_use_attachment(&db, &scope, id)? {
+            return Ok((
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "that attachment does not exist"})),
+            )
+                .into_response());
+        }
     }
 
     // S2-05/S2-F-04: ceiling gate, reading the account's real spend now
@@ -212,7 +228,10 @@ async fn post_message(
             &conversation_id,
             "user",
             &text,
-            store::NewMessage::default(),
+            store::NewMessage {
+                attachment_id: attachment_id.clone(),
+                ..Default::default()
+            },
         )?;
 
         // S2-04: an already-`running` run in this thread gets this message
@@ -221,8 +240,7 @@ async fn post_message(
         // Only a `running` row qualifies: `waiting` is parked on an
         // approval and must not be touched here, so it falls through to
         // starting an ordinary new run below and the approval stays
-        // exactly where it was. No attachments here (see this file's
-        // doc), so there is no TS suffix to add to the text. Read out of
+        // exactly where it was. Read out of
         // this block (rather than acted on here) so `state.runs.interject`
         // - which takes its own lock on this same `Db` - never runs while
         // this `db` guard is still held.

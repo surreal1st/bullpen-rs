@@ -23,6 +23,7 @@
 use crate::api;
 use crate::attention;
 use crate::events::{ChangeKind, subscribe_events};
+use crate::library::LibraryModal;
 use crate::new_bot::NewBotModal;
 use crate::rail::Rail;
 use crate::room_picker::{PickerMode, RoomPicker};
@@ -317,6 +318,7 @@ fn AppShell() -> Element {
     // this signal still just tracks whether the modal itself is open - see
     // `settings.rs`'s own doc comment for what it renders.
     let mut settings_open = use_signal(|| false);
+    let mut library_open = use_signal(|| false);
     let mut is_owner = use_signal(|| true);
     // Bumped whenever a "roster" change lands while a ROOM is open, to
     // force that `ChatPane` to remount and re-fetch - ported from
@@ -453,6 +455,7 @@ fn AppShell() -> Element {
                         on_new_bot: move |_| new_bot_open.set(true),
                         on_edit_room: move |room: RoomSummary| picker.set(Some(PickerMode::Edit(room))),
                         on_settings: move |_| settings_open.set(true),
+                        on_library: move |_| library_open.set(true),
                     }
                     if let Some(room) = selected_room {
                         ChatPane {
@@ -636,6 +639,11 @@ fn AppShell() -> Element {
     // ever reached through its gate) - see that component's own rsx!.
     rsx! {
         {body}
+        if library_open() {
+            LibraryModal {
+                on_close: move |_| library_open.set(false),
+            }
+        }
         if *settings_open.read() {
             SettingsModal {
                 is_owner: *is_owner.read(),

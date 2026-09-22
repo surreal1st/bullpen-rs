@@ -8,7 +8,9 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use rusqlite::OptionalExtension;
 use serde_json::json;
-use store::{Db, ListScope, OWNER_ID, UserRole, adopt_owner, get_user, session_user_id};
+use store::{
+    Db, ListScope, OWNER_ID, UserRole, adopt_owner, get_attachment, get_user, session_user_id,
+};
 
 use crate::auth::{is_open_path, presented_token};
 use crate::{AppError, AppState};
@@ -110,6 +112,19 @@ fn one(db: &Db, sql: &str, id: &str) -> rusqlite::Result<Option<String>> {
         })
         .optional()?;
     Ok(row.flatten())
+}
+
+/// Whether `id` is an attachment this scope may attach to a message or
+/// fetch — same holder rule as [`require_scope`]'s cross-account 404s.
+pub fn can_use_attachment(db: &Db, scope: &Scope, id: &str) -> rusqlite::Result<bool> {
+    if get_attachment(db, id)?.is_none() {
+        return Ok(false);
+    }
+    let holder = scoped_owner(db, "attachments", id)?;
+    match holder {
+        None => Ok(scope.is_owner),
+        Some(h) => Ok(h == scope.user_id),
+    }
 }
 
 fn scoped_owner(db: &Db, resource: &str, id: &str) -> rusqlite::Result<Option<String>> {

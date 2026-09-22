@@ -377,6 +377,83 @@
   background: var(--sel);
 }
 
+.rail-store {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  width: calc(100% - 1rem);
+  margin: 0.35rem 0.5rem 0.5rem;
+  border: 0;
+  background: transparent;
+  color: var(--ink-dim);
+  border-radius: var(--radius-sm);
+  padding: 0.42rem 0.55rem;
+  font: inherit;
+  font-size: 0.85rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rail-store:hover {
+  background: var(--sel);
+  color: var(--ink);
+}
+
+.library-modal {
+  width: min(720px, 96vw);
+  max-height: min(80vh, 720px);
+  overflow: auto;
+}
+
+.library-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.library-toolbar input,
+.library-toolbar select {
+  flex: 1;
+  min-width: 8rem;
+}
+
+.library-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.library-card {
+  display: flex;
+  gap: 0.65rem;
+  align-items: flex-start;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+}
+
+.library-card-glyph {
+  font-size: 1.25rem;
+  line-height: 1;
+}
+
+.library-card-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.library-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  align-items: center;
+}
+
 /* A group chat's stacked-faces avatar: up to four of the members' own
    faces, in a 2x2 cluster - ported from `shell.css:5934-5989` (the styling
    backing `GroupAvatar.tsx`, which S1-07b's ticket names directly even

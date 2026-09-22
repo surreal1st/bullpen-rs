@@ -31,6 +31,7 @@ mod goals_editor;
 // (non-test) build. That is the correct state, not a gap - nothing calls
 // this module yet, by design (see its top doc) - so the honest fix is this
 // explicit, narrowly-scoped allow rather than inventing a caller.
+mod library;
 #[cfg_attr(not(test), allow(dead_code))]
 #[cfg(all(not(target_arch = "wasm32"), feature = "desktop"))]
 mod local_read;

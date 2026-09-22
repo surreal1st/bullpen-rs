@@ -202,7 +202,7 @@ pub fn ChatPane(
     });
 
     let send_bot_id = bot_id.clone();
-    let on_send = move |text: String| {
+    let on_send = move |(text, attachment_id): (String, Option<String>)| {
         let bot_id = send_bot_id.clone();
         // THREADS-01: read fresh on every call, not captured once at
         // component creation - this is the exact line the ticket's own top
@@ -220,8 +220,12 @@ pub fn ChatPane(
         sending.set(true);
         spawn(async move {
             let mut assembled = String::new();
-            let result =
-                api::send_message(&bot_id, &text, thread_id.as_deref(), |event| match event {
+            let result = api::send_message(
+                &bot_id,
+                &text,
+                thread_id.as_deref(),
+                attachment_id.as_deref(),
+                |event| match event {
                     api::StreamEvent::Delta { text } => {
                         assembled.push_str(&text);
                         streaming.set(Some(assembled.clone()));
@@ -255,8 +259,9 @@ pub fn ChatPane(
                         streaming.set(None);
                     }
                     api::StreamEvent::Run { .. } | api::StreamEvent::Ignored => {}
-                })
-                .await;
+                },
+            )
+            .await;
             if let Err(err) = result {
                 streaming.set(None);
                 load_error.set(Some(err));
