@@ -1,7 +1,7 @@
 //! S12-04: `POST /api/transcribe` — port of `app.ts` push-to-talk route.
 
 use axum::body::Bytes;
-use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
@@ -12,7 +12,10 @@ use crate::transcribe::{self, MAX_AUDIO_BYTES, TranscribeOptions};
 use crate::{ApiResult, AppState};
 
 pub fn router() -> Router<AppState> {
-    Router::new().route("/api/transcribe", post(post_transcribe))
+    Router::new()
+        .route("/api/transcribe", post(post_transcribe))
+        // Let the handler enforce MAX_AUDIO_BYTES and return JSON 413 (TS parity).
+        .layer(DefaultBodyLimit::max(MAX_AUDIO_BYTES + 1))
 }
 
 async fn post_transcribe(
