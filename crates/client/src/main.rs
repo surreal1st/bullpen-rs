@@ -12,12 +12,12 @@ mod connectors_card;
 // the default `web` feature in practice - see that module's doc).
 #[cfg(feature = "desktop")]
 mod desktop;
-#[cfg(feature = "mobile")]
-mod mobile;
-mod push_register;
 mod edit_bot;
 mod events;
 mod goals_editor;
+#[cfg(feature = "mobile")]
+mod mobile;
+mod push_register;
 // S13b-03-04: the pure half of reading a file a bot asked for - see that
 // module's own doc for why nothing calls it yet. Gated on both
 // `feature = "desktop"` and `not(target_arch = "wasm32")` per this
