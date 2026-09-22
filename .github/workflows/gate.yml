@@ -35,12 +35,12 @@ jobs:
 
       - name: cargo clippy
         run: |
-          cargo clippy --all-targets --exclude client -- -D warnings
+          cargo clippy --workspace --all-targets --exclude client -- -D warnings
           cargo clippy -p client --target wasm32-unknown-unknown --all-targets -- -D warnings
 
       - name: cargo test
         run: |
-          cargo test --no-fail-fast --exclude client
+          cargo test --workspace --no-fail-fast --exclude client
           cargo test -p client --target wasm32-unknown-unknown --no-fail-fast
 
       - name: release build (server)
