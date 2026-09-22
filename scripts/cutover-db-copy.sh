@@ -56,10 +56,11 @@ log "  2. mkdir -p ${BACKUP_DIR}"
 if [[ -f "${DEST_DB}" ]]; then
   log "  3. cp -a ${DEST_DB} ${BACKUP_DIR}/bullpen.db"
 fi
-log "  4. cp -a ${LIVE_DB} ${DEST_DB}"
-log "  5. chown bullpen:bullpen ${DEST_DB}"
-log "  6. sha256sum dest (must equal source ${LIVE_SHA})"
-log "  7. systemctl start bullpen-rs.service"
+log "  4. sqlite3 ${LIVE_DB} \".backup ${DEST_DB}.new\"   # checkpointed copy, not raw cp"
+log "  5. mv ${DEST_DB}.new ${DEST_DB}; rm -f ${DEST_DB}-wal ${DEST_DB}-shm"
+log "  6. chown bullpen:bullpen ${DEST_DB}"
+log "  7. PRAGMA integrity_check on dest (must be ok)"
+log "  8. systemctl start bullpen-rs.service"
 log ""
 log "Handoff §8 / docs/s14-cutover: verify BOTH hashes after any cross-machine move."
 
@@ -76,15 +77,28 @@ systemctl stop bullpen-rs.service
 mkdir -p "${BACKUP_DIR}"
 if [[ -f "${DEST_DB}" ]]; then
   cp -a "${DEST_DB}" "${BACKUP_DIR}/bullpen.db"
+  for sidecar in "${DEST_DB}-wal" "${DEST_DB}-shm"; do
+    if [[ -f "${sidecar}" ]]; then
+      cp -a "${sidecar}" "${BACKUP_DIR}/"
+    fi
+  done
   sha256sum "${BACKUP_DIR}/bullpen.db" > "${BACKUP_DIR}/CHECKSUMS"
 fi
 
-cp -a "${LIVE_DB}" "${DEST_DB}"
+# Raw `cp` of the main file leaves stale -wal/-shm from the old rust DB and
+# corrupts SQLite ("database disk image is malformed"). Backup API checkpoints live.
+TMP_DB="${DEST_DB}.new"
+rm -f "${TMP_DB}"
+sudo -u bullpen sqlite3 "${LIVE_DB}" ".backup '${TMP_DB}'"
+mv "${TMP_DB}" "${DEST_DB}"
+rm -f "${DEST_DB}-wal" "${DEST_DB}-shm"
 chown bullpen:bullpen "${DEST_DB}"
-NEW_SHA="$(sha256sum "${DEST_DB}" | awk '{print $1}')"
-if [[ "${NEW_SHA}" != "${LIVE_SHA}" ]]; then
-  die "Hash mismatch after copy (dest ${NEW_SHA} != source ${LIVE_SHA})"
+INTEGRITY="$(sudo -u bullpen sqlite3 "${DEST_DB}" "PRAGMA integrity_check;" | head -1)"
+if [[ "${INTEGRITY}" != "ok" ]]; then
+  die "Dest integrity_check failed: ${INTEGRITY}"
 fi
+NEW_SHA="$(sha256sum "${DEST_DB}" | awk '{print $1}')"
+log "Dest sha256 after backup (may differ from live file while WAL is open): ${NEW_SHA}"
 
 echo "${NEW_SHA}  bullpen.db" > "${BACKUP_DIR}/CHECKSUMS.after"
 systemctl start bullpen-rs.service
