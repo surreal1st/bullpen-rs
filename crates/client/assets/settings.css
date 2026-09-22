@@ -99,6 +99,31 @@
   cursor: text;
 }
 
+/* S12-04b: per-bot read-aloud voice (TS `VoiceEditor.tsx`). */
+.voice-editor {
+  padding: 0.35rem 1.15rem 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.voice-editor-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  align-items: center;
+}
+
+.voice-editor-select {
+  min-width: 12rem;
+  max-width: 100%;
+}
+
+.bubble-speak {
+  margin-top: 0.25rem;
+  align-self: flex-start;
+}
+
 /* THREADS-01: the conversation strip - see this file's own top doc comment
    for why it lives here rather than `thread.css`/`rail.css`. */
 .threads-wrap {

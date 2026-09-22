@@ -715,6 +715,21 @@ pub fn set_shape(db: &Db, id: &str, shape: Option<&str>) -> rusqlite::Result<boo
     Ok(true)
 }
 
+/// S12-04b: sets or clears the `SpeechSynthesisVoice` name a bot reads aloud
+/// with - port of `store.ts`'s `voice` field on `updateBot`. `false` for an
+/// unknown bot; nothing is written in that case.
+pub fn set_voice(db: &Db, id: &str, voice: Option<&str>) -> rusqlite::Result<bool> {
+    if get_bot(db, id)?.is_none() {
+        return Ok(false);
+    }
+    let clean = voice.filter(|v| !v.is_empty());
+    db.conn().execute(
+        "UPDATE bots SET voice = ?1 WHERE id = ?2",
+        params![clean, id],
+    )?;
+    Ok(true)
+}
+
 /// F7b-01: adds a bot to the roster - port of `store.ts:411-426`'s
 /// `createBot`. Only `id, name, purpose, instructions, model, created_at`
 /// are written; every other column keeps its schema default (`crate::

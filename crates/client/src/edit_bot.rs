@@ -7,11 +7,8 @@
 //! class for the Instructions field - EDITABLE here (no `readonly`), unlike
 //! the read-only preview textarea `new_bot.rs` added that class for.
 //!
-//! `voice` stays out on purpose: it is S11's device-voice field, and
-//! nothing in this port writes it anywhere except `store::duplicate_bot`
-//! (which only ever carries an existing value ACROSS to a copy, never sets
-//! one from scratch) - adding a writer here for a field with no feature
-//! behind it yet would be a column edit pretending to be a feature.
+//! S12-04b: `voice` is edited in the thread header via `voice_editor.rs`
+//! (PATCH on change, same as TS `VoiceEditor.tsx`), not in this modal.
 //!
 //! On success this hands the updated `Bot` back through `on_saved`.
 //! `thread.rs`'s own call site both seeds its `local_bot` from it directly

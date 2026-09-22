@@ -23,6 +23,7 @@ use crate::routines_editor::RoutinesModal;
 use crate::threads::Threads;
 use crate::types::{AwayPayload, Bot, Message, Role, Section};
 use crate::vm_card::VmCard;
+use crate::voice_editor::VoiceEditor;
 use crate::working_bar::WorkingBar;
 use dioxus::prelude::*;
 use shared::faces::SHAPES;
@@ -731,9 +732,13 @@ pub fn ChatPane(
                                     "Archive"
                                 }
                                 ModelChip {
-                                    bot: current,
+                                    bot: current.clone(),
                                     on_saved: move |updated: Bot| local_bot.set(Some(updated)),
                                 }
+                            }
+                            VoiceEditor {
+                                bot: current,
+                                on_saved: move |updated: Bot| local_bot.set(Some(updated)),
                             }
                         }
                         if let Some(note) = share_note.read().clone() {
@@ -840,6 +845,7 @@ pub fn ChatPane(
                 messages,
                 streaming,
                 bot_name: bot_name.clone(),
+                bot_voice: local_bot.read().as_ref().and_then(|b| b.voice.clone()),
                 conversation_id,
                 section_ids: section_ids.clone(),
                 away: away.clone(),
@@ -874,6 +880,7 @@ fn Thread(
     messages: Signal<Vec<Message>>,
     streaming: Signal<Option<String>>,
     bot_name: String,
+    #[props(default)] bot_voice: Option<String>,
     conversation_id: Signal<Option<String>>,
     #[props(default)] section_ids: Vec<String>,
     #[props(default)] away: Option<AwayPayload>,
@@ -940,7 +947,11 @@ fn Thread(
                             "{format_day(&m.created_at, &now)} {format_time(&m.created_at)}"
                         }
                     }
-                    Bubble { message: m, bot_name: bot_name.clone() }
+                    Bubble {
+                        message: m,
+                        bot_name: bot_name.clone(),
+                        bot_voice: bot_voice.clone(),
+                    }
                 }
             }
             if let Some(text) = live_text {
@@ -954,6 +965,7 @@ fn Thread(
                         created_at: now_iso(),
                     },
                     bot_name: bot_name.clone(),
+                    bot_voice: bot_voice.clone(),
                     live: true,
                 }
             }

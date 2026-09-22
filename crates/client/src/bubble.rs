@@ -5,7 +5,9 @@
 //! header, and the side a bubble sits on says who is talking - so this
 //! renders a bubble and little else: no avatar, no name, no per-message
 //! timestamp (`thread.rs` draws that between groups instead), no model
-//! badge, no attachment, no reactions, no hover toolbar, no voice. Those
+//! badge, no attachment, no reactions, no hover toolbar. S12-04b adds a
+//! minimal read-aloud control on assistant bubbles when the browser can
+//! speak; full hover toolbar stays out of scope.
 //! are all real rows in the 700-line original; none of them are in scope
 //! for S1-07a (see the ticket's Source/Target lists).
 //!
@@ -21,10 +23,16 @@
 use crate::markdown::Markdown;
 use crate::message_time::format_full;
 use crate::types::{Message, Role};
+use crate::voice::{can_speak, speak, stop_speaking};
 use dioxus::prelude::*;
 
 #[component]
-pub fn Bubble(message: Message, bot_name: String, #[props(default = false)] live: bool) -> Element {
+pub fn Bubble(
+    message: Message,
+    bot_name: String,
+    #[props(default = false)] live: bool,
+    #[props(default)] bot_voice: Option<String>,
+) -> Element {
     let is_user = message.role == Role::User;
     let row_class = if is_user {
         "row row-user"
@@ -34,6 +42,10 @@ pub fn Bubble(message: Message, bot_name: String, #[props(default = false)] live
     let who = if is_user { "You" } else { bot_name.as_str() };
     let title = format!("{who} · {}", format_full(&message.created_at));
     let empty = message.content.is_empty();
+    let mut speaking = use_signal(|| false);
+    let can_read = !is_user && !empty && !live && can_speak();
+    let content_for_speak = message.content.clone();
+    let voice_for_speak = bot_voice.clone();
 
     rsx! {
         div { class: "{row_class}",
@@ -54,6 +66,29 @@ pub fn Bubble(message: Message, bot_name: String, #[props(default = false)] live
                             span { class: "upstream-error-label", "The model call failed. Upstream said:" }
                             pre { class: "mono", "{error}" }
                         }
+                    }
+                }
+                if can_read {
+                    button {
+                        class: "bubble-speak pane-perms-btn",
+                        r#type: "button",
+                        "aria-label": if *speaking.read() { "Stop reading aloud" } else { "Read aloud" },
+                        onclick: move |_| {
+                            if *speaking.read() {
+                                stop_speaking();
+                                speaking.set(false);
+                                return;
+                            }
+                            speaking.set(true);
+                            let text = content_for_speak.clone();
+                            let voice = voice_for_speak.clone();
+                            speak(
+                                &text,
+                                Some(Box::new(move || speaking.set(false))),
+                                voice.as_deref(),
+                            );
+                        },
+                        if *speaking.read() { "Stop" } else { "Read aloud" }
                     }
                 }
             }

@@ -53,6 +53,8 @@ mod transport;
 mod types;
 // S6-VM-01: the per-bot machine card - see that module's own doc.
 mod vm_card;
+mod voice;
+mod voice_editor;
 // S13b-02: only compiled with `--features desktop` - the pure window-state
 // module `desktop.rs` wires in (restore-on-launch, geometry capture, tray).
 #[cfg(feature = "desktop")]

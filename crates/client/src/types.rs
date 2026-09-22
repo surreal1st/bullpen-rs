@@ -114,6 +114,9 @@ pub struct Bot {
     pub model: Option<String>,
     #[serde(default = "default_effort")]
     pub effort: String,
+    /// S12-04b: `SpeechSynthesisVoice` name for read-aloud; null is device default.
+    #[serde(default)]
+    pub voice: Option<String>,
     // ARCH-01: `false` for every bot the roster (`GET /api/roster`) ever
     // carries - `store::list_roster` filters `archived_at IS NULL`, so this
     // only ever reads `true` on a row from `GET /api/bots/archived`

@@ -106,11 +106,10 @@
 //!   clearing either is legitimate (Josh emptying a bot's purpose, or
 //!   replacing its instructions with a shorter draft, is not an error).
 //!
-//! `voice` stays out on purpose: it is S11's device-voice field, and
-//! nothing in this port writes it anywhere except `store::duplicate_bot`
-//! (which only ever carries an existing value ACROSS to a copy, never sets
-//! one from scratch). Adding a writer here for a field with no feature
-//! behind it yet would be a column edit pretending to be a feature.
+//! S12-04b: `voice` on this same PATCH - port of `app.ts:1225-1235`. Only a
+//! string (a real pick) or null (back to the device default) are meaningful;
+//! `""` stores null. Wrong types are refused with 400 rather than landing as
+//! garbage voice names.
 //!
 //! All three are collected as plain, side-effect-free locals BEFORE the
 //! `model`/`effort` guards run - the same posture `model_update`/
@@ -303,6 +302,21 @@ async fn patch_bot(
         instructions_update = Some(raw.clone());
     }
 
+    let mut voice_update: Option<Option<String>> = None;
+    if obj.contains_key("voice") {
+        let voice = match obj.get("voice") {
+            Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(s)) if s.is_empty() => None,
+            Some(serde_json::Value::String(s)) => Some(s.clone()),
+            _ => {
+                return Err(crate::AppError::bad_request(
+                    "voice must be a string or null",
+                ));
+            }
+        };
+        voice_update = Some(voice);
+    }
+
     // `Some(Some(id))` = set the pin, `Some(None)` = clear it, `None` = the
     // field was absent from the body at all - collected here and written
     // once the db lock is retaken below.
@@ -384,6 +398,9 @@ async fn patch_bot(
             purpose_update.as_deref(),
             instructions_update.as_deref(),
         )?;
+    }
+    if let Some(voice) = voice_update {
+        store::set_voice(&db, &id, voice.as_deref())?;
     }
 
     let bot = store::get_bot(&db, &id)?

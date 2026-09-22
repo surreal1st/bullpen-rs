@@ -2386,3 +2386,140 @@ async fn patch_instructions_then_export_carries_the_new_text() {
     let (_frontmatter, body) = split_frontmatter(&text);
     assert_eq!(body, "Brand new instructions.\n\nWith a second paragraph.");
 }
+
+/* --------------------------------------------------------------- S12-04b */
+
+/// Port of `projects/bullpen-night/test/bot-voice-route.test.ts`.
+#[tokio::test]
+async fn patch_voice_fresh_bot_defaults_to_null() {
+    let db = open_db();
+    seed_bot(&db, "arthur", "Arthur");
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let (_status, roster) = get_route(&app, "/api/roster", &session).await;
+    let bot = roster["bots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["id"] == "arthur")
+        .unwrap();
+    assert!(bot["voice"].is_null());
+}
+
+#[tokio::test]
+async fn patch_voice_round_trips_a_chosen_name() {
+    let db = open_db();
+    seed_bot(&db, "arthur", "Arthur");
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let (status, response) = patch_route(
+        &app,
+        "/api/bots/arthur",
+        &session,
+        json!({ "voice": "Google UK English Male" }),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(response["bot"]["voice"], "Google UK English Male");
+
+    let (_status, roster) = get_route(&app, "/api/roster", &session).await;
+    let bot = roster["bots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["id"] == "arthur")
+        .unwrap();
+    assert_eq!(bot["voice"], "Google UK English Male");
+}
+
+#[tokio::test]
+async fn patch_voice_null_clears_back_to_device_default() {
+    let db = open_db();
+    seed_bot(&db, "arthur", "Arthur");
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    patch_route(
+        &app,
+        "/api/bots/arthur",
+        &session,
+        json!({ "voice": "Some Voice" }),
+    )
+    .await;
+    let (status, response) =
+        patch_route(&app, "/api/bots/arthur", &session, json!({ "voice": null })).await;
+    assert_eq!(status, 200);
+    assert!(response["bot"]["voice"].is_null());
+
+    let (_status, roster) = get_route(&app, "/api/roster", &session).await;
+    let bot = roster["bots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["id"] == "arthur")
+        .unwrap();
+    assert!(bot["voice"].is_null());
+}
+
+#[tokio::test]
+async fn patch_voice_empty_string_stores_null() {
+    let db = open_db();
+    seed_bot(&db, "arthur", "Arthur");
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let (status, response) =
+        patch_route(&app, "/api/bots/arthur", &session, json!({ "voice": "" })).await;
+    assert_eq!(status, 200);
+    assert!(response["bot"]["voice"].is_null());
+}
+
+#[tokio::test]
+async fn patch_voice_refuses_non_string_and_leaves_column_alone() {
+    let db = open_db();
+    seed_bot(&db, "arthur", "Arthur");
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    let (status, response) =
+        patch_route(&app, "/api/bots/arthur", &session, json!({ "voice": 42 })).await;
+    assert_eq!(status, 400);
+    assert_eq!(response["error"], "voice must be a string or null");
+
+    let (_status, roster) = get_route(&app, "/api/roster", &session).await;
+    let bot = roster["bots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["id"] == "arthur")
+        .unwrap();
+    assert!(bot["voice"].is_null());
+}
+
+#[tokio::test]
+async fn patch_voice_leaves_other_bots_alone() {
+    let db = open_db();
+    seed_bot(&db, "arthur", "Arthur");
+    seed_bot(&db, "nozdormu", "Nozdormu");
+    let session = seed_session(&db);
+    let app = app_for(db);
+
+    patch_route(
+        &app,
+        "/api/bots/arthur",
+        &session,
+        json!({ "voice": "Arthur's Voice" }),
+    )
+    .await;
+
+    let (_status, roster) = get_route(&app, "/api/roster", &session).await;
+    let noz = roster["bots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["id"] == "nozdormu")
+        .unwrap();
+    assert!(noz["voice"].is_null());
+}
