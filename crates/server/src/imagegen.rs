@@ -213,17 +213,18 @@ pub async fn generate_image(
         api_key: key,
     };
 
-    let (status, response_text) = match http_client {
+    let http_result = match http_client {
         Some(h) => h.post_chat_completions(&body_str, timeout).await,
         None => live.post_chat_completions(&body_str, timeout).await,
-    }
-    .unwrap_or_else(|err| {
+    };
+    if let Err(err) = &http_result {
         return ImageOutcome {
             ok: false,
             attachment: None,
             detail: format!("The image did not come back: {err}"),
         };
-    });
+    }
+    let (status, response_text) = http_result.expect("checked Err above");
 
     let body_json: serde_json::Value =
         serde_json::from_str(&response_text).unwrap_or(serde_json::json!({}));
