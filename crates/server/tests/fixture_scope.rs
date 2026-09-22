@@ -4,14 +4,11 @@ use chrono::{Duration, Utc};
 use rusqlite::params;
 use server::scope;
 use std::fs;
-use std::path::PathBuf;
 use uuid::Uuid;
-
-const FIXTURE: &str = "d:/rainmade/.scratch/bullpen-rs/fixtures/ts-made.db";
 
 fn fixture_copy() -> store::Db {
     let temp = std::env::temp_dir().join(format!("bullpen_fixture_scope_{}", Uuid::new_v4()));
-    fs::copy(PathBuf::from(FIXTURE), &temp).expect("copy fixture");
+    fs::copy(store::ts_made_fixture_path(), &temp).expect("copy fixture");
     store::Db::open(temp.to_str().unwrap()).expect("open db copy")
 }
 

@@ -1,11 +1,10 @@
 use std::fs;
-use std::path::PathBuf;
 use store::Db;
 
 #[test]
 fn test_list_roster() {
     // Copy fixture to temp location
-    let fixture = PathBuf::from("d:/rainmade/.scratch/bullpen-rs/fixtures/ts-made.db");
+    let fixture = store::ts_made_fixture_path();
     let temp_dir = std::env::temp_dir();
     let temp_db = temp_dir.join("test_roster.db");
 
@@ -63,7 +62,7 @@ fn test_list_roster() {
 #[test]
 fn test_get_bot() {
     // Copy fixture to temp location
-    let fixture = PathBuf::from("d:/rainmade/.scratch/bullpen-rs/fixtures/ts-made.db");
+    let fixture = store::ts_made_fixture_path();
     let temp_dir = std::env::temp_dir();
     let temp_db = temp_dir.join("test_get_bot.db");
 
@@ -95,7 +94,7 @@ fn test_get_bot() {
 #[test]
 fn test_roster_entry_serialization() {
     // Copy fixture to temp location
-    let fixture = PathBuf::from("d:/rainmade/.scratch/bullpen-rs/fixtures/ts-made.db");
+    let fixture = store::ts_made_fixture_path();
     let temp_dir = std::env::temp_dir();
     let temp_db = temp_dir.join("test_serialization.db");
 

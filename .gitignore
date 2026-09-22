@@ -4,6 +4,7 @@
 *.db
 *.db-wal
 *.db-shm
+!tests/fixtures/*.db
 .env
 *.env
 /data

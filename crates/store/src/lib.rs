@@ -323,3 +323,8 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
 
     Ok(())
 }
+
+/// Path to the committed TS-made SQLite fixture used by integration tests.
+pub fn ts_made_fixture_path() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/ts-made.db")
+}

@@ -3,7 +3,6 @@
 use chrono::{DateTime, Utc};
 use rusqlite::params;
 use std::fs;
-use std::path::PathBuf;
 use uuid::Uuid;
 
 use store::Db;
@@ -37,27 +36,10 @@ fn t(s: &str) -> DateTime<Utc> {
 fn ensure_goal_tables_is_idempotent_and_opens_ts_fixture() {
     // Construct path relative to CARGO_MANIFEST_DIR (crates/store), going up to
     // the workspace root (rainmade), then to the fixture.
-    let fixture = {
-        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        // manifest: .../bullpen-rs/crates/store
-        // parent(): .../bullpen-rs/crates
-        // parent(): .../bullpen-rs
-        // parent(): .../projects
-        // parent(): .../rainmade
-        let workspace = manifest
-            .parent() // -> crates
-            .and_then(|p| p.parent()) // -> bullpen-rs
-            .and_then(|p| p.parent()) // -> projects
-            .and_then(|p| p.parent()) // -> rainmade
-            .expect("navigate to workspace root");
-        workspace.join(".scratch/bullpen-rs/fixtures/ts-made.db")
-    };
-
     let temp = {
-        let fixture_str = fixture.to_str().expect("fixture path is valid UTF-8");
         let temp =
             std::env::temp_dir().join(format!("bullpen-rs-goals-test-{}.db", Uuid::new_v4()));
-        fs::copy(fixture_str, &temp).expect("copy fixture to temp path");
+        fs::copy(store::ts_made_fixture_path(), &temp).expect("copy fixture to temp path");
         temp
     };
 

@@ -26,9 +26,8 @@ fn create_test_bot(db: &Db) -> String {
 
 /// Copies the fixture to a fresh temp path for isolation.
 fn copy_fixture_to_temp() -> PathBuf {
-    let fixture = "d:/rainmade/.scratch/bullpen-rs/fixtures/ts-made.db";
     let temp = std::env::temp_dir().join(format!("bullpen-rs-routines-test-{}.db", Uuid::new_v4()));
-    fs::copy(fixture, &temp).expect("copy fixture to temp path");
+    fs::copy(store::ts_made_fixture_path(), &temp).expect("copy fixture to temp path");
     temp
 }
 

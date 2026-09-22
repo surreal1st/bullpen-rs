@@ -1717,9 +1717,12 @@ mod capture_process_tests {
         assert_eq!(admission.snapshot().capture_decode_in_use, 1);
         assert_eq!(admission.snapshot().retained_in_use, 1);
         assert!(
-            tokio::time::timeout(Duration::from_millis(30), Arc::clone(&desktop).lock_owned())
-                .await
-                .is_err(),
+            tokio::time::timeout(
+                Duration::from_millis(150),
+                Arc::clone(&desktop).lock_owned()
+            )
+            .await
+            .is_err(),
             "desktop lock was released while the real capture child was alive"
         );
         drop(receiver);
@@ -1735,7 +1738,7 @@ mod capture_process_tests {
                 "retained-frame lease released while the child was still alive"
             );
             assert!(
-                tokio::time::timeout(Duration::from_millis(1), Arc::clone(&desktop).lock_owned())
+                tokio::time::timeout(Duration::from_millis(10), Arc::clone(&desktop).lock_owned())
                     .await
                     .is_err(),
                 "desktop lock released while the child was still alive"

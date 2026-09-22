@@ -382,8 +382,7 @@ fn test_migration_20_opens_fixture() {
     // Use a unique temp filename with the process ID
     let temp_filename = format!("test_migration_20_{}.db", std::process::id());
     let temp_path = std::env::temp_dir().join(&temp_filename);
-    let fixture_path = "d:/rainmade/.scratch/bullpen-rs/fixtures/ts-made.db";
-    std::fs::copy(fixture_path, &temp_path).expect("copy fixture to temp");
+    std::fs::copy(store::ts_made_fixture_path(), &temp_path).expect("copy fixture to temp");
 
     // Open it and check version
     {

@@ -11,13 +11,10 @@ use rusqlite::params;
 use serde_json::Value;
 use server::{AppState, build_app};
 use std::fs;
-use std::path::PathBuf;
 use tower::ServiceExt;
 use uuid::Uuid;
 
-const FIXTURE: &str = "d:/rainmade/.scratch/bullpen-rs/fixtures/ts-made.db";
-
-/// A private copy of the fixture db for one test. Never opens `FIXTURE`
+/// A private copy of the fixture db for one test. Never opens the fixture
 /// directly - every test gets its own file so they cannot stomp each other.
 fn fixture_copy(name: &str) -> store::Db {
     let unique_id = Uuid::new_v4();
@@ -28,7 +25,7 @@ fn fixture_copy(name: &str) -> store::Db {
     let _ = fs::remove_file(format!("{}-shm", temp.display()));
     let _ = fs::remove_file(&temp);
 
-    fs::copy(PathBuf::from(FIXTURE), &temp).expect("copy fixture");
+    fs::copy(store::ts_made_fixture_path(), &temp).expect("copy fixture");
     store::Db::open(temp.to_str().expect("temp path is valid utf-8")).expect("open db copy")
 }
 

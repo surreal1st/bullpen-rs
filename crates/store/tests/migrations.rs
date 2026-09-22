@@ -29,10 +29,9 @@ fn user_version(conn: &Connection) -> i64 {
 
 /// Copies the fixture to a fresh temp path so no test opens it in place.
 fn copy_fixture_to_temp() -> std::path::PathBuf {
-    let fixture = "d:/rainmade/.scratch/bullpen-rs/fixtures/ts-made.db";
     let temp =
         std::env::temp_dir().join(format!("bullpen-rs-store-test-{}.db", uuid::Uuid::new_v4()));
-    fs::copy(fixture, &temp).expect("copy fixture to temp path");
+    fs::copy(store::ts_made_fixture_path(), &temp).expect("copy fixture to temp path");
     temp
 }
 
