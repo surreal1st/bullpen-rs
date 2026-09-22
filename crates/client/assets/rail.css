@@ -55,6 +55,41 @@
   color-scheme: dark;
 }
 
+/* Ported from `projects/bullpen-night/src/client/styles.css:37-78` — the Dioxus
+   client had tokens but no document reset, so desktop/web inherited the
+   WebView/browser default (16px serif, document scroll) instead of Vapor. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font:
+    15px/1.6 ui-sans-serif,
+    -apple-system,
+    "Segoe UI",
+    system-ui,
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
 .roster {
   background: #0a0e13;
   border-right: 1px solid var(--line);
