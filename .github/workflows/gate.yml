@@ -1,5 +1,10 @@
 # CI signal on every push/PR to main. Authoritative gate for ship remains
 # workstation Git Bash: ./scripts/gate.sh (zigbuild release path + dx client policy).
+#
+# Clippy/test omit --all-features: desktop+mobile enable dioxus GTK/WebKit (glib-sys)
+# and need a full Linux GUI dev stack ubuntu-latest does not install by default.
+# gate.sh --all-features on the workstation covers those cfgs; wasm32 client check
+# below uses default web features only (same as gate.sh).
 name: gate
 
 on:
@@ -26,10 +31,10 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: cargo clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: cargo test
-        run: cargo test --all-features --no-fail-fast
+        run: cargo test --no-fail-fast
 
       - name: release build (server)
         run: cargo build --release -p server
@@ -41,4 +46,4 @@ jobs:
 
       - name: Note authoritative gate
         run: |
-          echo "Ubuntu CI passed. Ship still requires Git Bash ./scripts/gate.sh on the workstation (musl zigbuild + dx web release)."
+          echo "Ubuntu CI passed (no --all-features; desktop/mobile GTK). Ship still requires Git Bash ./scripts/gate.sh on the workstation (musl zigbuild, --all-features, dx web release)."
