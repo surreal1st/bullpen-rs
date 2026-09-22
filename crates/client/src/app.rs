@@ -418,7 +418,12 @@ fn AppShell() -> Element {
 
     let body = match roster.read().as_ref() {
         None => rsx! {
-            div { class: "roster", style: "padding: 1rem; color: var(--muted);", "Loading roster…" }
+            div { class: "app",
+                div { class: "rail",
+                    div { class: "roster", style: "padding: 1rem; color: var(--muted);", "Loading roster…" }
+                }
+                div { class: "pane pane-empty", "Loading…" }
+            }
         },
         Some(Ok(data)) => {
             let section_ids: Vec<String> = data.sections.iter().map(|s| s.id.clone()).collect();
@@ -453,7 +458,7 @@ fn AppShell() -> Element {
             };
 
             rsx! {
-                div { class: "shell",
+                div { class: "app",
                     Rail {
                         sections: data.sections.clone(),
                         bots: data.bots.clone(),
@@ -642,7 +647,12 @@ fn AppShell() -> Element {
             }
         }
         Some(Err(err)) => rsx! {
-            div { class: "roster", style: "padding: 1rem; color: var(--danger);", "Roster failed to load: {err}" }
+            div { class: "app",
+                div { class: "rail",
+                    div { class: "roster", style: "padding: 1rem; color: var(--danger);", "Roster failed to load: {err}" }
+                }
+                div { class: "pane pane-empty", "Cannot open Bullpen until the roster loads." }
+            }
         },
     };
 

@@ -46,8 +46,8 @@ use crate::window_state::{self, Rect, WindowState};
 /// desktop build that still is; see [`restore_or_center`]'s doc for how the
 /// physical-pixel half of this ticket (`window_state`) avoids ever
 /// converting between the two.
-const DEFAULT_WIDTH: f64 = 1280.0;
-const DEFAULT_HEIGHT: f64 = 860.0;
+const DEFAULT_WIDTH: f64 = 1200.0;
+const DEFAULT_HEIGHT: f64 = 800.0;
 
 /// How long a silent sign-in attempt gets before launch proceeds without it.
 /// Generous for a LAN/tailnet round trip, short enough that an unreachable
