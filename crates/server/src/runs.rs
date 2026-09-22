@@ -2598,6 +2598,11 @@ were doing unless he changed it."
                     }
                 }
 
+                if decision != Decision::Deny && call.name == "purchase" {
+                    let db = self.db();
+                    decision = crate::purchasing::before_ask_purchase(&db, bot_id, &call.arguments);
+                }
+
                 if decision != Decision::Deny && call.name == "propose_tool" {
                     decision = crate::bot_tools::before_ask_propose_tool(
                         &self.db_path(),

@@ -52,6 +52,7 @@ pub(crate) mod message_bot;
 mod note;
 mod project_remember;
 mod propose_tool;
+pub mod purchase;
 mod read_file;
 mod remember;
 mod remember_shared;
@@ -503,6 +504,10 @@ pub fn build(params: BuildParams) -> ToolBox {
             vec![]
         }
     };
+    let purchase_specs = {
+        let db = lock_db(&db);
+        crate::purchasing::purchase_specs_for_bot(&db, &bot_id)
+    };
     // F3: `always_on_set()` rides through any `only` narrowing whatever it
     // says (TS `app.ts:5783`) - a routine's phrasing turn narrowed to `[]`
     // must still be able to say something or ask Josh a question, not lose
@@ -519,6 +524,7 @@ pub fn build(params: BuildParams) -> ToolBox {
         .chain(bot_made_specs)
         .chain(connector_specs)
         .chain(repo_specs)
+        .chain(purchase_specs)
         .filter(|spec| perms.get(spec.name.as_str()).copied() != Some(Decision::Deny))
         .filter(|spec| match (&only, exact_only) {
             (None, _) => true,
@@ -574,6 +580,11 @@ pub fn build(params: BuildParams) -> ToolBox {
                 }
                 if name == "snap_desk" {
                     return snap_desk::run(&args, &capture_observation).await;
+                }
+                if name == "purchase" {
+                    let db_guard = lock_db(&db);
+                    let text = crate::purchasing::run_purchase_tool(&db_guard, &bot_id, &args);
+                    return ToolOutcome::new(text, None);
                 }
                 if name == "propose_tool" {
                     let text =

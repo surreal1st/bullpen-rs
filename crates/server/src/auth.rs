@@ -136,6 +136,7 @@ const OPEN_PATHS: &[&str] = &[
     // S7-03: OAuth redirect lands in a browser tab that may not carry the API
     // session; the authorization code is the credential for this one request.
     "/api/oauth/callback",
+    "/api/stripe/webhook",
 ];
 
 const OPEN_PREFIXES: &[&str] = &["/api/hooks/", "/api/invites/", "/api/share/"];

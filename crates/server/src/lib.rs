@@ -28,6 +28,7 @@ pub mod oauth;
 pub mod observations;
 pub mod permissions;
 pub mod prompt;
+pub mod purchasing;
 pub mod push;
 pub mod repo;
 mod rooms;
@@ -421,6 +422,9 @@ impl AppState {
         // builds an `AppState` in one place.
         if let Err(err) = desk::ensure_desk_tables(&db) {
             tracing::error!("failed to ensure desk_windows table exists: {err}");
+        }
+        if let Err(err) = purchasing::ensure_purchasing_schema(&db) {
+            tracing::error!("failed to ensure purchasing schema: {err}");
         }
         match store::reap_orphaned_jobs(&db) {
             Ok(0) => {}

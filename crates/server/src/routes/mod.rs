@@ -25,6 +25,7 @@ mod memory;
 mod messages;
 mod permissions;
 mod previews;
+mod purchasing;
 mod push;
 mod questions;
 mod repo;
@@ -80,6 +81,7 @@ pub fn router() -> Router<AppState> {
         .merge(marketplace::router())
         .merge(permissions::router())
         .merge(previews::router())
+        .merge(purchasing::router())
         .merge(push::router())
         .merge(repo::router())
         .merge(questions::router())
