@@ -19,10 +19,8 @@ use crate::message_time::{day_key, format_day, format_time, now_iso, parse_epoch
 use crate::model_chip::ModelChip;
 use crate::permissions_editor::PermissionsModal;
 use crate::questions::Questions;
-use crate::routines_editor::RoutinesModal;
 use crate::threads::Threads;
 use crate::types::{AwayPayload, Bot, Message, Role, Section};
-use crate::vm_card::VmCard;
 use crate::voice_editor::VoiceEditor;
 use crate::working_bar::WorkingBar;
 use dioxus::prelude::*;
@@ -104,6 +102,9 @@ pub fn ChatPane(
     #[props(default)] away: Option<AwayPayload>,
     #[props(default)] on_dismiss_away: EventHandler<()>,
     #[props(default)] on_open_bot_away: EventHandler<String>,
+    /// Full routines editor — modal lives in `app.rs` next to `BotPanel`.
+    #[props(default)]
+    on_open_routines: EventHandler<()>,
 ) -> Element {
     let mut messages = use_signal(Vec::<Message>::new);
     let mut streaming = use_signal(|| None::<String>);
@@ -311,7 +312,6 @@ pub fn ChatPane(
     let mut mem_open = use_signal(|| false);
     // S5-05: the routines pane, same placement again - see
     // `routines_editor.rs`'s `RoutinesModal`.
-    let mut routines_open = use_signal(|| false);
     // S5b-07: the goals pane, same placement again - see
     // `goals_editor.rs`'s `GoalsModal`.
     let mut goals_open = use_signal(|| false);
@@ -660,7 +660,7 @@ pub fn ChatPane(
                                 }
                                 button {
                                     class: "pane-perms-btn",
-                                    onclick: move |_| routines_open.set(true),
+                                    onclick: move |_| on_open_routines.call(()),
                                     "Routines"
                                 }
                                 button {
@@ -781,7 +781,6 @@ pub fn ChatPane(
                 // `None` there, see this component's own doc - stays
                 // narrowed to the non-room path exactly like the
                 // permissions grid and `ModelChip` just above it.
-                VmCard { bot_id: bot_id.clone(), bot_name: bot_name.clone() }
             }
             if *edit_open.read() {
                 if let Some(current) = local_bot.read().clone() {
@@ -816,13 +815,6 @@ pub fn ChatPane(
                     bot_id: bot_id.clone(),
                     bot_name: bot_name.clone(),
                     on_close: move |_| mem_open.set(false),
-                }
-            }
-            if *routines_open.read() {
-                RoutinesModal {
-                    bot_id: bot_id.clone(),
-                    bot_name: bot_name.clone(),
-                    on_close: move |_| routines_open.set(false),
                 }
             }
             if *goals_open.read() {

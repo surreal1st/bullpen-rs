@@ -5,6 +5,7 @@ mod approvals;
 mod attention;
 mod avatar;
 mod away_card;
+mod bot_panel;
 mod bubble;
 mod composer;
 mod connectors_card;
