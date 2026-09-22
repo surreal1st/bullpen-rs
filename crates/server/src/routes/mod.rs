@@ -37,6 +37,7 @@ mod skills;
 mod slack;
 mod spend;
 mod teams;
+mod transcribe;
 mod users;
 mod vms;
 mod workers;
@@ -93,6 +94,7 @@ pub fn router() -> Router<AppState> {
         .merge(memory::router())
         .merge(slack::router())
         .merge(teams::router())
+        .merge(transcribe::router())
         .merge(users::router())
         .merge(vms::router())
         .merge(workers::router());
