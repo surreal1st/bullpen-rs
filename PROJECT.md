@@ -303,27 +303,36 @@ These are not style preferences. Each one is a scar.
 
 ---
 
-## 8. What is NOT built
+## 8. What is left (2026-09-22)
 
-Honest inventory against the TS product, which has **229 routes, 63 bot tools
-and 52 tables**. bullpen-rs has 63 routes and 23 tools. The gap is real and
-mostly deliberate — slices land vertically, in order.
+Measured against TS **bullpen-night** (229 route registrations, 63 bot tools).
+**bullpen-rs @ `main`** exposes ~**150** HTTP path patterns and **~60+** dispatched
+tools (see `.scratch/bullpen-rs/INVENTORY.md` and
+`reviews/PARITY-2026-09-22-RESULT.md`). S7–S12 server slices are largely on
+meridian **:4380**; the finish line is **cutover + waivers**, not greenfield
+porting.
 
-**Built:** tracer bullet, rooms, model controls, memory, auto review, routines
-and goals, sandbox/desk/VMs/workers/egress, computer use (in progress),
-desktop client.
+**Shipped on :4380 (internal Grok Bot baseline):** chat/runs/rooms, model
+controls, memory + shared/projects, approvals/questions, routines/goals/hooks,
+connectors + OAuth, jobs/repo/spawn_helper, skills/marketplace/import,
+users/invites, Slack (not Telegram), push register API, attachments/library,
+media tools (deliver, draw, transcribe, voice/video review), purchasing/Stripe
+webhook, databases/workers, desk/VM/computer use, desktop + web client.
 
-**Not started:**
+**Cutover (S14 — Josh):** production DB copy, rendered smoke, nginx flip
+`:4360` → `:4380`, 24h beside TS, then TS decommission per `docs/s14-cutover.md`.
+Automated: `scripts/cutover-check.sh`.
 
-| Slice | What |
-|---|---|
-| S7 | Connectors — MCP gateway + OAuth 2.1, tokens never on the VM |
-| S9 | Jobs, repo tools + PR, spawn_helper, second Docker host |
-| S10 | Skills, marketplace, templates, duplicate bot, `hire_bot` |
-| S11 | People and channels — users/roles/invites, Telegram, Teams, push |
-| S12 | Media and money — deliverables, imagegen, transcribe, voice, video, purchasing, databases |
-| S13 | Mobile (iOS via Dioxus, with push). Desktop is done |
-| S14 | Cutover — parity checklist signed, `rainmade.io/bullpen/` repointed |
+**Parity waivers (approved for internal finish line):** Telegram notify, Teams
+stub, native iOS build/sign (API present).
+
+**Known HTTP gaps (mostly post-cutover OK unless Josh promotes):** vault/history
+REST, run rewind/undo/snapshot, message reactions, global `/api/search`, demo/teach
+routes, `GET /api/bots` (roster covers UI), Bullpen-as-MCP HTTP `/mcp`, report
+cards, a few TS admin/diagnostic paths. Details in the parity review.
+
+**Optional / polish:** S13 iOS ship, UI gaps vs TS CSS surface, SEC5-02 observation
+history if repro appears, F19b desktop client release compile in gate.
 
 ---
 
