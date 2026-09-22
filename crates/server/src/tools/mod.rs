@@ -30,6 +30,7 @@ mod connector_resources;
 mod create_room;
 mod deliver;
 mod draw_image;
+mod watch_video;
 // S8c-03: private `mod`, NOT `pub` like `browse`/`desk_shell` above - this
 // ticket's own bite/table tests all live inside `desk_act.rs`'s own
 // `#[cfg(test)]` module (same crate, no visibility gap), and its ONE
@@ -410,6 +411,8 @@ fn all_specs() -> Vec<ToolSpec> {
         snap_desk::spec(),
         draw_image::spec(),
         deliver::spec(),
+        watch_video::watch_video_spec(),
+        watch_video::review_media_spec(),
         // S10-01: a READ of instructions Josh already enabled for this bot -
         // see `use_skill`'s own module doc for why it grants nothing.
         use_skill::spec(),
@@ -828,6 +831,36 @@ pub fn build(params: BuildParams) -> ToolBox {
                         };
                         let text = deliver::run(&db, data_dir.as_str(), &bot_id, &args, &env).await;
                         (text, None)
+                    }
+                    "watch_video" | "review_media" => {
+                        let env = watch_video::VideoRunEnv {
+                            vm_docker,
+                            vm_config,
+                            vm_enabled,
+                            desktop_states,
+                            observations,
+                        };
+                        if name == "watch_video" {
+                            watch_video::run_watch_video(
+                                &db,
+                                data_dir.as_str(),
+                                &port,
+                                &bot_id,
+                                &args,
+                                &env,
+                            )
+                            .await
+                        } else {
+                            watch_video::run_review_media(
+                                &db,
+                                data_dir.as_str(),
+                                &port,
+                                &bot_id,
+                                &args,
+                                &env,
+                            )
+                            .await
+                        }
                     }
                     other => (format!("Unknown tool: {other}"), None),
                 };

@@ -45,6 +45,7 @@ pub mod slack;
 pub mod spend;
 pub mod teams;
 pub mod transcribe;
+pub mod video;
 // `pub` rather than crate-private so `tests/browse_tools.rs` can reach
 // `server::tools::browse`: Rust visibility is not transitive around a
 // private ancestor, so no amount of `pub` on the items mattered while this
