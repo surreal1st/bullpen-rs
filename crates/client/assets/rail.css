@@ -72,9 +72,12 @@
 }
 
 html,
-body {
+body,
+#root {
   height: 100%;
   margin: 0;
+  /* The shell is a fixed viewport with its own scroll regions; the document
+     never scrolls (ported from bullpen-night styles.css). */
   overflow: hidden;
 }
 
@@ -88,6 +91,25 @@ body {
     system-ui,
     sans-serif;
   -webkit-font-smoothing: antialiased;
+}
+
+/* App shell — ported from bullpen-night shell.css `.app` (roster + pane). */
+.app,
+.shell {
+  display: grid;
+  grid-template-columns: var(--roster-w, 268px) minmax(0, 1fr);
+  grid-template-rows: 100dvh;
+  height: 100dvh;
+  max-width: none;
+  position: relative;
+}
+
+.app > .rail,
+.shell > .rail {
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
 }
 
 .roster {

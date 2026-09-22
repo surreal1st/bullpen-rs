@@ -432,18 +432,7 @@
 }
 
 /* ---------- shell glue (not a port - see module doc) ---------- */
-
-.shell {
-  display: flex;
-  height: 100dvh;
-  min-height: 0;
-  overflow: hidden;
-}
-
-.rail {
-  width: 280px;
-  flex: none;
-}
+/* Outer `.app` / `.shell` grid lives in rail.css (loads first on desktop). */
 
 .pane {
   flex: 1;
