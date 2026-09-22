@@ -1,6 +1,7 @@
 //! SQLite schema and queries. Same file format as the TS Bullpen's `bullpen.db`:
 //! migrations 1..16 are equivalent, every self-creating table/column is here.
 
+pub mod attachments;
 pub mod attention;
 pub mod auth;
 pub mod auto_review;
@@ -27,6 +28,11 @@ pub mod slack;
 pub mod users;
 pub mod vms;
 
+pub use attachments::{
+    Attachment, LibraryItem, LibraryQuery, MAX_ATTACHMENT_BYTES, StoreAttachmentError,
+    StoreAttachmentInput, attachment_exists, delete_attachment, ensure_library_tables,
+    get_attachment, list_library, read_attachment, store_attachment,
+};
 pub use auth::{
     CreateSessionOpts, PasswordRecord, create_session, create_session_with, destroy_session,
     is_configured, password_record, session_user_id, session_valid, set_password, verify_password,
@@ -223,6 +229,7 @@ impl Db {
         bot_tools::ensure_bot_tool_tables(&db)?;
         jobs::ensure_job_tables(&db)?;
         users::ensure_user_tables(&db)?;
+        attachments::ensure_library_tables(&db)?;
         share::ensure_share_tokens_table(&db)?;
         push::ensure_push_table(&db)?;
         away::ensure_away_tables(&db)?;

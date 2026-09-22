@@ -741,7 +741,7 @@ impl RunManager {
         self.db_path.lock().expect("db_path mutex poisoned").clone()
     }
 
-    fn data_dir(&self) -> String {
+    pub fn data_dir(&self) -> String {
         self.data_dir
             .lock()
             .expect("data_dir mutex poisoned")

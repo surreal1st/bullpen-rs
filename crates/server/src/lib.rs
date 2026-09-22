@@ -636,6 +636,11 @@ impl AppState {
         self.runs.set_w5_paths(db_path, data_dir);
     }
 
+    /// On-disk attachment bytes live under `{data_dir}/attachments/`.
+    pub fn data_dir(&self) -> String {
+        self.runs.data_dir()
+    }
+
     /// S5c-03: registers what `routes/slack.rs`'s DM/mention branch should
     /// post back to Slack once `run_id` settles. See the `add_on_run_done`
     /// hook above (in `build`) for why this is called immediately after
