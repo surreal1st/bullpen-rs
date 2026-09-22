@@ -1,10 +1,10 @@
 # CI signal on every push/PR to main. Authoritative gate for ship remains
 # workstation Git Bash: ./scripts/gate.sh (zigbuild release path + dx client policy).
 #
-# Clippy/test omit --all-features: desktop+mobile enable dioxus GTK/WebKit (glib-sys)
-# and need a full Linux GUI dev stack ubuntu-latest does not install by default.
-# gate.sh --all-features on the workstation covers those cfgs; wasm32 client check
-# below uses default web features only (same as gate.sh).
+# Native-host client is excluded from clippy/test: even default `web` pulls wry/wayland
+# on linux-gnu and needs a GUI dev stack ubuntu-latest does not ship. Client coverage
+# here is wasm32-only (default web features), matching gate.sh's wasm check; gate.sh
+# on Git Bash still runs `--all-features` clippy/test for desktop/mobile on the workstation.
 name: gate
 
 on:
@@ -30,20 +30,22 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
 
+      - name: Install wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+
       - name: cargo clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: |
+          cargo clippy --all-targets --exclude client -- -D warnings
+          cargo clippy -p client --target wasm32-unknown-unknown --all-targets -- -D warnings
 
       - name: cargo test
-        run: cargo test --no-fail-fast
+        run: |
+          cargo test --no-fail-fast --exclude client
+          cargo test -p client --target wasm32-unknown-unknown --no-fail-fast
 
       - name: release build (server)
         run: cargo build --release -p server
 
-      - name: wasm32 client check
-        run: |
-          rustup target add wasm32-unknown-unknown
-          cargo check -p client --target wasm32-unknown-unknown
-
       - name: Note authoritative gate
         run: |
-          echo "Ubuntu CI passed (no --all-features; desktop/mobile GTK). Ship still requires Git Bash ./scripts/gate.sh on the workstation (musl zigbuild, --all-features, dx web release)."
+          echo "Ubuntu CI passed (server crates + wasm32 client; no native-host client GTK/wayland). Ship still requires Git Bash ./scripts/gate.sh (musl zigbuild, --all-features, dx web release)."
