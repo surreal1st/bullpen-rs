@@ -15,6 +15,7 @@ mod bot_tools;
 mod bots;
 mod connectors;
 mod conversations;
+mod databases;
 mod egress;
 mod events;
 mod goals;
@@ -74,6 +75,7 @@ pub fn router() -> Router<AppState> {
         .merge(bots::router())
         .merge(connectors::router())
         .merge(conversations::router())
+        .merge(databases::router())
         .merge(egress::router())
         .merge(goals::router())
         .merge(hooks::router())

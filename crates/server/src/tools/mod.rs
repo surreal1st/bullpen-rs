@@ -53,6 +53,7 @@ mod note;
 mod project_remember;
 mod propose_tool;
 pub mod purchase;
+pub mod query_db;
 mod read_file;
 mod remember;
 mod remember_shared;
@@ -508,6 +509,10 @@ pub fn build(params: BuildParams) -> ToolBox {
         let db = lock_db(&db);
         crate::purchasing::purchase_specs_for_bot(&db, &bot_id)
     };
+    let database_specs = {
+        let db = lock_db(&db);
+        crate::databases::database_tool_specs(&db)
+    };
     // F3: `always_on_set()` rides through any `only` narrowing whatever it
     // says (TS `app.ts:5783`) - a routine's phrasing turn narrowed to `[]`
     // must still be able to say something or ask Josh a question, not lose
@@ -525,6 +530,7 @@ pub fn build(params: BuildParams) -> ToolBox {
         .chain(connector_specs)
         .chain(repo_specs)
         .chain(purchase_specs)
+        .chain(database_specs)
         .filter(|spec| perms.get(spec.name.as_str()).copied() != Some(Decision::Deny))
         .filter(|spec| match (&only, exact_only) {
             (None, _) => true,
@@ -585,6 +591,14 @@ pub fn build(params: BuildParams) -> ToolBox {
                     let db_guard = lock_db(&db);
                     let text = crate::purchasing::run_purchase_tool(&db_guard, &bot_id, &args);
                     return ToolOutcome::new(text, None);
+                }
+                if name == "query_db" {
+                    let parsed: Value =
+                        serde_json::from_str(&args).unwrap_or_else(|_| serde_json::json!({}));
+                    let result =
+                        crate::databases::run_database_tool(Arc::clone(&db), "query_db", &parsed)
+                            .await;
+                    return ToolOutcome::new(result.text, None);
                 }
                 if name == "propose_tool" {
                     let text =

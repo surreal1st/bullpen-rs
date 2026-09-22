@@ -78,6 +78,8 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # introduced a THIRD tungstenite version rather than reusing one already
 # resolved.
 tokio-tungstenite = "0.28"
+# S12-08: read-only `query_db` against postgres targets (DSN in settings).
+tokio-postgres = "0.7"
 
 # Tests and dev builds run UNOPTIMISED, and scrypt at N=2^15 costs seconds
 # per hash there instead of the ~100ms it costs in release. Measured: one

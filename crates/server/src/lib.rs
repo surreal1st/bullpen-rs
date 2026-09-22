@@ -6,6 +6,7 @@ mod auth;
 pub mod away;
 pub mod catalogue;
 pub mod changes;
+pub mod databases;
 pub mod delegate;
 pub mod deliverables;
 pub mod desk;

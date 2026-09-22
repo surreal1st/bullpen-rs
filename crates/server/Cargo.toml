@@ -62,6 +62,8 @@ tokio-tungstenite = { workspace = true }
 
 # S8d-02: bounded full PNG validation for VM observations.
 png = "0.17.16"
+# S12-08: postgres database targets for `query_db`.
+tokio-postgres = { workspace = true }
 
 [dev-dependencies]
 # S0-04: driving `build_app` in tests via `tower::ServiceExt::oneshot`, and
