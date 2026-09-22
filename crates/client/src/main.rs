@@ -12,6 +12,9 @@ mod connectors_card;
 // the default `web` feature in practice - see that module's doc).
 #[cfg(feature = "desktop")]
 mod desktop;
+#[cfg(feature = "mobile")]
+mod mobile;
+mod push_register;
 mod edit_bot;
 mod events;
 mod goals_editor;
@@ -73,7 +76,12 @@ fn main() {
     desktop::launch(App);
 }
 
-#[cfg(not(feature = "desktop"))]
+#[cfg(all(feature = "mobile", not(feature = "desktop")))]
+fn main() {
+    mobile::launch(App);
+}
+
+#[cfg(all(not(feature = "desktop"), not(feature = "mobile")))]
 fn main() {
     dioxus::launch(App);
 }

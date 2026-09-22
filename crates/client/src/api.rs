@@ -795,6 +795,26 @@ pub async fn fetch_library(q: &str, bot: &str, kind: &str) -> Result<Vec<Library
         .map_err(|e| e.to_string())
 }
 
+/// `POST /api/push/devices` — register APNs token (S13-02).
+pub async fn register_push_device(token: &str, environment: &str) -> Result<(), String> {
+    #[derive(Serialize)]
+    struct Body<'a> {
+        token: &'a str,
+        environment: &'a str,
+    }
+    let resp = Request::post("/api/push/devices")
+        .json(&Body { token, environment })
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if resp.ok() {
+        Ok(())
+    } else {
+        Err(format!("/api/push/devices -> {}", resp.status()))
+    }
+}
+
 /// `DELETE /api/attachments/:id`
 pub async fn delete_attachment(id: &str) -> Result<(), String> {
     let url = format!("/api/attachments/{id}");

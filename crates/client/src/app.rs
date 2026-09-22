@@ -84,6 +84,11 @@ fn invited_token_from_hash() -> Option<String> {
     Some(token.to_string())
 }
 
+fn open_app(gate: &mut Signal<GateState>) {
+    gate.set(GateState::Open);
+    crate::push_register::after_sign_in();
+}
+
 fn clear_invite_hash() {
     if let Some(window) = web_sys::window() {
         let path = window
@@ -133,7 +138,7 @@ pub fn App() -> Element {
 
             match api::auth_status().await {
                 Ok(status) if !status.configured => gate.set(GateState::Setup),
-                Ok(status) if status.signed_in => gate.set(GateState::Open),
+                Ok(status) if status.signed_in => open_app(&mut gate),
                 Ok(_) => gate.set(GateState::Locked(None)),
                 Err(_) => gate.set(GateState::Locked(Some("Cannot reach Bullpen.".to_string()))),
             }
@@ -155,7 +160,7 @@ pub fn App() -> Element {
             match result {
                 Ok(()) => {
                     password.set(String::new());
-                    gate.set(GateState::Open);
+                    open_app(&mut gate);
                 }
                 Err(err) => gate.set(GateState::Locked(Some(err))),
             }
@@ -188,7 +193,7 @@ pub fn App() -> Element {
                     password.set(String::new());
                     invite_name.set(String::new());
                     clear_invite_hash();
-                    gate.set(GateState::Open);
+                    open_app(&mut gate);
                 }
                 Err(err) => {
                     gate.set(GateState::Invited {
