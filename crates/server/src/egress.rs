@@ -169,7 +169,7 @@ fn is_private_ipv6(v6: Ipv6Addr) -> bool {
 /// a bare hostname (`fcc.gov`, `fdns.example.com`) falls through to `false`
 /// and is judged by `host_allowed` instead, never by a prefix guess on
 /// unvalidated text.
-fn is_private_address(ip: &str) -> bool {
+pub fn is_private_address(ip: &str) -> bool {
     let raw = ip.trim();
     let raw = raw.strip_prefix('[').unwrap_or(raw);
     let raw = raw.strip_suffix(']').unwrap_or(raw);

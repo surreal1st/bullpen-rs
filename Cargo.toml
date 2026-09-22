@@ -42,6 +42,7 @@ hex = "0.4"
 # so this is a real new dependency, added and flagged per that ticket's own
 # "tell me if you need one" rule.
 regex = "1"
+url = "2"
 # S5c-01: AES-256-GCM encryption for settings at rest, TS-compatible
 aes-gcm = "0.10"
 base64 = "0.22"

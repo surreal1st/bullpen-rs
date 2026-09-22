@@ -26,6 +26,7 @@ rusqlite = { workspace = true }
 # `CreditsPort` trait object needs `async-trait` for the same reason
 # `model::Catalog` does.
 reqwest = { workspace = true }
+url = { workspace = true }
 jsonwebtoken = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }

@@ -21,6 +21,7 @@ pub mod import_open;
 pub mod jev;
 pub mod job_runner;
 pub mod judge;
+pub mod link_preview;
 pub mod marketplace;
 pub mod mcp;
 pub mod oauth;
@@ -46,6 +47,7 @@ pub mod spend;
 pub mod teams;
 pub mod transcribe;
 pub mod video;
+pub mod web_fetch;
 // `pub` rather than crate-private so `tests/browse_tools.rs` can reach
 // `server::tools::browse`: Rust visibility is not transitive around a
 // private ancestor, so no amount of `pub` on the items mattered while this
@@ -633,6 +635,10 @@ impl AppState {
     // and is the only caller.
     pub fn db_handle(&self) -> Arc<Mutex<Db>> {
         Arc::clone(&self.db)
+    }
+
+    pub(crate) fn mcp_resolver_handle(&self) -> Arc<dyn egress::Resolver> {
+        Arc::clone(&self.mcp_resolver)
     }
 
     /// S10-09: point W5 at the same on-disk db and data directory the server uses.
