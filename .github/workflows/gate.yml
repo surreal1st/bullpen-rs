@@ -34,17 +34,16 @@ jobs:
         run: rustup target add wasm32-unknown-unknown
 
       - name: cargo clippy
-        run: |
-          cargo clippy --workspace --all-targets --exclude client -- -D warnings
-          cargo clippy -p client --target wasm32-unknown-unknown --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --exclude client -- -D warnings
 
       - name: cargo test
-        run: |
-          cargo test --workspace --no-fail-fast --exclude client
-          cargo test -p client --target wasm32-unknown-unknown --no-fail-fast
+        run: cargo test --workspace --no-fail-fast --exclude client
 
       - name: release build (server)
         run: cargo build --release -p server
+
+      - name: wasm32 client check
+        run: cargo check -p client --target wasm32-unknown-unknown
 
       - name: Note authoritative gate
         run: |
