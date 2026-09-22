@@ -73,11 +73,13 @@
 
 html,
 body,
-#root {
+#root,
+#main {
   height: 100%;
   margin: 0;
   /* The shell is a fixed viewport with its own scroll regions; the document
-     never scrolls (ported from bullpen-night styles.css). */
+     never scrolls (ported from bullpen-night styles.css). #main is Dioxus
+     desktop's mount node (prod.index.html); web uses #root. */
   overflow: hidden;
 }
 
