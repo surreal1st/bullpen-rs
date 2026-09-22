@@ -29,6 +29,7 @@ pub mod browse;
 mod connector_resources;
 mod create_room;
 mod deliver;
+mod draw_image;
 // S8c-03: private `mod`, NOT `pub` like `browse`/`desk_shell` above - this
 // ticket's own bite/table tests all live inside `desk_act.rs`'s own
 // `#[cfg(test)]` module (same crate, no visibility gap), and its ONE
@@ -407,6 +408,7 @@ fn all_specs() -> Vec<ToolSpec> {
         // module doc.
         desk_act::desk_act_spec(),
         snap_desk::spec(),
+        draw_image::spec(),
         deliver::spec(),
         // S10-01: a READ of instructions Josh already enabled for this bot -
         // see `use_skill`'s own module doc for why it grants nothing.
@@ -809,6 +811,11 @@ pub fn build(params: BuildParams) -> ToolBox {
                             args,
                         )
                         .await;
+                        (text, None)
+                    }
+                    "draw_image" => {
+                        let text =
+                            draw_image::run(&db, data_dir.as_str(), &bot_id, &args, None).await;
                         (text, None)
                     }
                     "deliver" => {

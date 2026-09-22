@@ -16,6 +16,7 @@ mod export_scrub;
 pub mod goals;
 pub mod helpers;
 pub mod hooks;
+pub mod imagegen;
 pub mod import_open;
 pub mod jev;
 pub mod job_runner;
