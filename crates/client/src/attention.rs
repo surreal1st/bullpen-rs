@@ -12,12 +12,15 @@ pub fn tab_title(count: i64, base: &str) -> String {
     }
 }
 
-/// Sets `document.title` when a DOM is available (web and desktop webview).
+/// Sets the visible title (browser tab or native window).
 pub fn apply_document_title(count: i64) {
     let title = tab_title(count, "Bullpen");
+    #[cfg(target_arch = "wasm32")]
     if let Some(document) = web_sys::window().and_then(|w| w.document()) {
         document.set_title(&title);
     }
+    #[cfg(all(not(target_arch = "wasm32"), feature = "desktop"))]
+    crate::desktop::set_window_title(&title);
 }
 
 #[cfg(test)]

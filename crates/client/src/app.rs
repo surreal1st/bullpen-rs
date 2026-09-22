@@ -70,18 +70,23 @@ enum GateState {
 }
 
 fn invited_token_from_hash() -> Option<String> {
-    let window = web_sys::window()?;
-    let hash = window.location().hash().ok()?;
-    let hash = hash.strip_prefix('#')?;
-    let token = hash.strip_prefix("invite=")?;
-    if token.is_empty()
-        || !token
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    #[cfg(target_arch = "wasm32")]
     {
-        return None;
+        let window = web_sys::window()?;
+        let hash = window.location().hash().ok()?;
+        let hash = hash.strip_prefix('#')?;
+        let token = hash.strip_prefix("invite=")?;
+        if token.is_empty()
+            || !token
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            return None;
+        }
+        return Some(token.to_string());
     }
-    Some(token.to_string())
+    #[cfg(not(target_arch = "wasm32"))]
+    None
 }
 
 fn open_app(gate: &mut Signal<GateState>) {
@@ -90,6 +95,7 @@ fn open_app(gate: &mut Signal<GateState>) {
 }
 
 fn clear_invite_hash() {
+    #[cfg(target_arch = "wasm32")]
     if let Some(window) = web_sys::window() {
         let path = window
             .location()
