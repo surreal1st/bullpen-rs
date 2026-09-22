@@ -25,4 +25,10 @@ elif [[ "${push_code}" != "401" ]]; then
   exit 1
 fi
 
-echo "OK: health, version, auth gate, push route reachable"
+lib_code="$(curl -s -o /dev/null -w '%{http_code}' "${BASE}/api/library")"
+if [[ "${lib_code}" == "200" ]]; then
+  echo "FAIL: /api/library returned 200 without auth (expected 401/503)" >&2
+  exit 1
+fi
+
+echo "OK: health, version, auth gate, push route reachable, library gated"

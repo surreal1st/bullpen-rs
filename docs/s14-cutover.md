@@ -16,18 +16,30 @@ Run from bullpen-rs root against **:4380** (never :4360):
 
 ```bash
 export BULLPEN_URL="${BULLPEN_URL:-http://meridian:4380}"
-scripts/cutover-check.sh
+scripts/cutover-check.sh          # unsigned gates
+scripts/cutover-smoke.sh          # + signed-in API if password env set
 ```
 
-Script verifies: `/api/health`, `/api/version`, auth gate on `/api/roster`, `/api/push` route + auth behavior.
+On **meridian** (refresh rust DB from live TS file — read-only on live side):
 
-Record output in `.scratch/bullpen-rs/reviews/S14-cutover-check-RESULT.md`.
+```bash
+sudo scripts/cutover-db-copy.sh                    # dry-run + hashes
+CUTOVER_DB_COPY=1 sudo scripts/cutover-db-copy.sh  # apply; stops bullpen-rs only
+```
+
+| Script | Result doc |
+| --- | --- |
+| `cutover-check.sh` | `.scratch/bullpen-rs/reviews/S14-cutover-check-RESULT.md` |
+| `cutover-smoke.sh` | `.scratch/bullpen-rs/reviews/S14-cutover-smoke-RESULT.md` |
+| `cutover-db-copy.sh` | dry-run output in smoke RESULT; env audit in `S14-env-verify-RESULT.md` |
+
+`cutover-check` verifies: `/api/health`, `/api/version`, auth gates on `/api/roster` and `/api/library`, `/api/push` route behavior.
 
 ## Manual / Josh-only
 
 | Step | Owner | Notes |
 | --- | --- | --- |
-| Copy production `bullpen.db` snapshot to rust data dir | Josh | Same schema; rust migrations 1..16+ aligned |
+| Copy production `bullpen.db` snapshot to rust data dir | Josh | `sudo scripts/cutover-db-copy.sh` (dry-run); `CUTOVER_DB_COPY=1` to apply — stops **bullpen-rs** only |
 | Smoke: sign-in, send message, approval, spend read | Josh | Rendered proof, not log-only |
 | iOS push on device | Josh | Out of internal finish line; optional |
 | **Reverse proxy** flip `rainmade.io/bullpen/` upstream `:4360` → `:4380` | Josh | Snippet below — **check each line before apply** |
