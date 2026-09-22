@@ -73,6 +73,13 @@ const TRAY_SHOW_HIDE_ID: &str = "bullpen-tray-show-hide";
 /// `unsafe impl Sync`), which is what makes storing it in a `static` sound.
 static WINDOW: OnceLock<Arc<Window>> = OnceLock::new();
 
+/// Native window title (attention badge). Web uses `document.title` instead.
+pub fn set_window_title(title: &str) {
+    if let Some(window) = WINDOW.get() {
+        window.set_title(title);
+    }
+}
+
 /// Launch `app` in a desktop window titled "Bullpen". Mirrors
 /// `dioxus::launch(app)` (the web entry point `main.rs` uses when the
 /// `desktop` feature is off) but through `LaunchBuilder::desktop()` so the

@@ -745,10 +745,21 @@ fn PeopleSection() -> Element {
                     spawn(async move {
                         match api::mint_user_invite().await {
                             Ok(body) => {
-                                let link = web_sys::window()
-                                    .and_then(|w| w.location().origin().ok())
-                                    .map(|origin| format!("{origin}/#invite={}", body.invite.token))
-                                    .unwrap_or_else(|| body.url);
+                                let link = {
+                                    #[cfg(target_arch = "wasm32")]
+                                    {
+                                        web_sys::window()
+                                            .and_then(|w| w.location().origin().ok())
+                                            .map(|origin| {
+                                                format!("{origin}/#invite={}", body.invite.token)
+                                            })
+                                            .unwrap_or_else(|| body.url)
+                                    }
+                                    #[cfg(not(target_arch = "wasm32"))]
+                                    {
+                                        body.url
+                                    }
+                                };
                                 minted.set(Some(link));
                                 refresh.set(refresh() + 1);
                             }
@@ -768,8 +779,13 @@ fn PeopleSection() -> Element {
                     onclick: move |_| {
                         let text = link.clone();
                         spawn(async move {
+                            #[cfg(target_arch = "wasm32")]
                             if let Some(window) = web_sys::window() {
                                 let _ = window.navigator().clipboard().write_text(&text);
+                            }
+                            #[cfg(not(target_arch = "wasm32"))]
+                            if let Ok(mut clip) = arboard::Clipboard::new() {
+                                let _ = clip.set_text(&text);
                             }
                         });
                     },
