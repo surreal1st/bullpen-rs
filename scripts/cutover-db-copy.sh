@@ -65,7 +65,7 @@ log "Handoff §8 / docs/s14-cutover: verify BOTH hashes after any cross-machine 
 
 if [[ "${APPLY}" != "1" ]]; then
   log ""
-  log "DRY-RUN complete. To apply on meridian: CUTOVER_DB_COPY=1 sudo bash scripts/cutover-db-copy.sh"
+  log "DRY-RUN complete. To apply on meridian: sudo env CUTOVER_DB_COPY=1 bash scripts/cutover-db-copy.sh"
   exit 0
 fi
 

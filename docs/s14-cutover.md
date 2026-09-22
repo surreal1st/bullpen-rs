@@ -24,7 +24,7 @@ On **meridian** (refresh rust DB from live TS file — read-only on live side):
 
 ```bash
 sudo scripts/cutover-db-copy.sh                    # dry-run + hashes
-CUTOVER_DB_COPY=1 sudo scripts/cutover-db-copy.sh  # apply; stops bullpen-rs only
+sudo env CUTOVER_DB_COPY=1 scripts/cutover-db-copy.sh  # apply; stops bullpen-rs only
 ```
 
 | Script | Result doc |
