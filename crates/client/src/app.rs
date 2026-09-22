@@ -22,11 +22,13 @@
 
 use crate::api;
 use crate::attention;
+use crate::bot_panel::BotPanel;
 use crate::events::{ChangeKind, subscribe_events};
 use crate::library::LibraryModal;
 use crate::new_bot::NewBotModal;
 use crate::rail::Rail;
 use crate::room_picker::{PickerMode, RoomPicker};
+use crate::routines_editor::RoutinesModal;
 use crate::settings::SettingsModal;
 use crate::thread::ChatPane;
 use crate::transport::Request;
@@ -330,6 +332,8 @@ fn AppShell() -> Element {
     // `settings.rs`'s own doc comment for what it renders.
     let mut settings_open = use_signal(|| false);
     let mut library_open = use_signal(|| false);
+    let mut routines_open = use_signal(|| false);
+    let mut routines_refresh = use_signal(|| 0u32);
     let mut is_owner = use_signal(|| true);
     // Bumped whenever a "roster" change lands while a ROOM is open, to
     // force that `ChatPane` to remount and re-fetch - ported from
@@ -423,6 +427,13 @@ fn AppShell() -> Element {
                     div { class: "roster", style: "padding: 1rem; color: var(--muted);", "Loading roster…" }
                 }
                 div { class: "pane pane-empty", "Loading…" }
+                BotPanel {
+                    bot_id: String::new(),
+                    bot_name: String::new(),
+                    visible: false,
+                    refresh_key: *routines_refresh.read(),
+                    on_manage_routines: move |_| routines_open.set(true),
+                }
             }
         },
         Some(Ok(data)) => {
@@ -456,6 +467,16 @@ fn AppShell() -> Element {
             let open_bot_from_away = move |id: String| {
                 selected.set(Some(Selection::Bot(id)));
             };
+            let panel_bot_id = selected_bot
+                .as_ref()
+                .map(|b| b.id.clone())
+                .unwrap_or_default();
+            let panel_bot_name = selected_bot
+                .as_ref()
+                .map(|b| b.name.clone())
+                .unwrap_or_default();
+            let panel_visible = selected_bot.is_some();
+            let open_routines = move |_| routines_open.set(true);
 
             rsx! {
                 div { class: "app",
@@ -530,8 +551,9 @@ fn AppShell() -> Element {
                             away: away_snapshot.clone(),
                             on_dismiss_away: dismiss_away,
                             on_open_bot_away: open_bot_from_away,
+                            on_open_routines: open_routines,
                         }
-                    } else if let Some(bot) = selected_bot {
+                    } else if let Some(ref bot) = selected_bot {
                         ChatPane {
                             key: "bot:{bot.id}",
                             bot_id: bot.id.clone(),
@@ -596,9 +618,29 @@ fn AppShell() -> Element {
                             away: away_snapshot,
                             on_dismiss_away: dismiss_away,
                             on_open_bot_away: open_bot_from_away,
+                            on_open_routines: open_routines,
                         }
                     } else {
                         div { class: "pane pane-empty", "Pick a bot to start talking." }
+                    }
+                    BotPanel {
+                        bot_id: panel_bot_id,
+                        bot_name: panel_bot_name,
+                        visible: panel_visible,
+                        refresh_key: *routines_refresh.read(),
+                        on_manage_routines: open_routines,
+                    }
+                }
+                if *routines_open.read() {
+                    if let Some(bot) = selected_bot.clone() {
+                        RoutinesModal {
+                            bot_id: bot.id.clone(),
+                            bot_name: bot.name.clone(),
+                            on_close: move |_| {
+                                routines_open.set(false);
+                                routines_refresh.with_mut(|k| *k += 1);
+                            },
+                        }
                     }
                 }
                 if let Some(mode) = picker.read().clone() {
@@ -652,6 +694,13 @@ fn AppShell() -> Element {
                     div { class: "roster", style: "padding: 1rem; color: var(--danger);", "Roster failed to load: {err}" }
                 }
                 div { class: "pane pane-empty", "Cannot open Bullpen until the roster loads." }
+                BotPanel {
+                    bot_id: String::new(),
+                    bot_name: String::new(),
+                    visible: false,
+                    refresh_key: *routines_refresh.read(),
+                    on_manage_routines: move |_| routines_open.set(true),
+                }
             }
         },
     };

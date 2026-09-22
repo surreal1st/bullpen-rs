@@ -26,10 +26,10 @@
 .thread {
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 1.25rem 1.15rem 0.5rem;
+  padding: 1rem 1.1rem 0.5rem;
   display: flex;
   flex-direction: column;
-  gap: 0.4rem;
+  gap: 0.32rem;
 }
 
 .empty {
@@ -48,11 +48,13 @@
 }
 
 .bubble {
-  max-width: min(86%, 76ch);
+  max-width: min(82%, 72ch);
   min-width: 0;
-  padding: 0.5rem 0.8rem;
+  padding: 0.45rem 0.72rem;
   border-radius: var(--radius);
   background: var(--panel);
+  font-size: 0.94rem;
+  line-height: 1.5;
 }
 
 .row-user .bubble {
@@ -779,16 +781,12 @@
    `.panel-body` padding, which nothing here provides. */
 
 .vm-sect {
-  padding: 0.85rem 1.15rem 0;
-  /* 🔴 The TS original lived in `BotPanel`, a ~300px sidebar, where a 16/10
-     box is about 190px tall and reads as a thumbnail. This client has no
-     such panel, so the card mounts in `ChatPane` - roughly 950px wide - and
-     the SAME aspect ratio made it ~600px tall: a bot with no computer got a
-     giant empty rectangle where its conversation should be, pushing the
-     thread off the bottom of the window. Caught by opening the screenshot,
-     2026-09-16; no test would have seen it. Capping the width is what keeps
-     it a thumbnail instead of a screen. */
-  max-width: 21rem;
+  padding: 0.85rem 1rem 0;
+}
+
+.bot-panel .vm-sect {
+  padding: 0.75rem 0.85rem 0;
+  max-width: none;
 }
 
 .vm-screen {
@@ -996,4 +994,136 @@
   .away-card {
     padding: 0.6rem 0.7rem;
   }
+}
+
+/* ---------- Grok-style right column (`bot_panel.rs`) ---------- */
+
+.bot-panel {
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--line);
+  background: rgb(12 14 18 / 92%);
+}
+
+.bot-panel-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.bot-panel-empty {
+  align-items: center;
+  justify-content: center;
+  padding: 1.25rem;
+}
+
+.bot-panel-empty-line {
+  margin: 0;
+  max-width: 14rem;
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.bot-panel-routines {
+  padding: 0.65rem 0.85rem 1rem;
+  border-top: 1px solid var(--line);
+}
+
+.bot-panel-routines-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.55rem;
+}
+
+.bot-panel-routines-title {
+  margin: 0;
+  font-size: 0.78rem;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.bot-panel-routines-manage {
+  width: 1.65rem;
+  height: 1.65rem;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  background: var(--raised);
+  color: var(--ink-dim);
+  font: inherit;
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.bot-panel-routines-manage:hover {
+  color: var(--ink);
+  border-color: var(--accent);
+}
+
+.bot-panel-routine-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.bot-panel-routine {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  padding: 0.45rem 0.55rem;
+}
+
+.bot-panel-routine.is-on {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--line));
+}
+
+.bot-panel-routine-top {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.82rem;
+}
+
+.bot-panel-routine-when {
+  margin: 0.2rem 0 0;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.bot-panel-routine-prompt {
+  margin: 0.25rem 0 0;
+  font-size: 0.74rem;
+  color: var(--ink-dim);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.bot-panel-routines-empty,
+.bot-panel-routines-loading {
+  margin: 0 0 0.5rem;
+  font-size: 0.78rem;
+}
+
+.bot-panel-routines-link {
+  margin-top: 0.55rem;
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  font-size: 0.76rem;
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: underline;
 }

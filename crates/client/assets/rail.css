@@ -95,11 +95,11 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* App shell — ported from bullpen-night shell.css `.app` (roster + pane). */
+/* App shell — Grok Bot: roster | chat | bot panel (VM + routines). */
 .app,
 .shell {
   display: grid;
-  grid-template-columns: var(--roster-w, 268px) minmax(0, 1fr);
+  grid-template-columns: var(--roster-w, 268px) minmax(0, 1fr) var(--bot-panel-w, 320px);
   grid-template-rows: 100dvh;
   height: 100dvh;
   max-width: none;
@@ -167,7 +167,7 @@ body {
   background: transparent;
   color: var(--ink);
   border-radius: var(--radius-sm);
-  padding: 0.5rem 0.7rem;
+  padding: 0.38rem 0.62rem;
   font: inherit;
   text-align: left;
   cursor: pointer;
